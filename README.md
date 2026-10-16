@@ -6,7 +6,7 @@ AlphaNIST (binary task reward, diverse start states). Train any way you like: RL
 success-guided sampling, imitation, scripted teachers plus distillation. Submit the resulting policy as
 an ONNX file.
 
-> Version: v0.1.2, the release Apex Subnet 1 runs. Submit with `apex submit policy.onnx -c <competition id>`.
+> Version: v0.1.3, the release Apex Subnet 1 runs. Submit with `apex submit policy.onnx -c <competition id>`.
 
 ## The task
 
@@ -21,8 +21,8 @@ an ONNX file.
   the gripper has let go and is clear of the part (fingertips above its top face), held for 5
   consecutive control steps.
 - **Score:** `raw_score` = fraction of the round's episodes that end assembled. Higher is better.
-  To take the top spot a submission must beat the current top score by 1%; until a round has a
-  top scorer, the bar is the spec's `baseline_raw_score` (0.36).
+  To take the top spot a submission must beat the current top score by 1%; in a round with no top
+  scorer, the first scored submission takes it. Rounds last 1 day.
   Each round has 640 episodes (40 shape × size × start-type strata × 16).
 - Each round redraws the physical conditions: clearance, friction, part mass, controller stiffness,
   sensor noise, hole placement, and start offsets. A policy has to be robust to all of them.

@@ -36,10 +36,10 @@ Pins: python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a
 |---|---|---|
 | process_type | cpu | MuJoCo on CPU fits the envelope |
 | kind | solo | assembly success is absolute |
-| round_length_in_days | 2 | the eval is cheap, and longer rounds give more submissions on an identical set given the noise in §4 |
+| round_length_in_days | 1 | platform norm; the incumbent is re-scored on every round, so cross-round noise mostly cancels |
 | submission_reveal_days | 4 | trained policies are real IP (production range 4–7) |
 | lower_is_better | false | |
-| baseline_raw_score / baseline_score | 0.36 / 0.0 | above the public baseline's 20-seed max (0.356), so resubmitting `baselines/baseline.onnx` cannot win round one. Do-nothing, random and constant policies measure 0–1.3% |
+| baseline_raw_score / baseline_score | 0.0 / 0.0 | platform convention for spec competitions: no floor; the first scored submission of a round with no top scorer takes it. Do-nothing, random and constant policies measure 0–1.3% |
 | resources | 2 CPU / 2Gi / 0 GPU | the referee uses 2 sim workers. Measured peak RSS: referee ≤ 561 MiB (sum of 3 processes, an upper bound), player 89 MiB |
 | evaluate.timeout_s / referee.timeout_s | 900 / 900 | see §4 |
 | deadline_ms | 500 per batched step | |

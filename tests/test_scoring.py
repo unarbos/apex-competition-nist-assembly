@@ -14,10 +14,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-# Honest-bad-answer ceiling for the test set. The spec's defaults.baseline_raw_score (0.36) is set
-# ABOVE the public baseline's 20-seed max (0.356), so resubmitting the baseline never wins round 1.
+# Honest-bad-answer ceiling for the test set: every degenerate policy must stay at or below it.
 FLOOR = 0.10
-SPEC_FLOOR = 0.36
 SMALL = '{"episodes_per_stratum": 2}'
 
 
@@ -48,12 +46,6 @@ def test_records_match_and_deterministic(tmp_path):
     rows = [json.loads(x) for x in (tmp_path / "a/history/episodes.jsonl").read_text().splitlines()][1:]
     assert len(rows) == r1["metadata"]["summary"][1]["value"]
     assert sum(x["success"] for x in rows) / len(rows) == r1["raw_scores"][0]
-
-
-def test_baseline_does_not_clear_round_one_bar(tmp_path):
-    # Full production size: at 2 episodes per stratum the score is too noisy to compare.
-    r = run("baselines/baseline.onnx", tmp_path, override='{"episodes_per_stratum": 16}')
-    assert r["raw_scores"][0] < SPEC_FLOOR
 
 
 def test_player_dying_mid_response_is_a_player_fault(tmp_path):
