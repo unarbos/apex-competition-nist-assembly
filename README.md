@@ -6,7 +6,7 @@ AlphaNIST (binary task reward, diverse start states). Train any way you like: RL
 success-guided sampling, imitation, scripted teachers plus distillation. Submit the resulting policy as
 an ONNX file.
 
-> Status: v0.1.1, pending Apex onboarding (not live yet).
+> Version: v0.1.2, the release Apex Subnet 1 runs. Submit with `apex submit policy.onnx -c <competition id>`.
 
 ## The task
 
@@ -17,9 +17,12 @@ an ONNX file.
   and far from the hole; grasped and resting on the hole rim; standing loose on the board; lying on
   its side on the board.
 - **Success (the only thing scored):** within 10 s the part is seated within 1 mm of the
-  fully-inserted pose, inside the hole, and the gripper has let go and is clear of the part (fingertips above its top
-  face), held for 5 consecutive control steps.
+  fully-inserted pose, inside the hole and upright (within 10° of vertical, either end down), and
+  the gripper has let go and is clear of the part (fingertips above its top face), held for 5
+  consecutive control steps.
 - **Score:** `raw_score` = fraction of the round's episodes that end assembled. Higher is better.
+  To take the top spot a submission must beat the current top score by 1%; until a round has a
+  top scorer, the bar is the spec's `baseline_raw_score` (0.36).
   Each round has 640 episodes (40 shape × size × start-type strata × 16).
 - Each round redraws the physical conditions: clearance, friction, part mass, controller stiffness,
   sensor noise, hole placement, and start offsets. A policy has to be robust to all of them.
@@ -46,7 +49,7 @@ python tools/local_run.py --policy baselines/baseline.onnx --seed 1
 python tools/read_records.py out/history            # per-task / per-start-type breakdown
 ```
 
-The reference baseline (`baselines/baseline.onnx`, a hand-written servo) scores ~0.34. It never
+The reference baseline (`baselines/baseline.onnx`, a hand-written servo) scores ~0.33. It never
 grasps loose or lying parts. To train, import `referee/nist_sim` directly (`pip install -r referee/requirements.txt`). `Episode(cond).step(action)`
 is the exact simulator used for scoring, and `nist_sim.conditions.sample_episodes(seed, k)` draws
 start states and conditions.

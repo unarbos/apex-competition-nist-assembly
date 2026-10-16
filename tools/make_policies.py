@@ -87,6 +87,15 @@ def slow(path: Path, reps: int = 400):
     _save(helper.make_graph(nodes, "slow", [i], [o], [big, sq, down]), path)
 
 
+def const_batch2(path: Path):
+    """Returns a constant [2, 5] tensor: passes the loader's batch-2 probe, then breaks the
+    player on any other batch size (the connection drops mid-response)."""
+    i, o = _io()
+    c = numpy_helper.from_array(np.zeros((2, ACT), np.float32), "c")
+    nodes = [helper.make_node("Shape", ["obs"], ["s"]), helper.make_node("Constant", [], ["action"], value=c)]
+    _save(helper.make_graph(nodes, "const_batch2", [i], [o]), path)
+
+
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
     baseline(ROOT / "baselines" / "baseline.onnx")
@@ -98,3 +107,4 @@ if __name__ == "__main__":
     linear("nan", np.zeros((OBS, ACT)), np.array([np.nan] * ACT), adv / "nan.onnx", clip=False)
     wrong_shape(adv / "wrong_shape.onnx")
     slow(adv / "slow.onnx")
+    const_batch2(adv / "const_batch2.onnx")

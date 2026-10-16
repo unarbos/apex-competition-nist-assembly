@@ -39,7 +39,7 @@ Pins: python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a
 | round_length_in_days | 2 | the eval is cheap, and longer rounds give more submissions on an identical set given the noise in §4 |
 | submission_reveal_days | 4 | trained policies are real IP (production range 4–7) |
 | lower_is_better | false | |
-| baseline_raw_score / baseline_score | 0.10 / 0.0 | do-nothing, random and constant policies measure 0–1.3%. Below 10%, a policy is indistinguishable from dropping parts that happen to land in holes |
+| baseline_raw_score / baseline_score | 0.36 / 0.0 | above the public baseline's 20-seed max (0.356), so resubmitting `baselines/baseline.onnx` cannot win round one. Do-nothing, random and constant policies measure 0–1.3% |
 | resources | 2 CPU / 2Gi / 0 GPU | the referee uses 2 sim workers. Measured peak RSS: referee ≤ 561 MiB (sum of 3 processes, an upper bound), player 89 MiB |
 | evaluate.timeout_s / referee.timeout_s | 900 / 900 | see §4 |
 | deadline_ms | 500 per batched step | |

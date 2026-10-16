@@ -1,5 +1,5 @@
 # RELEASE WORKFLOW: builds, pushes, and keyless-signs (cosign / GitHub OIDC) the player and
-# referee images for unarbos/apex-competition-nist-assembly.
+# referee images for this repository (ghcr.io/<owner>/apex-competition-nist-assembly-*).
 #
 # spec.yaml `signature.cosign_identity` points at THIS file's path. Keep the path
 # `.github/workflows/release.yml` and the repo name stable, or signature verification breaks.
@@ -21,7 +21,11 @@ permissions:
   id-token: write            # required for keyless cosign signing
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   images:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -29,16 +33,16 @@ jobs:
           - { name: player,  dockerfile: player/Dockerfile }
           - { name: referee, dockerfile: referee/Dockerfile }
     env:
-      IMAGE: ghcr.io/unarbos/apex-competition-nist-assembly-${{ matrix.name }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/apex-competition-nist-assembly-${{ matrix.name }}
       DOCKER_BUILDKIT: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Check referee build secret
         if: matrix.name == 'referee'
         env:
@@ -60,7 +64,7 @@ jobs:
           echo "${{ matrix.name }}: \`$REF\`" >> "$GITHUB_STEP_SUMMARY"
       - name: Sign (keyless)
         run: cosign sign --yes "${{ steps.build.outputs.ref }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digest-${{ matrix.name }}
           path: digest-${{ matrix.name }}.txt

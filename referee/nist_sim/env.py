@@ -29,6 +29,9 @@ DXYZ = 0.004  # m per control step at |a|=1
 DYAW = 0.08  # rad per control step at |a|=1
 SEAT_TOL_Z = 0.001  # within 1 mm of fully seated
 SEATED_HOLD = 5  # consecutive control steps
+# Upright tolerance for "seated". A peg fully inside the 20 mm hole cannot tilt more than
+# ~3.4 deg at the widest clearance (atan(2 * 0.6 / 20)); a peg lying across the mouth is at 90.
+MAX_SEAT_TILT = math.radians(10.0)
 MAX_PART_SPEED = 2.0  # m/s
 
 
@@ -266,6 +269,12 @@ class Episode:
                 return True
         return False
 
+    def _upright(self) -> bool:
+        # World-z component of the part's long axis is 1 - 2(x^2 + y^2) for quat (w, x, y, z).
+        # The peg is end-symmetric, so either end down counts.
+        _, (w, x, y, z) = self.part_pose()
+        return abs(1.0 - 2.0 * (x * x + y * y)) >= math.cos(MAX_SEAT_TILT)
+
     # ---- step ------------------------------------------------------------------
     def fail(self, reason: str):
         self.done = True
@@ -303,7 +312,7 @@ class Episode:
         # of the part (fingertips above the part's top face, no gripper contact).
         pad_bottom = d.qpos[2] + 0.004
         clear = pad_bottom >= ppos[2] + PEG_LEN / 2 + 0.002 and not self._gripper_touching_part()
-        seated = bottom <= SEAT_TOL_Z and xy_err <= self.r_hole and clear
+        seated = bottom <= SEAT_TOL_Z and xy_err <= self.r_hole and clear and self._upright()
         self.seated_run = self.seated_run + 1 if seated else 0
         if self.seated_run >= SEATED_HOLD:
             self.done = True

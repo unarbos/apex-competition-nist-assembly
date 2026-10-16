@@ -1,6 +1,6 @@
 schema: apex.competition.v1
 id: nist_lite_assembly
-version: 0.1.1
+version: 0.1.2
 display_name: "NIST-Lite Robot Assembly (RL)"
 kind: solo
 process_type: cpu
@@ -30,7 +30,9 @@ input_schema:
 
 defaults:
   baseline_score: 0.0
-  baseline_raw_score: 0.10
+  # Above the public baseline's 20-seed max (0.356): a verbatim resubmission of
+  # baselines/baseline.onnx must not clear the round-one bar.
+  baseline_raw_score: 0.36
   round_length_in_days: 2
   submission_reveal_days: 4
   lower_is_better: false
@@ -54,5 +56,6 @@ referee:
   timeout_s: 900
 
 signature:
-  cosign_identity: https://github.com/unarbos/apex-competition-nist-assembly/.github/workflows/release.yml
+  # Fulcio SAN of a GitHub keyless signature is `<workflow path>@<ref>`; the platform matches it exactly.
+  cosign_identity: https://github.com/unarbos/apex-competition-nist-assembly/.github/workflows/release.yml@refs/tags/*
   cosign_issuer: https://token.actions.githubusercontent.com

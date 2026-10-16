@@ -14,7 +14,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-FLOOR = 0.10  # spec defaults.baseline_raw_score
+# Honest-bad-answer ceiling for the test set. The spec's defaults.baseline_raw_score (0.36) is set
+# ABOVE the public baseline's 20-seed max (0.356), so resubmitting the baseline never wins round 1.
+FLOOR = 0.10
+SPEC_FLOOR = 0.36
 SMALL = '{"episodes_per_stratum": 2}'
 
 
@@ -45,3 +48,35 @@ def test_records_match_and_deterministic(tmp_path):
     rows = [json.loads(x) for x in (tmp_path / "a/history/episodes.jsonl").read_text().splitlines()][1:]
     assert len(rows) == r1["metadata"]["summary"][1]["value"]
     assert sum(x["success"] for x in rows) / len(rows) == r1["raw_scores"][0]
+
+
+def test_baseline_does_not_clear_round_one_bar(tmp_path):
+    # Full production size: at 2 episodes per stratum the score is too noisy to compare.
+    r = run("baselines/baseline.onnx", tmp_path, override='{"episodes_per_stratum": 16}')
+    assert r["raw_scores"][0] < SPEC_FLOOR
+
+
+def test_player_dying_mid_response_is_a_player_fault(tmp_path):
+    # Must produce a result.json (check=True): a crash here would be scored as a referee error.
+    r = run("test_policies/const_batch2.onnx", tmp_path)
+    assert r["raw_scores"][0] == 0.0
+    assert r["terminal_reason"] == "player_fault"
+    assert r["metadata"]["details"]["player_fault"]
+
+
+# The platform's StandardEvalMetadata (apex-mvp shared/common eval_metadata.py). A payload that
+# fails it is wrapped into `details` and the dashboard loses the per-episode breakdown.
+FORMATS = {"number", "percent", "duration_s", "score", "count", "text"}
+UNIT_TYPES = {"match", "game", "task", "subset", "instance", "completion", "other"}
+
+
+def test_result_metadata_matches_platform_envelope(tmp_path):
+    md = run("baselines/baseline.onnx", tmp_path)["metadata"]
+    unit_ids = {u["id"] for u in md["units"]}
+    assert all(u["type"] in UNIT_TYPES for u in md["units"])
+    assert all(m.get("format", "number") in FORMATS for m in md["summary"] + md["metrics"])
+    assert not any(m.get("unit_id") for m in md["summary"])
+    assert md["metrics"] and all(m.get("unit_id") in unit_ids for m in md["metrics"])
+    caps = md["capabilities"]
+    assert not caps.get("category_breakdown") or all(u.get("category") for u in md["units"])
+    assert not caps.get("outcome_breakdown") or all(u.get("outcome") for u in md["units"])

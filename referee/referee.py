@@ -9,6 +9,7 @@ raw_score = assembled episodes / total episodes (fixed denominator).
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import multiprocessing as mp
@@ -133,7 +134,9 @@ class NistLiteReferee(Referee):
         try:
             player.reset(match_id=ctx.match_id, player_index=0, seed=0,
                          config={"obs_dim": OBS_DIM, "act_dim": ACT_DIM, "control_hz": CONTROL_HZ})
-        except PlayerError as e:
+        except (PlayerError, OSError, http.client.HTTPException) as e:
+            # The vendored client only wraps URLError/TimeoutError; a player that dies mid-response
+            # (RemoteDisconnected, IncompleteRead, connection reset) is still the player's fault.
             player_fault = f"reset failed: {type(e).__name__}"
 
         calls = 0
@@ -150,7 +153,7 @@ class NistLiteReferee(Referee):
             try:
                 raw = player.act(observation=np.round(obs, 6).tolist(), deadline_ms=deadline_ms)
                 calls += 1
-            except PlayerError as e:
+            except (PlayerError, OSError, http.client.HTTPException) as e:
                 player_fault = f"act failed: {type(e).__name__}"
                 break
             except (ValueError, json.JSONDecodeError):
@@ -191,26 +194,41 @@ class NistLiteReferee(Referee):
             c = r["conditions"]
             by_type.setdefault(c["reset_type"], []).append(int(r["success"]))
             by_task.setdefault(f'{c["shape"]}_{round(c["diameter"]*1000)}mm', []).append(int(r["success"]))
+        # Envelope follows the platform's StandardEvalMetadata: formats from
+        # {number, percent, duration_s, score, count, text}, unit types from
+        # {match, game, task, subset, instance, completion, other}, and every `metrics` entry
+        # names the unit it belongs to.
         summary = [
             {"key": "success_rate", "label": "Assembly success rate", "value": raw_score, "format": "percent"},
-            {"key": "episodes", "label": "Episodes", "value": n, "format": "integer"},
+            {"key": "episodes", "label": "Episodes", "value": n, "format": "count"},
         ] + [
             {"key": f"success_{k}", "label": f"Success: {k}", "value": sum(v) / len(v), "format": "percent"}
             for k, v in sorted(by_type.items())
+        ] + [
+            {"key": f"success_{k}", "label": f"Success: {k.replace('_', ' ')}", "value": sum(v) / len(v),
+             "format": "percent"}
+            for k, v in sorted(by_task.items())
         ]
+
+        def _task(r):
+            return f'{r["conditions"]["shape"]}_{round(r["conditions"]["diameter"]*1000)}mm'
+
         metadata = {
             "schema_version": 1,
             "summary": summary,
             "units": [
-                {"id": f"ep-{r['episode']}", "type": "episode", "index": r["episode"],
+                {"id": f"ep-{r['episode']}", "type": "instance", "index": r["episode"],
                  "label": f'{r["conditions"]["shape"]} {round(r["conditions"]["diameter"]*1000)}mm / {r["conditions"]["reset_type"]}',
+                 "category": _task(r), "steps": r["steps"],
                  "outcome": "assembled" if r["success"] else r["terminal_reason"]}
                 for r in rows
             ],
             "metrics": [
-                {"key": "task_success_rate", "label": k, "value": sum(v) / len(v)} for k, v in sorted(by_task.items())
+                {"key": "assembled", "label": "Assembled", "value": r["score"], "format": "score",
+                 "unit_id": f"ep-{r['episode']}"}
+                for r in rows
             ],
-            "capabilities": {"outcome_breakdown": True, "score_distribution": True},
+            "capabilities": {"outcome_breakdown": True, "score_distribution": True, "category_breakdown": True},
             "details": {
                 "format": RECORD_FORMAT,
                 "round_condition_ranges": round_ranges,
