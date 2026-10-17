@@ -33,6 +33,20 @@ SEATED_HOLD = 5  # consecutive control steps
 # ~3.4 deg at the widest clearance (atan(2 * 0.6 / 20)); a peg lying across the mouth is at 90.
 MAX_SEAT_TILT = math.radians(10.0)
 MAX_PART_SPEED = 2.0  # m/s
+# Hand z floor. Pads are centred 12 mm above the hand with an 8 mm half-height, so their
+# bottom is at hand_z + PAD_BOTTOM_OFFSET. A lying 4 mm peg tops out at ~4 mm; allowing the
+# hand slightly below the board plane gives the pads ~3 mm of vertical overlap without the
+# pads (bottom at +1 mm) or palm (bottom at +21 mm) penetrating the board.
+HAND_Z_MIN = -0.003
+PAD_BOTTOM_OFFSET = 0.004  # pad centre z (0.012) minus pad half-height (0.008)
+PAD_CENTRE_Z = 0.012
+MAX_SPAWN_ATTEMPTS = 48
+# After the settle phase a valid spawn is nearly still. Well below MAX_PART_SPEED so
+# blow-ups are caught before the first control step.
+SPAWN_MAX_SPEED = 0.2  # m/s
+SPAWN_MAX_DRIFT = 0.05  # m from the intended hole+offset XY after settle
+SPAWN_BOARD_MARGIN = 0.22  # m; leave headroom vs the 0.28 part_lost limit
+SPAWN_MAX_PENETRATION = 0.001  # m; deeper part contacts mean the start is interlocking
 
 
 @dataclass
@@ -113,7 +127,7 @@ def build_xml(c: EpisodeConditions) -> str:
     <body name="hand" pos="0 0 0" gravcomp="1">
       <joint name="jx" type="slide" axis="1 0 0" damping="{kv}" range="-0.25 0.25"/>
       <joint name="jy" type="slide" axis="0 1 0" damping="{kv}" range="-0.25 0.25"/>
-      <joint name="jz" type="slide" axis="0 0 1" damping="{kv}" range="0.0 0.3"/>
+      <joint name="jz" type="slide" axis="0 0 1" damping="{kv}" range="{HAND_Z_MIN} 0.3"/>
       <joint name="jyaw" type="hinge" axis="0 0 1" damping="0.5" range="-3.2 3.2"/>
       <inertial pos="0 0 0.03" mass="0.6" diaginertia="0.001 0.001 0.001"/>
       <geom name="palm" type="box" pos="0 0 0.027" size="0.02 0.03 0.006" rgba="0.3 0.3 0.8 1"/>
@@ -194,7 +208,72 @@ class Episode:
         d.ctrl[0:4] = self.target
         d.ctrl[4] = d.ctrl[5] = self.grip
 
-    def _reset(self):
+    def _resample_start(self) -> None:
+        """Re-draw start offsets from the same ranges as conditions.sample_episodes.
+
+        Consumes self.rng so the whole reset stays deterministic from the platform seed.
+        Stratum identity (shape, diameter, reset_type) is unchanged.
+        """
+        c = self.c
+        rng = self.rng
+        rt = c.reset_type
+        if rt == "grasped_above":
+            r = float(rng.uniform(0.0, 0.005))
+            th = float(rng.uniform(0, 2 * math.pi))
+            c.offset_xy = (r * math.cos(th), r * math.sin(th))
+            c.height = float(rng.uniform(0.005, 0.025))
+            c.yaw_err = float(rng.uniform(-0.15, 0.15)) if c.shape == "square" else 0.0
+        elif rt == "grasped_far":
+            r = float(rng.uniform(0.01, 0.03))
+            th = float(rng.uniform(0, 2 * math.pi))
+            c.offset_xy = (r * math.cos(th), r * math.sin(th))
+            c.height = float(rng.uniform(0.02, 0.05))
+            c.yaw_err = float(rng.uniform(-0.5, 0.5)) if c.shape == "square" else 0.0
+        elif rt == "near_hole":
+            r = float(rng.uniform(0.0008, 0.0025))
+            th = float(rng.uniform(0, 2 * math.pi))
+            c.offset_xy = (r * math.cos(th), r * math.sin(th))
+            c.height = 0.0003
+            c.yaw_err = float(rng.uniform(-0.1, 0.1)) if c.shape == "square" else 0.0
+        elif rt == "lying":
+            r = float(rng.uniform(0.03, 0.06))
+            th = float(rng.uniform(0, 2 * math.pi))
+            c.offset_xy = (r * math.cos(th), r * math.sin(th))
+            c.height = float(rng.uniform(0.01, 0.03))
+            c.yaw_err = float(rng.uniform(-math.pi, math.pi))
+        elif rt == "loose":
+            r = float(rng.uniform(0.03, 0.06))
+            th = float(rng.uniform(0, 2 * math.pi))
+            c.offset_xy = (r * math.cos(th), r * math.sin(th))
+            c.height = float(rng.uniform(0.01, 0.03))
+            c.yaw_err = float(rng.uniform(-math.pi / 4, math.pi / 4))
+        else:
+            raise ValueError(f"unknown reset_type: {rt!r}")
+
+    def _spawn_ok(self) -> bool:
+        """True if the settled start is finite, on-board, slow, and not interlocking."""
+        d = self.data
+        if not (np.all(np.isfinite(d.qpos)) and np.all(np.isfinite(d.qvel))):
+            return False
+        ppos, _ = self.part_pose()
+        pv = d.qvel[self.part_vadr : self.part_vadr + 3]
+        if float(np.linalg.norm(pv)) > SPAWN_MAX_SPEED:
+            return False
+        if abs(ppos[0]) > SPAWN_BOARD_MARGIN or abs(ppos[1]) > SPAWN_BOARD_MARGIN or ppos[2] < -0.01:
+            return False
+        hx, hy = self.c.hole_xy
+        ox, oy = self.c.offset_xy
+        if float(np.hypot(ppos[0] - (hx + ox), ppos[1] - (hy + oy))) > SPAWN_MAX_DRIFT:
+            return False
+        for i in range(d.ncon):
+            con = d.contact[i]
+            b1 = self.model.geom_bodyid[con.geom1]
+            b2 = self.model.geom_bodyid[con.geom2]
+            if self.part_body in (b1, b2) and con.dist < -SPAWN_MAX_PENETRATION:
+                return False
+        return True
+
+    def _place_and_settle(self) -> None:
         c = self.c
         hx, hy = c.hole_xy
         ox, oy = c.offset_xy
@@ -216,13 +295,14 @@ class Episode:
             self._set_hand([px + self.rng.uniform(-0.004, 0.004), py + self.rng.uniform(-0.004, 0.004),
                             PEG_LEN + 0.01 + c.height], 0.0, 1.0)
             settle_grip = MAX_OPEN
+            pz = None
         else:
             bottom = BLOCK_H + c.height
             pz = bottom + PEG_LEN / 2
             px, py = hx + ox, hy + oy
             self._set_part([px, py, pz], c.yaw_err)
             open_frac = min(1.0, (r + 0.0005) / MAX_OPEN)
-            self._set_hand([px, py, pz + finger_z_on_part - 0.012], c.yaw_err, open_frac)
+            self._set_hand([px, py, pz + finger_z_on_part - PAD_CENTRE_Z], c.yaw_err, open_frac)
             settle_grip = 0.0
         mujoco.mj_forward(self.model, self.data)
         self.grip = settle_grip
@@ -237,6 +317,29 @@ class Episode:
         for _ in range(50):
             self._apply_ctrl()
             mujoco.mj_step(self.model, self.data)
+
+    def _force_safe_start(self) -> None:
+        """Last-resort placement that clears the hole block for loose/lying parts."""
+        c = self.c
+        if c.reset_type in ("loose", "lying"):
+            # Far from the hole, long axis tangential so a 50 mm peg cannot hit the walls.
+            c.offset_xy = (0.06, 0.0)
+            c.height = 0.02
+            c.yaw_err = math.pi / 2 if c.reset_type == "lying" else 0.0
+        else:
+            self._resample_start()
+
+    def _reset(self):
+        # First attempt keeps the Latin-hypercube draw. Failures (blow-ups, wall
+        # interlocking) re-sample offsets from the episode rng within the same stratum.
+        for attempt in range(MAX_SPAWN_ATTEMPTS):
+            if attempt > 0:
+                self._resample_start()
+            self._place_and_settle()
+            if self._spawn_ok():
+                return
+        self._force_safe_start()
+        self._place_and_settle()
 
     # ---- observation -----------------------------------------------------------
     def part_pose(self):
@@ -290,7 +393,7 @@ class Episode:
         self.target[0:3] += a[0:3] * DXYZ
         self.target[0] = np.clip(self.target[0], -0.2, 0.2)
         self.target[1] = np.clip(self.target[1], -0.2, 0.2)
-        self.target[2] = np.clip(self.target[2], 0.0, 0.25)
+        self.target[2] = np.clip(self.target[2], HAND_Z_MIN, 0.25)
         self.target[3] = np.clip(self.target[3] + a[3] * DYAW, -3.1, 3.1)
         self.grip = (a[4] + 1.0) / 2.0 * MAX_OPEN  # +1 = open, -1 = closed
         for _ in range(SUBSTEPS):
@@ -310,7 +413,7 @@ class Episode:
         xy_err = float(np.hypot(ppos[0] - self.hole[0], ppos[1] - self.hole[1]))
         # Assembled = seated within 1 mm, inside the hole, and the gripper released and clear
         # of the part (fingertips above the part's top face, no gripper contact).
-        pad_bottom = d.qpos[2] + 0.004
+        pad_bottom = d.qpos[2] + PAD_BOTTOM_OFFSET
         clear = pad_bottom >= ppos[2] + PEG_LEN / 2 + 0.002 and not self._gripper_touching_part()
         seated = bottom <= SEAT_TOL_Z and xy_err <= self.r_hole and clear and self._upright()
         self.seated_run = self.seated_run + 1 if seated else 0
