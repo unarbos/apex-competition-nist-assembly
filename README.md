@@ -6,7 +6,7 @@ AlphaNIST (binary task reward, diverse start states). Train any way you like: RL
 success-guided sampling, imitation, scripted teachers plus distillation. Submit the resulting policy as
 an ONNX file.
 
-> Version: v0.1.4, the release Apex Subnet 1 runs. Submit with `apex submit policy.onnx -c <competition id>`.
+> Version: v0.1.5, the release Apex Subnet 1 runs. Submit with `apex submit policy.onnx -c <competition id>`.
 
 ## The task
 

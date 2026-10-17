@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.1.4
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.1.5
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that assembles NIST ATB-1 parts as a real cell would need. It is robust
@@ -14,7 +14,7 @@ fitting one round's numbers. This is the AlphaNIST result (binary task reward �
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + released tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.1.4` | ☑ |
+| Competition repo (public) + released tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.1.5` | ☑ |
 | `spec.yaml`; `apex-dev preflight` passes (stage + prod) | `spec.yaml` | ☑ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:<PLAYER_DIGEST>` | ☐ pending release |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:<REFEREE_DIGEST>` | ☐ pending release |
