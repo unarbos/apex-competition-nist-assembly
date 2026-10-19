@@ -14,6 +14,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "referee"))
+from nist_sim.scoring import raw_score_from_episodes  # noqa: E402
+
 # Honest-bad-answer ceiling for the test set: every degenerate policy must stay at or below it.
 FLOOR = 0.10
 SMALL = '{"episodes_per_stratum": 2}'
@@ -44,8 +47,12 @@ def test_records_match_and_deterministic(tmp_path):
     r2 = run("baselines/baseline.onnx", tmp_path / "b")
     assert r1["raw_scores"] == r2["raw_scores"]
     rows = [json.loads(x) for x in (tmp_path / "a/history/episodes.jsonl").read_text().splitlines()][1:]
-    assert len(rows) == r1["metadata"]["summary"][1]["value"]
-    assert sum(x["success"] for x in rows) / len(rows) == r1["raw_scores"][0]
+    summary = {s["key"]: s["value"] for s in r1["metadata"]["summary"]}
+    assert len(rows) == summary["episodes"]
+    assert summary["success_rate"] == pytest.approx(sum(x["success"] for x in rows) / len(rows))
+    assert r1["raw_scores"][0] == pytest.approx(raw_score_from_episodes(rows))
+    assert summary["mean_episode_score"] == pytest.approx(r1["raw_scores"][0])
+    assert all(x["score"] == pytest.approx(0.0) or x["success"] for x in rows)
 
 
 def test_player_dying_mid_response_is_a_player_fault(tmp_path):

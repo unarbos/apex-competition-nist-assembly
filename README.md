@@ -7,6 +7,7 @@ success-guided sampling, imitation, scripted teachers plus distillation. Submit 
 an ONNX file.
 
 > Version: v0.1.5, the release Apex Subnet 1 runs. Submit with `apex submit policy.onnx -c <competition id>`.
+> Scoring below is the v0.1.6 change (efficiency on top of success); the version pin and image digests land on the maintainer release after merge.
 
 ## The task
 
@@ -16,13 +17,17 @@ an ONNX file.
 - **Start states** (equal share of each, every round): part already grasped above the hole; grasped
   and far from the hole; grasped and resting on the hole rim; standing loose on the board; lying on
   its side on the board.
-- **Success (the only thing scored):** within 10 s the part is seated within 1 mm of the
+- **Success:** within 10 s the part is seated within 1 mm of the
   fully-inserted pose, inside the hole and upright (within 10° of vertical, either end down), and
   the gripper has let go and is clear of the part (fingertips above its top face), held for 5
   consecutive control steps.
-- **Score:** `raw_score` = fraction of the round's episodes that end assembled. Higher is better.
-  To take the top spot a submission must beat the current top score by 1%; in a round with no top
-  scorer, the first scored submission takes it. Rounds last 1 day.
+- **Score:** each episode scores `0` on failure. On success it scores
+  `0.8 + 0.2 × (max_steps − success_step) / max_steps`, where `success_step` is the control
+  step when assembly is declared and `max_steps` is the episode limit (250 at 25 Hz).
+  `raw_score` is the mean over the round's episodes (always in `[0, 1]`, higher is better).
+  Assembling is still the main signal: a success is worth at least `0.8`, and the speed term is at
+  most `0.2`. To take the top spot a submission must beat the current top score by 1%; in a round
+  with no top scorer, the first scored submission takes it. Rounds last 1 day.
   Each round has 640 episodes (40 shape × size × start-type strata × 16).
 - Each round redraws the physical conditions: clearance, friction, part mass, controller stiffness,
   sensor noise, hole placement, and start offsets. A policy has to be robust to all of them.
@@ -49,10 +54,12 @@ python tools/local_run.py --policy baselines/baseline.onnx --seed 1
 python tools/read_records.py out/history            # per-task / per-start-type breakdown
 ```
 
-The reference baseline (`baselines/baseline.onnx`, a hand-written servo) scores ~0.33. It never
-grasps loose or lying parts. To train, import `referee/nist_sim` directly (`pip install -r referee/requirements.txt`). `Episode(cond).step(action)`
-is the exact simulator used for scoring, and `nist_sim.conditions.sample_episodes(seed, k)` draws
-start states and conditions.
+The reference baseline (`baselines/baseline.onnx`, a hand-written servo) succeeds on ~0.33 of
+episodes (and scores slightly below that under the efficiency term, since successes are not
+instant). It never grasps loose or lying parts. To train, import `referee/nist_sim` directly
+(`pip install -r referee/requirements.txt`). `Episode(cond).step(action)` is the exact simulator
+used for scoring, and `nist_sim.conditions.sample_episodes(seed, k)` draws start states and
+conditions.
 
 ### Exact Docker loop (the same contract the platform runs)
 

@@ -4,14 +4,15 @@ Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 SEED. All episodes are stepped in lockstep at 25 Hz; at each control step the player gets one
 batched observation for the episodes still running and returns one action per episode.
 
-raw_score = assembled episodes / total episodes (fixed denominator).
+raw_score = mean per-episode score (fixed denominator). A failed episode scores 0; a
+successful episode scores in [SUCCESS_WEIGHT, 1] with a bonus for fewer control steps
+(see nist_sim.scoring).
 """
 
 from __future__ import annotations
 
 import http.client
 import json
-import math
 import multiprocessing as mp
 import os
 import sys
@@ -25,6 +26,7 @@ from gym_v1.referee import GameResult, Referee, RefereeContext
 
 from nist_sim.conditions import sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
+from nist_sim.scoring import episode_score, raw_score_from_episodes
 
 RECORD_FORMAT = "nist_lite_record/1"
 HISTORY_DIR = Path(os.environ.get("NIST_HISTORY_DIR", "/data/history"))
@@ -86,7 +88,7 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                     "success": bool(e.success), "success_step": e.success_step, "steps": e.steps,
                     "terminal_reason": e.terminal_reason,
                     "mean_sq_action": round(e.action_l2 / max(1, e.steps), 5),
-                    "score": 1.0 if e.success else 0.0,
+                    "score": episode_score(bool(e.success), e.success_step, e.c.max_steps),
                 })
             conn.send((rows, traj))
             return
@@ -185,11 +187,13 @@ class NistLiteReferee(Referee):
         rows.sort(key=lambda r: r["episode"])
 
         successes = sum(1 for r in rows if r["success"])
-        raw_score = successes / n  # fixed denominator: every episode counts
+        success_rate = successes / n  # diagnostic only; ranking uses raw_score
+        raw_score = raw_score_from_episodes(rows)  # fixed denominator: every episode counts
         self._write_records(rows, traj, round_ranges)
 
         by_type: dict[str, list[int]] = {}
         by_task: dict[str, list[int]] = {}
+        success_steps = [int(r["success_step"]) for r in rows if r["success"] and r["success_step"] is not None]
         for r in rows:
             c = r["conditions"]
             by_type.setdefault(c["reset_type"], []).append(int(r["success"]))
@@ -199,9 +203,18 @@ class NistLiteReferee(Referee):
         # {match, game, task, subset, instance, completion, other}, and every `metrics` entry
         # names the unit it belongs to.
         summary = [
-            {"key": "success_rate", "label": "Assembly success rate", "value": raw_score, "format": "percent"},
+            {"key": "success_rate", "label": "Assembly success rate", "value": success_rate, "format": "percent"},
+            {"key": "mean_episode_score", "label": "Mean episode score", "value": raw_score, "format": "score"},
             {"key": "episodes", "label": "Episodes", "value": n, "format": "count"},
-        ] + [
+        ]
+        if success_steps:
+            summary.append({
+                "key": "mean_success_step",
+                "label": "Mean success step",
+                "value": sum(success_steps) / len(success_steps),
+                "format": "number",
+            })
+        summary = summary + [
             {"key": f"success_{k}", "label": f"Success: {k}", "value": sum(v) / len(v), "format": "percent"}
             for k, v in sorted(by_type.items())
         ] + [
@@ -224,8 +237,12 @@ class NistLiteReferee(Referee):
                 for r in rows
             ],
             "metrics": [
-                {"key": "assembled", "label": "Assembled", "value": r["score"], "format": "score",
+                {"key": "episode_score", "label": "Episode score", "value": r["score"], "format": "score",
                  "unit_id": f"ep-{r['episode']}"}
+                for r in rows
+            ] + [
+                {"key": "assembled", "label": "Assembled", "value": 1.0 if r["success"] else 0.0,
+                 "format": "score", "unit_id": f"ep-{r['episode']}"}
                 for r in rows
             ],
             "capabilities": {"outcome_breakdown": True, "score_distribution": True, "category_breakdown": True},
