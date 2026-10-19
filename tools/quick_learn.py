@@ -45,7 +45,7 @@ def _eval_obs_scripted(seed: int, n_eps: int) -> float:
     _, conds = sample_episodes(seed, 1)
     scores = []
     for i, c in enumerate(conds[:n_eps]):
-        ss = np.random.SeedSequence([seed, 0xLEAR, i])
+        ss = np.random.SeedSequence([seed, 0x11EA5, i])
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
         e = Episode(c, r1)
         pol = ObsOnlyScripted()
