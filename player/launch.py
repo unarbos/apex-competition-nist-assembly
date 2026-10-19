@@ -19,7 +19,7 @@ from gym_v1.player import Player, serve
 
 POLICY_PATH = os.environ.get("NIST_POLICY_PATH", "/app/policy.onnx")
 # Must match referee/nist_sim/env.py OBS_DIM / ACT_DIM (v0.2.0 multi-peg board).
-OBS_DIM, ACT_DIM = 161, 5
+OBS_DIM, ACT_DIM = 184, 5
 ALLOWED_DOMAINS = {"", "ai.onnx"}
 MIN_OPSET, MAX_OPSET = 13, 21
 

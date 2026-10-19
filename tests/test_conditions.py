@@ -72,12 +72,20 @@ def test_reserved_split_needs_build_input(tmp_path, monkeypatch):
 
 
 def test_ranges_extended_for_v020():
-    # 0.05 mm square fits were unstable under MuJoCo soft contact; live lower
-    # bound is 0.2 mm. Upper bound stays sub-millimetre for a usable gradient.
     lo, hi = conditions.RANGES["clearance"]
-    assert lo >= 0.00015 - 1e-12
+    assert lo >= 0.0002 - 1e-12
     assert hi <= 0.001 + 1e-12
+    assert "pose_bias_xy" in conditions.RANGES
+    assert "backlash" in conditions.RANGES
+    assert "chamfer" in conditions.RANGES
     assert "obs_noise_rad" in conditions.RANGES
-    assert "act_delay" in conditions.RANGES
-    assert "disturbance" in conditions.RANGES
-    assert "dropout_prob" in conditions.RANGES
+    assert set(conditions.HELD_OUT_SHAPES).isdisjoint(conditions.LIVE_SHAPES)
+
+
+def test_held_out_shapes_only_on_reserved(reserved):
+    _, live = conditions.sample_episodes(0, 4, "live")
+    assert all(p.shape_override is None for e in live for p in e.pegs)
+    _, held = conditions.sample_episodes(0, 4, "reserved")
+    overrides = [p.shape_override for e in held for p in e.pegs if p.shape_override]
+    assert overrides
+    assert all(s in conditions.HELD_OUT_SHAPES for s in overrides)

@@ -1,12 +1,15 @@
 """NIST-lite multi-peg board in MuJoCo (CPU).
 
-One episode is a full ATB-1-style peg board (8 slots: round+square × 4/8/12/16 mm)
-with K in {3..6} active pegs, 0–3 clutter blocks, and a 2-finger parallel gripper
-on a 4-DoF (x, y, z, yaw) Cartesian stage.
+One episode is a full ATB-1-style peg board (8 slots: round / square / hex, plus a
+held-out D-flat keyed family) with K in {3..6} active pegs, 0–3 clutter blocks,
+and a 2-finger parallel gripper on a 4-DoF (x, y, z, yaw) Cartesian stage.
 
-Control at 25 Hz; physics at 1 kHz (or 500 Hz if tight fits require it — see
-PHYSICS_DT). Partial credit is per peg; the episode ends early when every active
-peg is seated and the gripper is clear.
+Observations are intentionally partial: peg/slot pose channels carry a fixed
+per-episode bias plus noise and dropout, so geometry-following scripts that
+trust the vector miss the hole. Wrist force/torque is included so contact-driven
+search can adapt. The privileged reference solver in tools/ reads true state.
+
+Control at 25 Hz; physics at 1 kHz. Partial credit is per peg.
 """
 
 from __future__ import annotations
@@ -21,23 +24,24 @@ import numpy as np
 from .conditions import (
     MAX_CLUTTER,
     N_SLOTS,
+    SHAPE_NAMES,
     SLOT_SPECS,
     EpisodeConditions,
     PegStart,
+    shape_one_hot,
     slot_world_xy,
 )
 
 # ---- observation layout -------------------------------------------------------
-# proprio (9) + last_action (5) + 8 pegs × 15 + 3 clutter × 9 = 161
-PROPRIO_DIM = 9
+# proprio (16) + last_action (5) + 8 pegs × 17 + 3 clutter × 9 = 184
+PROPRIO_DIM = 16  # hand xyz*10 (3), sin/cos yaw (2), vel (3), gap (1), force (3), torque (3), pad_f (1)
 ACT_DIM = 5
-PEG_FEAT = 15  # present, pos*10 (3), quat (4), shape_oh (2), size*50, slot*10 (3), seated
+PEG_FEAT = 17  # present, est_rel_pos*10 (3), quat (4), shape_oh (4), size*50, est_slot*10 (3), seated
 CLUTTER_FEAT = 9  # present, pos*10 (3), quat (4), size*50
 MAX_PEGS = N_SLOTS
-OBS_DIM = PROPRIO_DIM + ACT_DIM + MAX_PEGS * PEG_FEAT + MAX_CLUTTER * CLUTTER_FEAT  # 161
+OBS_DIM = PROPRIO_DIM + ACT_DIM + MAX_PEGS * PEG_FEAT + MAX_CLUTTER * CLUTTER_FEAT  # 184
 
 CONTROL_HZ = 25
-# 1 ms is stable across the live clearance band (0.2–0.8 mm).
 PHYSICS_DT = 0.001
 SUBSTEPS = int(round(1.0 / (CONTROL_HZ * PHYSICS_DT)))  # 40
 # Contact width must stay below the minimum radial clearance so soft contacts
@@ -65,44 +69,121 @@ SPAWN_MAX_PENETRATION = 0.0015
 
 # Round holes use 12 walls (was 16) to cut contact pairs on the full board.
 ROUND_HOLE_WALLS = 12
+HEX_SIDES = 6
+FORCE_SCALE = 0.05  # map Newtons → obs units
+TORQUE_SCALE = 0.5
 
 
-def _hole_walls(shape: str, r_hole: float, prefix: str) -> str:
+def _peg_shape(peg: PegStart) -> str:
+    return peg.shape()
+
+
+def _hole_walls(shape: str, r_hole: float, prefix: str, chamfer: float = 0.0) -> str:
+    """Hole wall geoms. ``chamfer`` in [0,1] adds a slightly wider upper lip."""
     geoms = []
     h2 = BLOCK_H / 2
-    if shape == "square":
-        outer = r_hole + WALL_T
+    # Entry funnel: upper third of the hole is wider by up to ~0.4 mm.
+    funnel = 0.00015 + 0.0004 * float(np.clip(chamfer, 0.0, 1.0))
+
+    def _square(r: float, z0: float, hz: float, tag: str) -> None:
+        outer = r + WALL_T
         for i, (sx, sy, hx, hy) in enumerate([
-            (0, r_hole + WALL_T / 2, outer, WALL_T / 2),
-            (0, -(r_hole + WALL_T / 2), outer, WALL_T / 2),
-            (r_hole + WALL_T / 2, 0, WALL_T / 2, r_hole),
-            (-(r_hole + WALL_T / 2), 0, WALL_T / 2, r_hole),
+            (0, r + WALL_T / 2, outer, WALL_T / 2),
+            (0, -(r + WALL_T / 2), outer, WALL_T / 2),
+            (r + WALL_T / 2, 0, WALL_T / 2, r),
+            (-(r + WALL_T / 2), 0, WALL_T / 2, r),
         ]):
             geoms.append(
-                f'<geom name="{prefix}_w{i}" type="box" pos="{sx} {sy} {h2}" '
-                f'size="{hx} {hy} {h2}" class="fixed"/>'
+                f'<geom name="{prefix}_{tag}{i}" type="box" pos="{sx} {sy} {z0}" '
+                f'size="{hx} {hy} {hz}" class="fixed"/>'
             )
-    else:
-        n = ROUND_HOLE_WALLS
-        half_w = (r_hole + WALL_T) * math.tan(math.pi / n) + 1e-4
+
+    def _round(r: float, z0: float, hz: float, tag: str, n: int = ROUND_HOLE_WALLS) -> None:
+        half_w = (r + WALL_T) * math.tan(math.pi / n) + 1e-4
         for i in range(n):
             th = 2 * math.pi * i / n
-            c = r_hole + WALL_T / 2
+            c = r + WALL_T / 2
             geoms.append(
-                f'<geom name="{prefix}_w{i}" type="box" '
-                f'pos="{c * math.cos(th):.6f} {c * math.sin(th):.6f} {h2}" '
-                f'euler="0 0 {th:.6f}" size="{WALL_T / 2} {half_w:.6f} {h2}" class="fixed"/>'
+                f'<geom name="{prefix}_{tag}{i}" type="box" '
+                f'pos="{c * math.cos(th):.6f} {c * math.sin(th):.6f} {z0}" '
+                f'euler="0 0 {th:.6f}" size="{WALL_T / 2} {half_w:.6f} {hz}" class="fixed"/>'
             )
+
+    def _hex(r: float, z0: float, hz: float, tag: str) -> None:
+        # r = apothem (centre to flat).
+        half_w = r * math.tan(math.pi / HEX_SIDES) + 1e-4
+        for i in range(HEX_SIDES):
+            th = 2 * math.pi * i / HEX_SIDES
+            c = r + WALL_T / 2
+            geoms.append(
+                f'<geom name="{prefix}_{tag}{i}" type="box" '
+                f'pos="{c * math.cos(th):.6f} {c * math.sin(th):.6f} {z0}" '
+                f'euler="0 0 {th:.6f}" size="{WALL_T / 2} {half_w:.6f} {hz}" class="fixed"/>'
+            )
+
+    def _dflat(r: float, z0: float, hz: float, tag: str) -> None:
+        # Round hole with a flat keyway along +x (D-profile).
+        _round(r, z0, hz, tag, n=10)
+        # Flat face inset from the +x side.
+        flat_x = r * 0.55
+        geoms.append(
+            f'<geom name="{prefix}_{tag}_flat" type="box" '
+            f'pos="{flat_x + WALL_T / 2:.6f} 0 {z0}" '
+            f'size="{WALL_T / 2} {r * 0.9:.6f} {hz}" class="fixed"/>'
+        )
+
+    z_main = h2 * 0.7
+    hz_main = h2 * 0.7
+    z_lip = BLOCK_H - h2 * 0.35
+    hz_lip = h2 * 0.35
+    builders = {
+        "square": _square,
+        "round": _round,
+        "hex": _hex,
+        "dflat": _dflat,
+    }
+    build = builders.get(shape, _round)
+    build(r_hole, z_main, hz_main, "w")
+    build(r_hole + funnel, z_lip, hz_lip, "lip")
     return "\n".join(geoms)
 
 
-def _board_holes_xml(clearance: float) -> str:
+def _peg_geoms(shape: str, r: float, name: str) -> str:
+    half = PEG_LEN / 2
+    if shape == "square":
+        return f'<geom name="{name}" type="box" size="{r} {r} {half}" class="part"/>'
+    if shape == "hex":
+        # Six thin boxes forming a hexagonal prism (apothem = r).
+        parts = []
+        half_w = r * math.tan(math.pi / HEX_SIDES)
+        for i in range(HEX_SIDES):
+            th = 2 * math.pi * i / HEX_SIDES + math.pi / HEX_SIDES
+            cx = (r * 0.55) * math.cos(th)
+            cy = (r * 0.55) * math.sin(th)
+            parts.append(
+                f'<geom name="{name}_{i}" type="box" pos="{cx:.6f} {cy:.6f} 0" '
+                f'euler="0 0 {th:.6f}" size="{r * 0.55:.6f} {half_w:.6f} {half}" class="part"/>'
+            )
+        return "\n".join(parts)
+    if shape == "dflat":
+        # Cylinder plus a flat chord (key) along +x.
+        return (
+            f'<geom name="{name}" type="cylinder" size="{r} {half}" class="part"/>'
+            f'<geom name="{name}_key" type="box" pos="{r * 0.35:.6f} 0 0" '
+            f'size="{r * 0.35:.6f} {r * 0.75:.6f} {half}" class="part"/>'
+        )
+    return f'<geom name="{name}" type="cylinder" size="{r} {half}" class="part"/>'
+
+
+def _board_holes_xml(clearance: float, chamfer: float, overrides: dict[int, str] | None = None) -> str:
     parts = []
+    overrides = overrides or {}
     for i, (shape, dia, lx, ly) in enumerate(SLOT_SPECS):
+        shape = overrides.get(i, shape)
         r_hole = dia / 2 + clearance
         parts.append(
             f'<body name="hole_{i}" pos="{lx} {ly} 0">\n'
-            f"{_hole_walls(shape, r_hole, f'h{i}')}\n</body>"
+            f"{_hole_walls(shape, r_hole, f'h{i}', chamfer=chamfer)}\n</body>"
         )
     return "\n".join(parts)
 
@@ -113,16 +194,15 @@ def build_xml(c: EpisodeConditions) -> str:
     kv = 2 * math.sqrt(kp * 0.6)
     bx, by = c.board_xy
     byaw = c.board_yaw
+    # Per-slot shape overrides for held-out D-flat pegs.
+    hole_overrides = {peg.slot: peg.shape() for peg in c.pegs if peg.shape_override}
 
     peg_bodies = []
     for i, peg in enumerate(c.pegs):
-        shape, dia, _, _ = SLOT_SPECS[peg.slot]
+        shape = peg.shape()
+        dia = peg.diameter()
         r = dia / 2
-        if shape == "square":
-            geom = f'<geom name="peg{i}" type="box" size="{r} {r} {PEG_LEN / 2}" class="part"/>'
-        else:
-            geom = f'<geom name="peg{i}" type="cylinder" size="{r} {PEG_LEN / 2}" class="part"/>'
-        # Per-part friction via geom; mass via inertial.
+        geom = _peg_geoms(shape, r, f"peg{i}")
         peg_bodies.append(
             f"""
     <body name="peg{i}" pos="0 0 0.15">
@@ -165,7 +245,7 @@ def build_xml(c: EpisodeConditions) -> str:
   <worldbody>
     <body name="board" pos="{bx} {by} 0" euler="0 0 {byaw}">
       <geom name="board_top" type="box" pos="0 0 -0.005" size="0.22 0.18 0.005" class="fixed"/>
-      {_board_holes_xml(c.clearance)}
+      {_board_holes_xml(c.clearance, c.chamfer, hole_overrides)}
     </body>
     <body name="hand" pos="0 0 0" gravcomp="1">
       <joint name="jx" type="slide" axis="1 0 0" damping="{kv}" range="-0.28 0.28"/>
@@ -255,7 +335,7 @@ class Episode:
             slot_world_xy(cond.board_xy, cond.board_yaw, peg.slot) for peg in cond.pegs
         ]
         self.r_hole = [
-            SLOT_SPECS[peg.slot][1] / 2 + cond.clearance for peg in cond.pegs
+            peg.diameter() / 2 + cond.clearance for peg in cond.pegs
         ]
         self.last_action = np.zeros(ACT_DIM)
         self.steps = 0
@@ -277,6 +357,14 @@ class Episode:
         self._last_peg_obs = [None] * self.n_pegs
         self._last_clutter_obs = [None] * self.n_clutter
         self._disturbance_applied = False
+        # Fixed per-episode pose-estimate bias (never revealed; applied in observe).
+        self._pose_bias_xy = np.array(cond.pose_bias_xy, dtype=float)
+        self._pose_bias_yaw = float(cond.pose_bias_yaw)
+        self._backlash = float(cond.backlash)
+        self._cmd_applied = np.zeros(4)  # last Cartesian cmd that passed backlash
+        self._wrist_force = np.zeros(3)
+        self._wrist_torque = np.zeros(3)
+        self._pad_force = 0.0
         self._reset()
 
     # ---- hand / part helpers -------------------------------------------------
@@ -317,7 +405,7 @@ class Episode:
         c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
         wx = hx + c * ox - s * oy
         wy = hy + s * ox + c * oy
-        shape, dia, _, _ = SLOT_SPECS[peg.slot]
+        dia = peg.diameter()
         r = dia / 2
         yaw = peg.yaw_err + self.c.board_yaw
         if peg.start_type == "lying":
@@ -358,7 +446,7 @@ class Episode:
             i = grasped[0]
             peg = c.pegs[i]
             ppos, _ = self.peg_pose(i)
-            r = SLOT_SPECS[peg.slot][1] / 2
+            r = peg.diameter() / 2
             open_frac = min(1.0, (r + 0.0005) / MAX_OPEN)
             finger_z = PEG_LEN / 2 - 0.008
             self._set_hand(
@@ -567,18 +655,58 @@ class Episode:
             and self._upright(pquat)
         )
 
-    def _noisy_pose(self, pos, quat, noise_rng):
-        p = pos + noise_rng.normal(0, self.c.obs_noise, 3)
-        # Small angular noise via incremental yaw/pitch/roll.
+    def _noisy_pose(self, pos, quat, noise_rng, apply_bias: bool = True):
+        p = np.asarray(pos, dtype=float).copy()
+        if apply_bias:
+            p[0] += self._pose_bias_xy[0]
+            p[1] += self._pose_bias_xy[1]
+        p = p + noise_rng.normal(0, self.c.obs_noise, 3)
         dth = noise_rng.normal(0, self.c.obs_noise_rad, 3)
-        dq = _yaw_quat(float(dth[2]))
+        yaw_extra = float(dth[2]) + (self._pose_bias_yaw if apply_bias else 0.0)
+        dq = _yaw_quat(yaw_extra)
         q = _quat_mul(dq, quat)
         n = float(np.linalg.norm(q))
         if n > 0:
             q = q / n
         return p, q
 
+    def _update_wrist_wrench(self) -> None:
+        """Estimate wrist force/torque from contacts on hand / pad geoms."""
+        m, d = self.model, self.data
+        force = np.zeros(3)
+        torque = np.zeros(3)
+        pad_f = 0.0
+        hand_pos = d.qpos[0:3]
+        for i in range(d.ncon):
+            con = d.contact[i]
+            b1, b2 = m.geom_bodyid[con.geom1], m.geom_bodyid[con.geom2]
+            if not (b1 in self.grip_bodies or b2 in self.grip_bodies):
+                continue
+            cforce = np.zeros(6)
+            mujoco.mj_contactForce(m, d, i, cforce)
+            # Contact frame force (normal along x of contact frame).
+            fn = float(cforce[0])
+            # Approximate world-frame push along contact normal.
+            frame = con.frame.reshape(3, 3)
+            f_world = frame[:, 0] * fn
+            force += f_world
+            r = con.pos - hand_pos
+            torque += np.cross(r, f_world)
+            if b1 in self.grip_bodies and b2 in self.grip_bodies:
+                continue
+            pad_f += abs(fn)
+        # Light EMA so the signal is usable at 25 Hz.
+        self._wrist_force = 0.7 * self._wrist_force + 0.3 * force
+        self._wrist_torque = 0.7 * self._wrist_torque + 0.3 * torque
+        self._pad_force = 0.7 * self._pad_force + 0.3 * pad_f
+
     def observe(self, noise_rng: np.random.Generator) -> np.ndarray:
+        """Partial observation: biased/noisy peg+slot estimates + wrist wrench.
+
+        True hole and peg poses are never revealed. A fixed per-episode bias of
+        several mm / deg is applied to every peg and slot estimate so a
+        geometry-following script that trusts the vector systematically misses.
+        """
         d = self.data
         bx, by = self.c.board_xy
         hand = d.qpos[0:3].copy()
@@ -592,24 +720,30 @@ class Episode:
             [math.sin(yaw), math.cos(yaw)],
             hand_v,
             [gap * 50],
+            self._wrist_force * FORCE_SCALE,
+            self._wrist_torque * TORQUE_SCALE,
+            [self._pad_force * FORCE_SCALE],
         ])
 
         peg_feats = np.zeros(MAX_PEGS * PEG_FEAT, dtype=np.float64)
         for i, peg in enumerate(self.c.pegs):
             base = i * PEG_FEAT
             ppos, pquat = self.peg_pose(i)
-            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng)
+            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, apply_bias=True)
             hx, hy = self.slot_xy[i]
-            # Pose relative to matching slot top centre.
-            prel = np.array([ppos_n[0] - hx, ppos_n[1] - hy, ppos_n[2] - BLOCK_H])
-            shape, dia, _, _ = SLOT_SPECS[peg.slot]
+            # Biased slot estimate (same fixed bias) — no exact hole coordinates.
+            hx_e = hx + self._pose_bias_xy[0] + float(noise_rng.normal(0, self.c.obs_noise))
+            hy_e = hy + self._pose_bias_xy[1] + float(noise_rng.normal(0, self.c.obs_noise))
+            prel = np.array([ppos_n[0] - hx_e, ppos_n[1] - hy_e, ppos_n[2] - BLOCK_H])
+            shape = peg.shape()
+            dia = peg.diameter()
             feat = np.concatenate([
                 [1.0],
                 prel * 10,
                 pquat_n,
-                [1.0 if shape == "round" else 0.0, 1.0 if shape == "square" else 0.0],
+                shape_one_hot(shape),
                 [dia * 50],
-                [(hx - bx) * 10, (hy - by) * 10, BLOCK_H * 10],
+                [(hx_e - bx) * 10, (hy_e - by) * 10, BLOCK_H * 10],
                 [1.0 if self.seated_now[i] else 0.0],
             ])
             if noise_rng.random() < self.c.dropout_prob and self._last_peg_obs[i] is not None:
@@ -622,7 +756,7 @@ class Episode:
         for i, cl in enumerate(self.c.clutter):
             base = i * CLUTTER_FEAT
             ppos, pquat = self.clutter_pose(i)
-            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng)
+            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, apply_bias=True)
             prel = np.array([ppos_n[0] - bx, ppos_n[1] - by, ppos_n[2]])
             size = max(cl.size_xy) * 50
             feat = np.concatenate([[1.0], prel * 10, pquat_n, [size]])
@@ -633,6 +767,7 @@ class Episode:
             clutter_feats[base : base + CLUTTER_FEAT] = feat
 
         o = np.concatenate([proprio, self.last_action, peg_feats, clutter_feats])
+        assert o.shape[0] == OBS_DIM, (o.shape[0], OBS_DIM)
         return o.astype(np.float32)
 
     # ---- step ----------------------------------------------------------------
@@ -651,12 +786,20 @@ class Episode:
         if tgt.startswith("peg:"):
             i = int(tgt.split(":")[1])
             if 0 <= i < self.n_pegs and not self.seated_now[i]:
-                # Small impulse on a not-yet-seated peg.
-                self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 3] += self.rng.normal(0, 0.15, 3)
+                self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 3] += self.rng.normal(0, 0.18, 3)
+        elif tgt == "drop":
+            # Slip: open gripper and nudge any held peg downward.
+            self.grip = MAX_OPEN
+            self.target[2] = min(0.25, self.target[2] + 0.01)
+            for i in range(self.n_pegs):
+                if self.seated_now[i]:
+                    continue
+                if self._gripper_touching(self.peg_body[i]):
+                    self.data.qvel[self.peg_vadr[i] + 2] -= 0.25
+                    self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 2] += self.rng.normal(0, 0.05, 2)
         elif tgt == "board":
-            # Nudge the hand target slightly (board is welded; nudge via part of grasp chain).
-            self.target[0] += float(self.rng.uniform(-0.004, 0.004))
-            self.target[1] += float(self.rng.uniform(-0.004, 0.004))
+            self.target[0] += float(self.rng.uniform(-0.005, 0.005))
+            self.target[1] += float(self.rng.uniform(-0.005, 0.005))
 
     def step(self, action: np.ndarray) -> None:
         if self.done:
@@ -671,17 +814,28 @@ class Episode:
         else:
             applied = a
 
-        self.target[0:3] += applied[0:3] * DXYZ
+        # Backlash / deadzone on Cartesian commands: small desired moves are eaten.
+        delta = applied[0:3] * DXYZ
+        for i in range(3):
+            if abs(delta[i]) < self._backlash:
+                delta[i] = 0.0
+            else:
+                delta[i] -= math.copysign(self._backlash, delta[i])
+        self.target[0:3] += delta
         self.target[0] = np.clip(self.target[0], -0.25, 0.25)
         self.target[1] = np.clip(self.target[1], -0.25, 0.25)
         self.target[2] = np.clip(self.target[2], HAND_Z_MIN, 0.25)
-        self.target[3] = np.clip(self.target[3] + applied[3] * DYAW, -3.1, 3.1)
+        dyaw = applied[3] * DYAW
+        if abs(dyaw) < self._backlash * 20:  # ~yaw deadzone scaled
+            dyaw = 0.0
+        self.target[3] = np.clip(self.target[3] + dyaw, -3.1, 3.1)
         self.grip = (applied[4] + 1.0) / 2.0 * MAX_OPEN
 
         for _ in range(SUBSTEPS):
             self._apply_ctrl()
             mujoco.mj_step(self.model, self.data)
         self.steps += 1
+        self._update_wrist_wrench()
         self._apply_disturbance()
 
         d = self.data

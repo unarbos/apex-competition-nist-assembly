@@ -15,7 +15,7 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
-OBS, ACT = 161, 5
+OBS, ACT = 184, 5
 ROOT = Path(__file__).resolve().parents[1]
 OPSET = [helper.make_opsetid("", 17)]
 

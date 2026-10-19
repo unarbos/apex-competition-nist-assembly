@@ -19,7 +19,7 @@ from onnx import TensorProto, helper, numpy_helper
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "referee"))
 from nist_sim.conditions import sample_episodes  # noqa: E402
-from nist_sim.env import OBS_DIM, Episode  # noqa: E402
+from nist_sim.env import OBS_DIM, Episode  # noqa: E402  # OBS_DIM must match player
 from nist_sim.policies import NearestFirstBaseline  # noqa: E402
 
 PER = 8

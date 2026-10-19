@@ -22,7 +22,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "referee"))
 
-from nist_sim.conditions import SLOT_SPECS, sample_episodes  # noqa: E402
+from nist_sim.conditions import sample_episodes  # noqa: E402
 from nist_sim.env import (  # noqa: E402
     BLOCK_H,
     DXYZ,
@@ -72,9 +72,13 @@ class PegView:
         self.ep = ep
         self.i = peg_i
         peg = ep.c.pegs[peg_i]
-        shape, dia, _, _ = SLOT_SPECS[peg.slot]
         hx, hy = ep.slot_xy[peg_i]
-        self.c = _PegCond(shape=shape, diameter=dia, hole_xy=(hx, hy), reset_type=peg.start_type)
+        self.c = _PegCond(
+            shape=peg.shape(),
+            diameter=peg.diameter(),
+            hole_xy=(hx, hy),
+            reset_type=peg.start_type,
+        )
         self.r_hole = ep.r_hole[peg_i]
         self.hole = np.array([hx, hy, BLOCK_H])
         self.part_body = ep.peg_body[peg_i]
@@ -158,14 +162,24 @@ class ScriptedPeg:
     def _act(self, goal_xyz=None, goal_yaw=None, grip=1.0, speed=None):
         e = self.e
         s = self.speed if speed is None else speed
+        # Compensate Cartesian backlash: deadzone eats small commands, so pad
+        # the requested delta when the parent episode exposes backlash.
+        parent = getattr(e, "ep", e)
+        backlash = float(getattr(getattr(parent, "c", None), "backlash", 0.0) or 0.0)
         a = np.zeros(5)
         if goal_xyz is not None:
             g = np.array(goal_xyz, float)
             for i in range(3):
                 if not np.isnan(g[i]):
-                    a[i] = np.clip((g[i] - e.target[i]) / DXYZ, -s, s)
+                    err = g[i] - e.target[i]
+                    if abs(err) > 1e-9:
+                        err = err + math.copysign(backlash, err)
+                    a[i] = np.clip(err / DXYZ, -s, s)
         if goal_yaw is not None:
-            a[3] = np.clip(wrap(goal_yaw - e.target[3]) / DYAW, -s, s)
+            err = wrap(goal_yaw - e.target[3])
+            if abs(err) > 1e-9:
+                err = err + math.copysign(backlash * 20.0, err)
+            a[3] = np.clip(err / DYAW, -s, s)
         a[4] = grip
         return a
 
@@ -192,13 +206,21 @@ class ScriptedPeg:
 
     def hole_yaw_target(self) -> float:
         e = self.e
-        if e.c.shape != "square":
+        shape = e.c.shape
+        if shape == "round":
             return float(e.target[3])
         _, q = e.part_pose()
         py = part_yaw(q)
-        err = wrap(-py)
-        err = (err + math.pi / 4) % (math.pi / 2) - math.pi / 4
-        return float(e.data.qpos[3] + err)
+        if shape == "hex":
+            # Align to nearest 60°.
+            err = wrap(-py)
+            err = (err + math.pi / 6) % (math.pi / 3) - math.pi / 6
+            return float(e.data.qpos[3] + err)
+        if shape in ("square", "dflat"):
+            err = wrap(-py)
+            err = (err + math.pi / 4) % (math.pi / 2) - math.pi / 4
+            return float(e.data.qpos[3] + err)
+        return float(e.target[3])
 
     def insert(self) -> Iterator[np.ndarray]:
         e = self.e
@@ -268,9 +290,8 @@ class ScriptedPeg:
         e = self.e
         p, q = e.part_pose()
         yaw = float(e.data.qpos[3])
-        if e.c.shape == "square":
-            err = (wrap(part_yaw(q) - yaw) + math.pi / 4) % (math.pi / 2) - math.pi / 4
-            yaw = yaw + err
+        if e.c.shape in ("square", "hex", "dflat"):
+            yaw = self.hole_yaw_target()
         top = p[2] + PEG_LEN / 2
         yield from self.goto([p[0], p[1], top + 0.01], yaw, 1.0)
         p, _ = e.part_pose()
@@ -386,38 +407,42 @@ class ScriptedPeg:
         yield from self.insert()
 
 
-def _push_clutter(ep: Episode, peg_i: int, max_steps: int = 40) -> None:
+def _push_clutter(ep: Episode, peg_i: int, max_steps: int = 28) -> None:
     """Gently push the nearest clutter block away from the target hole approach."""
     hx, hy = ep.slot_xy[peg_i]
     best, best_d = -1, 1e9
     for i in range(ep.n_clutter):
         p, _ = ep.clutter_pose(i)
         d = float(np.hypot(p[0] - hx, p[1] - hy))
-        if d < best_d and p[2] < 0.05:
+        if d < best_d and p[2] < 0.045:
             best_d, best = d, i
-    if best < 0 or best_d > 0.035:
+    if best < 0 or best_d > 0.028:
         return
     for t in range(max_steps):
         if ep.done:
             return
         p, _ = ep.clutter_pose(best)
-        # Stop if already clear or flying off the board.
-        if float(np.hypot(p[0] - hx, p[1] - hy)) > 0.05 or abs(p[0]) > 0.22 or abs(p[1]) > 0.22:
+        if float(np.hypot(p[0] - hx, p[1] - hy)) > 0.04 or abs(p[0]) > 0.20 or abs(p[1]) > 0.20:
             return
+        # Abort if any peg is near the board edge (avoid part_lost cascades).
+        for j in range(ep.n_pegs):
+            pj, _ = ep.peg_pose(j)
+            if abs(pj[0]) > 0.22 or abs(pj[1]) > 0.22:
+                return
         hand = ep.data.qpos[0:3]
         away = np.array([p[0] - hx, p[1] - hy])
         n = float(np.linalg.norm(away)) + 1e-6
         away /= n
-        if t < 12:
+        if t < 10:
             goal = p[0:2]
-            z = 0.030
+            z = 0.032
         else:
-            goal = p[0:2] + away * 0.05
-            z = 0.024
+            goal = p[0:2] + away * 0.035
+            z = 0.026
         a = np.array([
-            np.clip((goal[0] - hand[0]) / DXYZ, -0.7, 0.7),
-            np.clip((goal[1] - hand[1]) / DXYZ, -0.7, 0.7),
-            np.clip((z - hand[2]) / DXYZ, -0.7, 0.7),
+            np.clip((goal[0] - hand[0]) / DXYZ, -0.55, 0.55),
+            np.clip((goal[1] - hand[1]) / DXYZ, -0.55, 0.55),
+            np.clip((z - hand[2]) / DXYZ, -0.55, 0.55),
             0.0,
             1.0,
         ])

@@ -1,10 +1,13 @@
 """Reference policies for the multi-peg board.
 
 NearestFirstBaseline: memoryless nearest-unseated insert/release over the obs
-table (ONNX twin in tools/make_policies.py). StrongScripted: privileged
-state-based planner — builds a clean observation from true poses, pushes
-blocking clutter, regrasps lying pegs upright, then runs the same nearest-first
-servo with spiral search on tight fits.
+table (ONNX twin in tools/make_policies.py).
+
+ObsOnlyScripted: strongest hand-coded controller that uses **only** the policy
+observation (biased/noisy estimates + wrist wrench) — the anti-scripting
+calibration target. Must score well below a learned policy's ceiling.
+
+StrongScripted: privileged state-based planner for diagnostics only (not shipped).
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .conditions import SLOT_SPECS
+from .conditions import SLOT_SPECS, SHAPE_NAMES
 from .env import (
     ACT_DIM,
     BLOCK_H,
@@ -31,8 +34,20 @@ from .env import (
     Episode,
 )
 
-PEG_TABLE0 = PROPRIO_DIM + ACT_DIM  # 14
+PEG_TABLE0 = PROPRIO_DIM + ACT_DIM  # 21
 CLUTTER_TABLE0 = PEG_TABLE0 + MAX_PEGS * PEG_FEAT
+# Peg feature layout (PEG_FEAT=17):
+# 0 present | 1:4 rel*10 | 4:8 quat | 8:12 shape_oh | 12 size | 13:16 slot*10 | 16 seated
+FEAT_PRESENT = 0
+FEAT_REL = slice(1, 4)
+FEAT_QUAT = slice(4, 8)
+FEAT_SHAPE = slice(8, 12)
+FEAT_SIZE = 12
+FEAT_SLOT = slice(13, 16)
+FEAT_SEATED = 16
+# Proprio: 0:3 hand*10, 3:5 sin/cos yaw, 5:8 vel, 8 gap, 9:12 force, 12:15 torque, 15 pad_f
+PROP_FORCE = slice(9, 12)
+PROP_PAD = 15
 
 
 def _peg_slice(obs: np.ndarray, i: int) -> np.ndarray:
@@ -45,6 +60,10 @@ def _hand_xy(obs: np.ndarray) -> np.ndarray:
 
 def _hand_z(obs: np.ndarray) -> float:
     return float(obs[2] / 10.0)
+
+
+def _hand_yaw(obs: np.ndarray) -> float:
+    return math.atan2(float(obs[3]), float(obs[4]))
 
 
 @dataclass
@@ -65,9 +84,10 @@ class NearestFirstBaseline:
         best, best_d = -1, 1e9
         for i in range(MAX_PEGS):
             f = _peg_slice(obs, i)
-            if f[0] < 0.5 or f[14] > 0.5:
+            if f[FEAT_PRESENT] < 0.5 or f[FEAT_SEATED] > 0.5:
                 continue
-            peg_xy = f[11:13] / 10.0 + f[1:3] / 10.0
+            peg_xy = f[FEAT_SLOT].copy()
+            peg_xy = peg_xy[0:2] / 10.0 + f[FEAT_REL].copy()[0:2] / 10.0
             d = float(np.hypot(*(peg_xy - hand)))
             if d < best_d:
                 best_d, best = d, i
@@ -76,7 +96,11 @@ class NearestFirstBaseline:
     def act(self, obs: np.ndarray) -> np.ndarray:
         obs = np.asarray(obs, dtype=np.float64).reshape(-1)
         a = np.zeros(ACT_DIM)
-        if self.target < 0 or _peg_slice(obs, self.target)[14] > 0.5 or _peg_slice(obs, self.target)[0] < 0.5:
+        if (
+            self.target < 0
+            or _peg_slice(obs, self.target)[FEAT_SEATED] > 0.5
+            or _peg_slice(obs, self.target)[FEAT_PRESENT] < 0.5
+        ):
             self.target = self._choose(obs)
             self.phase = "goto"
             self.timer = 0
@@ -84,10 +108,10 @@ class NearestFirstBaseline:
             a[4] = 1.0
             return a
         f = _peg_slice(obs, self.target)
-        rel = f[1:4] / 10.0
-        slot_xy = f[11:13] / 10.0
+        rel = f[FEAT_REL] / 10.0
+        slot_xy = f[FEAT_SLOT][0:2] / 10.0
         hand = np.array([*_hand_xy(obs), _hand_z(obs)])
-        qz = float(f[7])
+        qz = float(f[7])  # quat z
         if self.phase == "goto":
             a[0] = float(np.clip((slot_xy[0] - hand[0]) / DXYZ, -1, 1))
             a[1] = float(np.clip((slot_xy[1] - hand[1]) / DXYZ, -1, 1))
@@ -122,10 +146,166 @@ class NearestFirstBaseline:
 
 
 @dataclass
-class StrongScripted:
-    """Privileged heuristic: clutter push, lying regrasp, clean-obs nearest-first + spiral."""
+class ObsOnlyScripted:
+    """Strongest reasonable hand-coded controller using **only** observations.
 
-    mode: str = "select"  # select | push | upright | servo
+    Uses the biased peg/slot estimates, wrist force for contact detection, and a
+    spiral search when force rises at the lip. Cannot read true MuJoCo state.
+    This is the anti-scripting calibration target (must stay ≤ ~0.25).
+    """
+
+    target: int = -1
+    phase: str = "pick"  # pick | align | insert | spiral | release | retreat
+    timer: int = 0
+    spiral_t: int = 0
+    force_ref: float = 0.0
+
+    def reset(self) -> None:
+        self.target = -1
+        self.phase = "pick"
+        self.timer = 0
+        self.spiral_t = 0
+        self.force_ref = 0.0
+
+    def _choose(self, obs: np.ndarray) -> int:
+        hand = _hand_xy(obs)
+        best, best_d = -1, 1e9
+        for i in range(MAX_PEGS):
+            f = _peg_slice(obs, i)
+            if f[FEAT_PRESENT] < 0.5 or f[FEAT_SEATED] > 0.5:
+                continue
+            # Prefer upright-looking pegs (quat w large) and near estimated slot.
+            quat = f[FEAT_QUAT]
+            upright = abs(1.0 - 2.0 * (quat[1] ** 2 + quat[2] ** 2))
+            peg_xy = f[FEAT_SLOT][0:2] / 10.0 + f[FEAT_REL][0:2] / 10.0
+            d = float(np.hypot(*(peg_xy - hand)))
+            d += 0.05 * (1.0 - upright)  # defer lying
+            d += 0.3 * float(np.linalg.norm(f[FEAT_REL][0:2] / 10.0))
+            if d < best_d:
+                best_d, best = d, i
+        return best
+
+    def act(self, obs: np.ndarray) -> np.ndarray:
+        obs = np.asarray(obs, dtype=np.float64).reshape(-1)
+        a = np.zeros(ACT_DIM)
+        force = float(np.linalg.norm(obs[PROP_FORCE]))
+        pad = float(obs[PROP_PAD])
+
+        if (
+            self.target < 0
+            or _peg_slice(obs, self.target)[FEAT_SEATED] > 0.5
+            or _peg_slice(obs, self.target)[FEAT_PRESENT] < 0.5
+        ):
+            self.target = self._choose(obs)
+            self.phase = "pick"
+            self.timer = 0
+            self.spiral_t = 0
+        if self.target < 0:
+            a[4] = 1.0
+            a[2] = 0.2
+            return a
+
+        f = _peg_slice(obs, self.target)
+        rel = f[FEAT_REL] / 10.0
+        slot = f[FEAT_SLOT][0:2] / 10.0
+        hand = np.array([*_hand_xy(obs), _hand_z(obs)])
+        quat = f[FEAT_QUAT]
+        qz = float(quat[3])
+        upright = abs(1.0 - 2.0 * (quat[1] ** 2 + quat[2] ** 2))
+
+        if self.phase == "pick":
+            # Approach estimated peg (rel + slot ≈ peg in board frame).
+            peg_xy = slot + rel[0:2]
+            z_goal = max(0.03, float(rel[2]) + BLOCK_H + 0.02)
+            a[0] = float(np.clip((peg_xy[0] - hand[0]) / DXYZ, -1, 1))
+            a[1] = float(np.clip((peg_xy[1] - hand[1]) / DXYZ, -1, 1))
+            a[2] = float(np.clip((z_goal - hand[2]) / DXYZ, -1, 1))
+            a[3] = float(np.clip(-10.0 * qz, -1, 1))
+            a[4] = 1.0 if pad < 0.05 else -1.0
+            self.timer += 1
+            if pad > 0.08 or (abs(peg_xy[0] - hand[0]) < 0.008 and self.timer > 25):
+                a[4] = -1.0
+                if self.timer > 40 or pad > 0.15:
+                    self.phase = "align"
+                    self.timer = 0
+            if upright < 0.5 and self.timer > 80:
+                # Give up on this lying peg estimate; try another.
+                self.target = -1
+                self.timer = 0
+            return a
+
+        if self.phase == "align":
+            a[0] = float(np.clip((slot[0] - hand[0]) / DXYZ, -1, 1))
+            a[1] = float(np.clip((slot[1] - hand[1]) / DXYZ, -1, 1))
+            a[2] = float(np.clip((0.065 - hand[2]) / DXYZ, -1, 1))
+            a[3] = float(np.clip(-12.0 * qz, -1, 1))
+            a[4] = -1.0
+            self.timer += 1
+            if abs(slot[0] - hand[0]) < 0.005 and abs(slot[1] - hand[1]) < 0.005:
+                self.phase = "insert"
+                self.timer = 0
+                self.force_ref = force
+            if self.timer > 100:
+                self.phase = "insert"
+                self.timer = 0
+            return a
+
+        if self.phase == "insert":
+            a[0] = float(np.clip(-rel[0] / DXYZ, -1, 1))
+            a[1] = float(np.clip(-rel[1] / DXYZ, -1, 1))
+            a[2] = -0.7
+            a[3] = float(np.clip(-12.0 * qz, -1, 1))
+            a[4] = -1.0
+            self.timer += 1
+            # Contact at the lip → spiral search (bias makes pure servo miss).
+            if force > self.force_ref + 0.05 and abs(rel[2]) < 0.03:
+                self.phase = "spiral"
+                self.spiral_t = 0
+            if rel[2] < -0.015 or self.timer > 80:
+                self.phase = "release"
+                self.timer = 0
+            return a
+
+        if self.phase == "spiral":
+            rad = min(0.004, 0.0003 * (1 + self.spiral_t // 3))
+            ang = 0.55 * self.spiral_t
+            goal = slot + rad * np.array([math.cos(ang), math.sin(ang)])
+            a[0] = float(np.clip((goal[0] - hand[0]) / DXYZ, -1, 1))
+            a[1] = float(np.clip((goal[1] - hand[1]) / DXYZ, -1, 1))
+            a[2] = -0.55 if force > self.force_ref + 0.08 else -0.85
+            a[3] = float(np.clip(-8.0 * qz + 0.15 * math.sin(ang), -1, 1))
+            a[4] = -1.0
+            self.spiral_t += 1
+            if rel[2] < -0.015 or self.spiral_t > 120 or f[FEAT_SEATED] > 0.5:
+                self.phase = "release"
+                self.timer = 0
+            return a
+
+        if self.phase == "release":
+            a[2] = 0.3
+            a[4] = 1.0
+            self.timer += 1
+            if self.timer > 10:
+                self.phase = "retreat"
+                self.timer = 0
+            return a
+
+        # retreat
+        a[2] = 1.0
+        a[4] = 1.0
+        self.timer += 1
+        if self.timer > 12 or f[FEAT_SEATED] > 0.5:
+            self.target = -1
+            self.phase = "pick"
+            self.timer = 0
+        return a
+
+
+@dataclass
+class StrongScripted:
+    """Privileged heuristic (true state). Calibration diagnostic only."""
+
+    mode: str = "select"
     target: int = -1
     clutter_i: int = -1
     timer: int = 0
@@ -178,7 +358,6 @@ class StrongScripted:
             d = float(np.hypot(*(p[0:2] - hand_xy)))
             if self._is_lying(q):
                 d += 0.04
-            # Prefer pegs already near their hole.
             d += 0.5 * float(np.hypot(p[0] - e.slot_xy[i][0], p[1] - e.slot_xy[i][1]))
             if d < best_d:
                 best_d, best = d, i
@@ -224,7 +403,6 @@ class StrongScripted:
         return a
 
     def _upright_regrasp(self, e: Episode) -> np.ndarray:
-        """Side-grasp a lying peg, lift, drop to stand, then hand off to servo."""
         a = np.zeros(ACT_DIM)
         i = self.target
         p, q = e.peg_pose(i)
@@ -276,7 +454,6 @@ class StrongScripted:
                 self.sub = "drop"
                 self.timer = 0
             return a
-        # drop to stand
         a[2] = -0.5
         a[4] = 1.0
         self.timer += 1
@@ -288,7 +465,9 @@ class StrongScripted:
         return a
 
     def _clean_obs(self, e: Episode) -> np.ndarray:
-        """Noise-free observation from true state (privileged)."""
+        """Noise-free, unbiased observation from true state (privileged)."""
+        from .conditions import shape_one_hot
+
         d = e.data
         bx, by = e.c.board_xy
         hand = d.qpos[0:3].copy()
@@ -300,19 +479,21 @@ class StrongScripted:
             [math.sin(yaw), math.cos(yaw)],
             d.qvel[0:3],
             [(d.qpos[4] + d.qpos[5]) * 50],
+            np.zeros(3),
+            np.zeros(3),
+            [0.0],
         ])
         peg_feats = np.zeros(MAX_PEGS * PEG_FEAT)
         for i, peg in enumerate(e.c.pegs):
             ppos, pquat = e.peg_pose(i)
             hx, hy = e.slot_xy[i]
             prel = np.array([ppos[0] - hx, ppos[1] - hy, ppos[2] - BLOCK_H])
-            shape, dia, _, _ = SLOT_SPECS[peg.slot]
             peg_feats[i * PEG_FEAT : (i + 1) * PEG_FEAT] = np.concatenate([
                 [1.0],
                 prel * 10,
                 pquat,
-                [1.0 if shape == "round" else 0.0, 1.0 if shape == "square" else 0.0],
-                [dia * 50],
+                shape_one_hot(peg.shape()),
+                [peg.diameter() * 50],
                 [(hx - bx) * 10, (hy - by) * 10, BLOCK_H * 10],
                 [1.0 if e.seated_now[i] else 0.0],
             ])
@@ -329,14 +510,12 @@ class StrongScripted:
         return np.concatenate([proprio, e.last_action, peg_feats, clutter_feats]).astype(np.float64)
 
     def _servo(self, e: Episode) -> np.ndarray:
-        # Spiral search overlay when xy is close but not seating.
         i = self.target
         if i < 0 or e.seated_now[i]:
             self.mode = "select"
             self.target = -1
             return np.zeros(ACT_DIM)
         clean = self._clean_obs(e)
-        # Force the baseline to focus on our chosen target by zeroing other presence flags.
         for j in range(MAX_PEGS):
             if j != i:
                 clean[PEG_TABLE0 + j * PEG_FEAT] = 0.0
@@ -352,7 +531,6 @@ class StrongScripted:
             a[2] = -0.95
             a[4] = -1.0
             self.spiral_t += 1
-        # If the peg is deep, force release/lift.
         bottom = p[2] - PEG_LEN / 2
         if bottom <= 0.002 and xy_err <= e.r_hole[i] + 0.0015:
             a[:] = [0.0, 0.0, 1.0, 0.0, 1.0]

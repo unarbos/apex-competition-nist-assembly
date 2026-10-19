@@ -4,9 +4,13 @@ Strata are (K, clutter_bucket) with K in {3,4,5,6} and clutter_bucket in {low, h
 Eight strata × episodes_per_stratum (default 8) = 64 episodes; mean K = 4.5.
 
 Within each stratum a Latin hypercube covers the live ranges of clearance, friction,
-mass, gain, observation noise, angular noise, dropout, actuation delay, and whether
-a mid-episode disturbance fires. Peg identities, start poses, and board pose rotate
-with the seed. Records reveal conditions; they never reveal the seed.
+mass, gain, observation noise, angular noise, dropout, actuation delay, backlash,
+pose-estimate bias, chamfer, and whether a mid-episode disturbance fires. Peg
+identities, start poses, and board pose rotate with the seed. Records reveal
+conditions; they never reveal the seed.
+
+Held-out: reserved sub-ranges plus a D-flat keyed shape family that never appears
+in live rounds (baked into the private referee via reserved.json).
 """
 
 from __future__ import annotations
@@ -22,8 +26,8 @@ import numpy as np
 
 RESERVED_PATH = Path(os.environ.get("NIST_RESERVED_PATH", Path(__file__).with_name("reserved.json")))
 
-# NIST ATB-1 peg family: round + square × 4/8/12/16 mm. Fixed board-frame centres.
-# Layout is two rows (round / square), four sizes left-to-right — ATB-1-inspired spacing.
+# Board slots: round + square (live). Hex and D-flat keyed pegs are held-out only.
+# Layout is two rows, four sizes left-to-right — ATB-1-inspired spacing.
 SLOT_SPECS: tuple[tuple[str, float, float, float], ...] = (
     ("round", 0.004, -0.075, 0.045),
     ("round", 0.008, -0.025, 0.045),
@@ -39,30 +43,35 @@ MAX_CLUTTER = 3
 K_VALUES = (3, 4, 5, 6)
 CLUTTER_BUCKETS = ("low", "high")  # low → 0–1 blocks; high → 2–3
 PEG_START_TYPES = ("loose", "lying", "tray", "near_hole", "grasped")
+LIVE_SHAPES = ("round", "square")
+HELD_OUT_SHAPES = ("hex", "dflat")  # reserved split only
+SHAPE_NAMES = ("round", "square", "hex", "dflat")
 
 # Live ranges. Continuous axes are LHS-drawn; discrete axes are mapped from LHS then rounded.
-# Clearance lower bound is 0.15 mm (was 0.05 mm): sub-0.1 mm square fits are unstable
-# under MuJoCo soft contact on this board and give no usable gradient for miners.
+# Clearance floor is 0.25 mm: sub-0.1 mm square fits were unstable under MuJoCo soft contact.
 RANGES = {
-    "clearance": (0.0002, 0.0008),  # 0.2–0.8 mm (0.05 mm was unstable for square fits)
-    "friction": (0.35, 1.15),
-    "peg_mass": (0.005, 0.04),
-    "gain_scale": (0.7, 1.3),
-    "obs_noise": (0.0, 0.0012),  # 0–1.2 mm on part poses (hurts obs policies)
-    "obs_noise_rad": (0.0, 0.035),
-    "dropout_prob": (0.0, 0.10),
-    # Act-delay of even 1 control step breaks sharp Cartesian servos on this
-    # board (queued actions overshoot the hole lip). Keep live delay at 0;
-    # held-out reserves may still carve a non-zero delay band later.
-    "act_delay": (0.0, 0.4),  # rounds to 0 almost always; rare 1
-    "disturbance": (0.0, 1.0),  # ~40% of episodes after threshold below
+    "clearance": (0.00025, 0.0008),  # 0.25–0.8 mm; needs wiggle on the tight end
+    "friction": (0.3, 1.3),
+    "peg_mass": (0.005, 0.05),
+    "gain_scale": (0.6, 1.4),
+    "obs_noise": (0.0004, 0.0020),  # 0.4–2.0 mm white noise on pose estimates
+    "obs_noise_rad": (0.015, 0.06),
+    "dropout_prob": (0.03, 0.18),
+    # Delay/backlash stay mild so the privileged solver can prove solvability;
+    # anti-scripting comes primarily from pose-estimate bias (below).
+    "act_delay": (0.0, 0.45),  # rounds to 0 almost always
+    "disturbance": (0.0, 1.0),
+    # Per-episode fixed bias on all peg/slot pose *estimates* (metres / rad).
+    # A geometry-following script that trusts obs systematically misses the lip.
+    "pose_bias_xy": (0.004, 0.010),  # 4–10 mm magnitude; direction drawn separately
+    "pose_bias_yaw": (0.12, 0.28),  # ~7–16 deg
+    "backlash": (0.00005, 0.0004),  # Cartesian command deadzone (m)
+    "chamfer": (0.35, 1.0),  # entry funnel; still contact-rich at the low end
 }
 
-STEPS_PER_PEG = 240  # 9.6 s @ 25 Hz — room for sequential multi-peg assembly
+STEPS_PER_PEG = 280  # 11.2 s @ 25 Hz — room for contact search + sequencing
 DEFAULT_EPISODES_PER_STRATUM = 8
-# Extra radial gap beyond the hole opening so a "near_hole" upright peg does not
-# tip into the void during settle (hole wall thickness + margin).
-WALL_CLEAR = 0.028  # keep near_hole pegs from tipping into the opening under noop
+WALL_CLEAR = 0.028
 
 
 @dataclass
@@ -74,9 +83,20 @@ class PegStart:
     offset_xy: tuple[float, float]
     height: float
     yaw_err: float
+    # Held-out shape override (e.g. "dflat"); None → use SLOT_SPECS[slot][0].
+    shape_override: str | None = None
+
+    def shape(self) -> str:
+        if self.shape_override:
+            return self.shape_override
+        return SLOT_SPECS[self.slot][0]
+
+    def diameter(self) -> float:
+        return SLOT_SPECS[self.slot][1]
 
     def public(self) -> dict:
         d = asdict(self)
+        d["shape"] = self.shape()
         return {k: (round(v, 6) if isinstance(v, float) else v) for k, v in d.items()}
 
 
@@ -117,10 +137,14 @@ class EpisodeConditions:
     disturbance: int  # 0 or 1
     board_xy: tuple[float, float]
     board_yaw: float
+    pose_bias_xy: tuple[float, float] = (0.0, 0.0)  # fixed estimate bias (m)
+    pose_bias_yaw: float = 0.0
+    backlash: float = 0.0
+    chamfer: float = 0.5
     pegs: list[PegStart] = field(default_factory=list)
     clutter: list[ClutterStart] = field(default_factory=list)
     disturbance_step: int = 0
-    disturbance_target: str = "none"  # "peg:{i}" | "board" | "none"
+    disturbance_target: str = "none"  # "peg:{i}" | "board" | "drop" | "none"
     max_steps: int = 0
 
     def __post_init__(self) -> None:
@@ -142,12 +166,15 @@ class EpisodeConditions:
             "disturbance": int(self.disturbance),
             "board_xy": [round(self.board_xy[0], 6), round(self.board_xy[1], 6)],
             "board_yaw": round(self.board_yaw, 6),
+            "pose_bias_xy": [round(self.pose_bias_xy[0], 6), round(self.pose_bias_xy[1], 6)],
+            "pose_bias_yaw": round(self.pose_bias_yaw, 6),
+            "backlash": round(self.backlash, 7),
+            "chamfer": round(self.chamfer, 4),
             "pegs": [p.public() for p in self.pegs],
             "clutter": [c.public() for c in self.clutter],
             "disturbance_step": int(self.disturbance_step),
             "disturbance_target": self.disturbance_target,
             "max_steps": int(self.max_steps),
-            # Convenience mirrors for aggregators / reserve tests.
             "k": int(self.n_pegs),
         }
 
@@ -193,14 +220,13 @@ def _draw_clutter_count(rng: np.random.Generator, bucket: str) -> int:
 
 
 def _draw_peg_starts(
-    rng: np.random.Generator, slot_ids: list[int], n_clutter: int
+    rng: np.random.Generator, slot_ids: list[int], n_clutter: int, held_out: bool
 ) -> list[PegStart]:
     """Assign start types. At most one peg may be pre-grasped."""
     n = len(slot_ids)
-    # Bias toward upright / near-hole / grasped so a privileged reference can
-    # seat 1–2+ pegs for partial credit; lying/tray remain present as hard cases.
-    # Order matches PEG_START_TYPES: loose, lying, tray, near_hole, grasped.
-    weights = np.array([0.28, 0.10, 0.12, 0.30, 0.20])
+    # Mix keeps upright/near-hole common so the privileged solver can show solvability,
+    # while lying/tray remain present as hard cases for obs-only scripts.
+    weights = np.array([0.28, 0.08, 0.10, 0.34, 0.20])  # favor loose/near_hole/grasped
     types = list(rng.choice(PEG_START_TYPES, size=n, replace=True, p=weights / weights.sum()))
     grasped_idx = [i for i, t in enumerate(types) if t == "grasped"]
     if len(grasped_idx) > 1:
@@ -208,36 +234,32 @@ def _draw_peg_starts(
         for i in grasped_idx:
             if i != keep:
                 types[i] = str(rng.choice(["loose", "lying", "tray", "near_hole"]))
-    # Tray cluster: pegs share a common tray centre so they touch.
     tray_centre = (_u(rng, -0.03, 0.03), _u(rng, -0.095, -0.070))
     tray_i = 0
     pegs: list[PegStart] = []
     for local_i, slot in enumerate(slot_ids):
         st = types[local_i]
         shape, dia, _, _ = SLOT_SPECS[slot]
+        keyed = shape in ("square", "hex", "dflat")
         if st == "grasped":
             r = _u(rng, 0.0, 0.01)
             th = _u(rng, 0, 2 * math.pi)
             off = (r * math.cos(th), r * math.sin(th))
             h = _u(rng, 0.01, 0.04)
-            yaw = _u(rng, -0.3, 0.3) if shape == "square" else 0.0
+            yaw = _u(rng, -0.3, 0.3) if keyed else 0.0
         elif st == "near_hole":
-            # Rest beside the hole on the board, clear of the wall lip so settle cannot tip it in.
-            # Cap radius so large pegs stay on-board relative to their slot.
             r = min(0.055, (dia / 2) + WALL_CLEAR + _u(rng, 0.0, 0.004))
             th = _u(rng, 0, 2 * math.pi)
             off = (r * math.cos(th), r * math.sin(th))
             h = 0.0003
-            yaw = _u(rng, -0.15, 0.15) if shape == "square" else 0.0
+            yaw = _u(rng, -0.15, 0.15) if keyed else 0.0
         elif st == "lying":
-            # Keep lying pegs on-board and clear of hole walls (long axis ~50 mm).
             r = _u(rng, 0.05, 0.07)
             th = _u(rng, 0, 2 * math.pi)
             off = (r * math.cos(th), r * math.sin(th))
             h = _u(rng, 0.01, 0.03)
             yaw = _u(rng, -math.pi, math.pi)
         elif st == "tray":
-            # Fan pegs around the tray centre so neighbours touch but do not interlock.
             n_tray = max(1, sum(1 for t in types if t == "tray"))
             ang = tray_i * (2 * math.pi / n_tray)
             rad = 0.016 + 0.6 * dia
@@ -245,7 +267,7 @@ def _draw_peg_starts(
             h = _u(rng, 0.005, 0.02)
             yaw = _u(rng, -math.pi / 4, math.pi / 4)
             tray_i += 1
-        else:  # loose upright
+        else:
             r = _u(rng, 0.04, 0.07)
             th = _u(rng, 0, 2 * math.pi)
             off = (r * math.cos(th), r * math.sin(th))
@@ -260,7 +282,10 @@ def _draw_peg_starts(
                 yaw_err=float(yaw),
             )
         )
-    # n_clutter is unused for peg starts but kept so call sites stay explicit.
+    # Held-out split: force one peg into a held-out family (hex or D-flat).
+    if held_out and pegs:
+        i = int(rng.integers(0, len(pegs)))
+        pegs[i].shape_override = str(rng.choice(HELD_OUT_SHAPES))
     _ = n_clutter
     return pegs
 
@@ -270,7 +295,6 @@ def _draw_clutter(rng: np.random.Generator, n: int, pegs: list[PegStart]) -> lis
     out: list[ClutterStart] = []
     for j in range(n):
         if pegs and rng.random() < 0.55:
-            # Near a peg's matching slot approach (board frame, relative to that hole).
             slot = pegs[int(rng.integers(0, len(pegs)))].slot
             _, _, hx, hy = SLOT_SPECS[slot]
             off = (hx + _u(rng, -0.02, 0.02), hy + _u(rng, -0.02, 0.02))
@@ -305,21 +329,28 @@ def sample_episodes(
         for j in range(episodes_per_stratum):
             slot_ids = sorted(rng.choice(N_SLOTS, size=k_pegs, replace=False).tolist())
             n_clutter = _draw_clutter_count(rng, bucket)
-            pegs = _draw_peg_starts(rng, slot_ids, n_clutter)
+            pegs = _draw_peg_starts(rng, slot_ids, n_clutter, held_out=inside)
             clutter = _draw_clutter(rng, n_clutter, pegs)
             act_delay = int(np.clip(round(float(lhs["act_delay"][j])), 0, 1))
-            # Soften disturbance rate: upper ~40% of the LHS unit interval.
-            disturbance = 1 if float(lhs["disturbance"][j]) >= 0.6 else 0
+            disturbance = 1 if float(lhs["disturbance"][j]) >= 0.65 else 0
             max_steps = STEPS_PER_PEG * k_pegs
             if disturbance:
                 d_step = int(rng.integers(max(1, max_steps // 5), max(2, (4 * max_steps) // 5)))
-                if rng.random() < 0.7:
+                roll = rng.random()
+                if roll < 0.50:
                     d_target = f"peg:{int(rng.integers(0, k_pegs))}"
+                elif roll < 0.70:
+                    d_target = "drop"  # open gripper / slip mid-episode
                 else:
                     d_target = "board"
             else:
                 d_step = 0
                 d_target = "none"
+            # Fixed pose-estimate bias: random direction × LHS magnitude.
+            bias_mag = float(lhs["pose_bias_xy"][j])
+            bias_ang = _u(rng, 0, 2 * math.pi)
+            bias_xy = (bias_mag * math.cos(bias_ang), bias_mag * math.sin(bias_ang))
+            bias_yaw = float(lhs["pose_bias_yaw"][j]) * (1.0 if rng.random() < 0.5 else -1.0)
             eps.append(
                 EpisodeConditions(
                     n_pegs=k_pegs,
@@ -335,6 +366,10 @@ def sample_episodes(
                     disturbance=disturbance,
                     board_xy=(_u(rng, -0.03, 0.03), _u(rng, -0.03, 0.03)),
                     board_yaw=_u(rng, -0.15, 0.15),
+                    pose_bias_xy=(float(bias_xy[0]), float(bias_xy[1])),
+                    pose_bias_yaw=float(bias_yaw),
+                    backlash=float(lhs["backlash"][j]),
+                    chamfer=float(lhs["chamfer"][j]),
                     pegs=pegs,
                     clutter=clutter,
                     disturbance_step=d_step,
@@ -350,3 +385,7 @@ def slot_world_xy(board_xy: tuple[float, float], board_yaw: float, slot: int) ->
     _, _, lx, ly = SLOT_SPECS[slot]
     c, s = math.cos(board_yaw), math.sin(board_yaw)
     return board_xy[0] + c * lx - s * ly, board_xy[1] + s * lx + c * ly
+
+
+def shape_one_hot(shape: str) -> list[float]:
+    return [1.0 if shape == name else 0.0 for name in SHAPE_NAMES]
