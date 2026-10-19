@@ -1,7 +1,7 @@
 """nist_lite PLAYER server: serves the miner's ONNX policy over gym_v1.
 
 The platform writes the miner's policy to /app/policy.onnx. The referee calls /act once per
-control step with a batch of observations (shape [B, 26]); the policy returns [B, 5] actions.
+control step with a batch of observations (shape [B, OBS_DIM]); the policy returns [B, 5] actions.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ import onnxruntime as ort
 from gym_v1.player import Player, serve
 
 POLICY_PATH = os.environ.get("NIST_POLICY_PATH", "/app/policy.onnx")
-OBS_DIM, ACT_DIM = 26, 5
+# Must match referee/nist_sim/env.py OBS_DIM / ACT_DIM (v0.2.0 multi-peg board).
+OBS_DIM, ACT_DIM = 161, 5
 ALLOWED_DOMAINS = {"", "ai.onnx"}
 MIN_OPSET, MAX_OPSET = 13, 21
 

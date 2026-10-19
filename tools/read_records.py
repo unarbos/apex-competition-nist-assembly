@@ -11,7 +11,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-SUPPORTED_MAJOR = 1
+SUPPORTED_MAJOR = 2
 
 
 def _check(rec: dict) -> None:
@@ -30,25 +30,34 @@ def main() -> None:
         t = json.loads((d / f"traj_{a.episode:05d}.json").read_text())
         _check(t)
         for s in t["steps"]:
-            print(s["t"], "part", s["part_pos"], "hand", s["hand"], "a", s["action"])
+            print(s["t"], "seated", s.get("seated"), "hand", s["hand"], "a", s["action"])
         return
     lines = [json.loads(x) for x in (d / "episodes.jsonl").read_text().splitlines() if x.strip()]
     for r in lines:
         _check(r)
     eps = [r for r in lines if "episode" in r]
-    agg = defaultdict(lambda: [0, 0])
+    agg = defaultdict(lambda: [0.0, 0, 0, 0])  # score_sum, n, pegs_seated, pegs_total
     reasons = defaultdict(int)
     for r in eps:
         c = r["conditions"]
-        k = (c["shape"], round(c["diameter"] * 1000), c["reset_type"])
-        agg[k][0] += r["success"]
+        k = (c["n_pegs"], c["clutter_bucket"])
+        agg[k][0] += r["score"]
         agg[k][1] += 1
+        agg[k][2] += r.get("pegs_seated", 0)
+        agg[k][3] += r.get("n_pegs", c["n_pegs"])
         reasons[r["terminal_reason"]] += 1
-    print(f"episodes: {len(eps)}  success: {sum(r['success'] for r in eps) / max(1, len(eps)):.4f}")
+    mean_score = sum(r["score"] for r in eps) / max(1, len(eps))
+    peg_frac = sum(r.get("pegs_seated", 0) for r in eps) / max(
+        1, sum(r.get("n_pegs", 0) for r in eps)
+    )
+    print(f"episodes: {len(eps)}  mean_score: {mean_score:.4f}  peg_frac: {peg_frac:.4f}")
     print("terminal reasons:", dict(reasons))
     for k in sorted(agg):
-        s, n = agg[k]
-        print(f"  {k[0]:6s} {k[1]:2d}mm {k[2]:14s} {s:3d}/{n:<3d} {s / n:.2f}")
+        sc, n, ps, pt = agg[k]
+        print(
+            f"  K={k[0]} clutter={k[1]:4s}  score {sc / n:.3f}  "
+            f"pegs {ps}/{pt} ({ps / max(1, pt):.2f})  n={n}"
+        )
 
 
 if __name__ == "__main__":

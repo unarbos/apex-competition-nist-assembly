@@ -1,4 +1,4 @@
-"""The success predicate: a seated part must be upright, not merely low and centred.
+"""Success / partial-credit predicates for the multi-peg board.
 
     pytest -q tests/test_success.py
 """
@@ -9,91 +9,110 @@ import math
 import sys
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "referee"))
-import mujoco  # noqa: E402
-from nist_sim.conditions import sample_episodes  # noqa: E402
+from nist_sim.conditions import EpisodeConditions, PegStart  # noqa: E402
 from nist_sim.env import BLOCK_H, PEG_LEN, SEAT_TOL_Z, Episode  # noqa: E402
+from nist_sim.scoring import episode_score  # noqa: E402
 
 OPEN_AND_HOLD = np.array([0, 0, 0, 0, 1.0])
 
 
-def _one_per_part():
-    _, conds = sample_episodes(7, 1)
-    seen = {}
-    for c in conds:
-        seen.setdefault((c.shape, c.diameter), c)
-    return list(seen.values())
+def _ep(slots=(0,), clearance=0.0003) -> Episode:
+    pegs = [
+        PegStart(slot=s, start_type="loose", offset_xy=(0.06, 0.0), height=0.02, yaw_err=0.0)
+        for s in slots
+    ]
+    c = EpisodeConditions(
+        n_pegs=len(pegs),
+        clutter_bucket="low",
+        clearance=clearance,
+        friction=1.0,
+        peg_mass=0.02,
+        gain_scale=1.0,
+        obs_noise=0.0,
+        obs_noise_rad=0.0,
+        dropout_prob=0.0,
+        act_delay=0,
+        disturbance=0,
+        board_xy=(0.0, 0.0),
+        board_yaw=0.0,
+        pegs=pegs,
+        clutter=[],
+        max_steps=200 * len(pegs),
+    )
+    return Episode(c, np.random.default_rng(0))
 
 
-def _place(e: Episode, xyz, quat):
-    q = e.part_qadr
+def _place_peg(e: Episode, i: int, xyz, quat):
+    q = e.peg_qadr[i]
     e.data.qpos[q : q + 3] = xyz
     e.data.qpos[q + 3 : q + 7] = quat
-    e.data.qvel[e.part_vadr : e.part_vadr + 6] = 0
-    hx, hy = e.c.hole_xy
-    e.data.qpos[0:3] = [hx, hy, 0.12]  # hand well above the part
-    e.target[0:3] = [hx, hy, 0.12]
+    e.data.qvel[e.peg_vadr[i] : e.peg_vadr[i] + 6] = 0
+    e.data.qpos[0:3] = [xyz[0], xyz[1], 0.12]
+    e.target[0:3] = [xyz[0], xyz[1], 0.12]
     mujoco.mj_forward(e.model, e.data)
 
 
-def _hold(e: Episode, steps: int = 15) -> None:
-    for _ in range(steps):
+def test_lying_across_hole_is_not_seated():
+    e = _ep(slots=(0,))
+    hx, hy = e.slot_xy[0]
+    # On its side over the hole.
+    _place_peg(
+        e,
+        0,
+        [hx, hy, BLOCK_H + 0.002 + 0.002],
+        [math.cos(math.pi / 4), math.sin(math.pi / 4), 0, 0],
+    )
+    for _ in range(20):
+        e.step(OPEN_AND_HOLD)
+    assert not e.seated_now[0]
+
+
+def test_wrong_slot_does_not_count():
+    """Peg for slot 0 placed into slot 1's hole → not seated for peg 0."""
+    e = _ep(slots=(0, 1))
+    # Seat peg 0 into peg 1's hole.
+    hx1, hy1 = e.slot_xy[1]
+    _place_peg(e, 0, [hx1, hy1, PEG_LEN / 2], [1, 0, 0, 0])
+    for _ in range(20):
+        e.step(OPEN_AND_HOLD)
+    assert not e.seated_now[0]
+
+
+def test_knocked_out_loses_credit():
+    # Two pegs so seating peg 0 does not end the episode (all-peg success).
+    e = _ep(slots=(0, 1))
+    hx, hy = e.slot_xy[0]
+    _place_peg(e, 0, [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    for _ in range(10):
+        e.step(OPEN_AND_HOLD)
+    assert e.seated_now[0] and not e.done
+    first = e.first_seat_step[0]
+    # Yank peg 0 out of its hole.
+    _place_peg(e, 0, [hx + 0.08, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    for _ in range(10):
+        e.step(OPEN_AND_HOLD)
+    assert not e.seated_now[0]
+    seated = e.peg_seated_at_end()
+    firsts = e.peg_first_seat_steps()
+    assert seated[0] is False
+    assert firsts[0] is None
+    assert episode_score(seated, firsts, e.c.max_steps) < 0.5
+    assert first is not None  # had been seated earlier
+
+
+def test_upright_seat_in_own_slot_counts():
+    e = _ep(slots=(0,), clearance=0.0004)
+    hx, hy = e.slot_xy[0]
+    _place_peg(e, 0, [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    for _ in range(15):
         e.step(OPEN_AND_HOLD)
         if e.done:
             break
-
-
-def _lying_across(c) -> Episode:
-    e = Episode(c, np.random.default_rng(0))
-    hx, hy = c.hole_xy
-    # On its side, centred over the hole, resting on the block's top face.
-    _place(e, [hx, hy, BLOCK_H + c.diameter / 2 + 2e-4], [math.cos(math.pi / 4), math.sin(math.pi / 4), 0, 0])
-    return e
-
-
-# Lying across the mouth puts the part's centre at BLOCK_H + r, i.e. its "bottom" (centre - PEG_LEN/2)
-# at r - 5 mm: within the 1 mm seat tolerance for every part up to 12 mm. Those are the cases the
-# position-only predicate accepted.
-LYING_ACCEPTED_BY_POSITION = [c for c in _one_per_part() if c.diameter / 2 - (PEG_LEN / 2 - BLOCK_H) <= SEAT_TOL_Z]
-
-
-@pytest.mark.parametrize("c", LYING_ACCEPTED_BY_POSITION, ids=lambda c: f"{c.shape}_{round(c.diameter * 1000)}mm")
-def test_part_lying_across_hole_is_not_assembled(c):
-    e = _lying_across(c)
-    _hold(e)
-    assert not e.success, e.terminal_reason
-
-
-# Within those, the pose physically settles and scores for every part except the 8 mm round peg,
-# which keeps moving on the mouth of its hole. The control below runs on the cases where the
-# position-only predicate really did pay out.
-LYING_EXPLOITABLE = [c for c in LYING_ACCEPTED_BY_POSITION if not (c.shape == "round" and round(c.diameter * 1000) == 8)]
-
-
-@pytest.mark.parametrize("c", LYING_EXPLOITABLE, ids=lambda c: f"{c.shape}_{round(c.diameter * 1000)}mm")
-def test_only_the_upright_check_rejects_lying_across(c, monkeypatch):
-    # With the upright check disabled the same pose must count as assembled; otherwise the test
-    # above would pass for an unrelated reason (the part rolling off, an unstable step, ...).
-    monkeypatch.setattr(Episode, "_upright", lambda self: True)
-    e = _lying_across(c)
-    _hold(e)
-    assert e.success and e.terminal_reason == "assembled", e.terminal_reason
-
-
-def test_lying_cases_cover_three_sizes():
-    assert {round(c.diameter * 1000) for c in LYING_ACCEPTED_BY_POSITION} == {4, 8, 12}
-
-
-@pytest.mark.parametrize("c", _one_per_part(), ids=lambda c: f"{c.shape}_{round(c.diameter * 1000)}mm")
-@pytest.mark.parametrize("flipped", [False, True])
-def test_upright_seated_part_is_assembled(c, flipped):
-    e = Episode(c, np.random.default_rng(0))
-    hx, hy = c.hole_xy
-    quat = [0, 1, 0, 0] if flipped else [1, 0, 0, 0]  # the peg is end-symmetric
-    _place(e, [hx, hy, PEG_LEN / 2 + 2e-4], quat)
-    _hold(e)
-    assert e.success and e.terminal_reason == "assembled", e.terminal_reason
+    assert e.seated_now[0]
+    assert e.peg_seated_at_end() == [True]
