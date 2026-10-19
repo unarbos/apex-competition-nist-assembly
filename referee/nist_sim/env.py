@@ -37,11 +37,11 @@ MAX_PEGS = N_SLOTS
 OBS_DIM = PROPRIO_DIM + ACT_DIM + MAX_PEGS * PEG_FEAT + MAX_CLUTTER * CLUTTER_FEAT  # 161
 
 CONTROL_HZ = 25
-# 1 ms is stable down to ~0.05 mm clearance with the solimp width below.
+# 1 ms is stable across the live clearance band (0.2–0.8 mm).
 PHYSICS_DT = 0.001
 SUBSTEPS = int(round(1.0 / (CONTROL_HZ * PHYSICS_DT)))  # 40
-# Contact width must stay below the minimum radial clearance so a 0.05 mm fit
-# cannot be cheated by the soft constraint. 0.02 mm < 0.05 mm.
+# Contact width must stay below the minimum radial clearance so soft contacts
+# cannot cheat the fit. 0.02 mm << 0.2 mm live lower bound.
 SOLIMP = "0.95 0.99 0.00002"
 
 BLOCK_H = 0.020

@@ -41,19 +41,24 @@ CLUTTER_BUCKETS = ("low", "high")  # low → 0–1 blocks; high → 2–3
 PEG_START_TYPES = ("loose", "lying", "tray", "near_hole", "grasped")
 
 # Live ranges. Continuous axes are LHS-drawn; discrete axes are mapped from LHS then rounded.
+# Clearance lower bound is 0.15 mm (was 0.05 mm): sub-0.1 mm square fits are unstable
+# under MuJoCo soft contact on this board and give no usable gradient for miners.
 RANGES = {
-    "clearance": (0.00005, 0.0006),  # 0.05–0.6 mm; tightened vs v0.1.x after solimp check
-    "friction": (0.3, 1.2),
-    "peg_mass": (0.005, 0.05),
-    "gain_scale": (0.6, 1.4),
-    "obs_noise": (0.0, 0.001),  # 0–1 mm on part poses
-    "obs_noise_rad": (0.0, 0.03),
-    "dropout_prob": (0.0, 0.12),
-    "act_delay": (0.0, 3.0),  # rounded to {0,1,2,3} control steps
-    "disturbance": (0.0, 1.0),  # rounded: 0 or 1 mid-episode impulse
+    "clearance": (0.0002, 0.0008),  # 0.2–0.8 mm (0.05 mm was unstable for square fits)
+    "friction": (0.35, 1.15),
+    "peg_mass": (0.005, 0.04),
+    "gain_scale": (0.7, 1.3),
+    "obs_noise": (0.0, 0.0012),  # 0–1.2 mm on part poses (hurts obs policies)
+    "obs_noise_rad": (0.0, 0.035),
+    "dropout_prob": (0.0, 0.10),
+    # Act-delay of even 1 control step breaks sharp Cartesian servos on this
+    # board (queued actions overshoot the hole lip). Keep live delay at 0;
+    # held-out reserves may still carve a non-zero delay band later.
+    "act_delay": (0.0, 0.4),  # rounds to 0 almost always; rare 1
+    "disturbance": (0.0, 1.0),  # ~40% of episodes after threshold below
 }
 
-STEPS_PER_PEG = 200  # 8 s @ 25 Hz
+STEPS_PER_PEG = 240  # 9.6 s @ 25 Hz — room for sequential multi-peg assembly
 DEFAULT_EPISODES_PER_STRATUM = 8
 # Extra radial gap beyond the hole opening so a "near_hole" upright peg does not
 # tip into the void during settle (hole wall thickness + margin).
@@ -192,9 +197,10 @@ def _draw_peg_starts(
 ) -> list[PegStart]:
     """Assign start types. At most one peg may be pre-grasped."""
     n = len(slot_ids)
-    # Mix of starts; grasped is rare (≤1). Slightly more near_hole/grasped so a
-    # competent scripted policy has partial-credit headroom without saturating.
-    weights = np.array([0.24, 0.18, 0.18, 0.24, 0.16])  # loose lying tray near grasped
+    # Bias toward upright / near-hole / grasped so a privileged reference can
+    # seat 1–2+ pegs for partial credit; lying/tray remain present as hard cases.
+    # Order matches PEG_START_TYPES: loose, lying, tray, near_hole, grasped.
+    weights = np.array([0.28, 0.10, 0.12, 0.30, 0.20])
     types = list(rng.choice(PEG_START_TYPES, size=n, replace=True, p=weights / weights.sum()))
     grasped_idx = [i for i, t in enumerate(types) if t == "grasped"]
     if len(grasped_idx) > 1:
@@ -301,9 +307,9 @@ def sample_episodes(
             n_clutter = _draw_clutter_count(rng, bucket)
             pegs = _draw_peg_starts(rng, slot_ids, n_clutter)
             clutter = _draw_clutter(rng, n_clutter, pegs)
-            act_delay = int(np.clip(round(float(lhs["act_delay"][j])), 0, 3))
-            disturbance = int(round(float(lhs["disturbance"][j])))
-            disturbance = 1 if disturbance >= 1 else 0
+            act_delay = int(np.clip(round(float(lhs["act_delay"][j])), 0, 1))
+            # Soften disturbance rate: upper ~40% of the LHS unit interval.
+            disturbance = 1 if float(lhs["disturbance"][j]) >= 0.6 else 0
             max_steps = STEPS_PER_PEG * k_pegs
             if disturbance:
                 d_step = int(rng.integers(max(1, max_steps // 5), max(2, (4 * max_steps) // 5)))
