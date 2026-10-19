@@ -90,7 +90,9 @@ python tools/quick_learn.py                         # short hill-climb vs obs sc
 ```
 
 The reference baseline is a soft-nearest-first insert/release servo on the biased obs.
-`ObsOnlyScripted` is the strongest hand-coded obs-only controller (anti-scripting gate).
+`ObsOnlyScripted` is the strongest hand-coded obs-only controller (anti-scripting
+gate: EMA + F/T spiral + jam retry). `tools/train_ppo.py` is the BC-then-PPO
+learnability harness (curriculum curve in `CALIBRATION.md`).
 The privileged solver in `tools/reference_solver.py` is **not** shipped in the player.
 See `CALIBRATION.md` for measured scores and wall times.
 
