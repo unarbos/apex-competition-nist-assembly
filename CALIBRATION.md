@@ -1,82 +1,80 @@
-# NIST-Lite v0.2.0 calibration
+# NIST-Lite v0.2.0 calibration (anti-scripting)
 
-Measured on this box (MuJoCo 3.16, CPU). Episodes/round: **64** (8 strata × 8).
-In-process runs use 1 worker equivalent; ONNX `local_run` uses **2 workers** over gym_v1.
+Measured on this box (MuJoCo 3.16). `OBS_DIM=184`.
+Episodes/round: `32` (8 strata × 4). Seeds: 0–9.
 
-## Junk policies (must score ~0)
+## Why RL is required
 
-| Policy | mean | sd | min | max | peg seat frac | in-process wall |
-|---|---:|---:|---:|---:|---:|---:|
-| zero | 0.0046 | 0.0032 | 0.0000 | 0.0114 | 0.005 | 136 s |
-| random | 0.0039 | 0.0036 | 0.0000 | 0.0113 | 0.004 | 123 s |
-| constant | 0.0009 | 0.0014 | 0.0000 | 0.0031 | 0.001 | 170 s |
+v0.1.5 round-4 king was a hand-written ONNX controller (~5.8k elementwise ops,
+no matmuls). v0.2 defeats that class:
 
-NaN / huge / wrong-shape / slow are exercised in `tests/test_scoring.py` and score 0 via
-player fault or invalid actions (fixed denominator).
+- **Pose-estimate bias**: peg/slot channels carry a fixed per-episode bias of
+  4–10 mm and
+  ~7–16°,
+  plus white noise and dropout. Exact hole/peg poses are never revealed.
+- **Wrist force/torque** for contact-driven search.
+- **Hidden dynamics**: friction, mass, gain, mild backlash, chamfer, rare delay,
+  mid-episode shove/drop.
+- **Held-out shapes**: `('hex', 'dflat')` on the reserved split only.
 
-## Baseline (nearest-first Python) and strong scripted
+## Difficulty (live)
 
-Over **10 seeds** (0..9), full 64-episode rounds:
+- clearance `0.25–0.80 mm`
+- STEPS_PER_PEG `280`
 
-| Policy | mean | sd | min | max | peg seat frac | in-process wall |
-|---|---:|---:|---:|---:|---:|---:|
-| baseline (Python nearest-first) | 0.0337 | 0.0114 | 0.0194 | 0.0535 | 0.035 | 131 s |
-| strong scripted (privileged) | 0.0348 | 0.0113 | 0.0189 | 0.0567 | 0.036 | 140 s |
+## Junk (zero policy)
 
-Targets from the brief:
+- zero: mean=0.0274 range=[0.0104,0.0395]
 
-- baseline ≤ ~0.30 → **met** (≈0.034)
-- strong clearly below ~0.75 → **met** (≈0.035; large headroom for learned policies)
-- junk ~0 → **met**
-- per-round sd of a fixed policy small relative to 1% → sd ≈ 0.011 on a ~0.03 mean;
-  absolute sd is larger than 1% of the mean, but the 1% takeover rule applies to absolute
-  raw_score gaps; with means near 0.03 the margin is tiny and the task is intentionally hard.
+### baseline (nearest-first, obs)
+- raw: mean=0.0900 sd=0.0166 min=0.0607 max=0.1131 (n=10)
+- peg seat frac: mean=0.0929
+- in-process wall: mean=76.7s [72.5,78.6]
+- per-K: 3=0.089, 4=0.106, 5=0.095, 6=0.070
+- by clearance: loose(>=0.60mm)=0.097, mid(0.40-0.60mm)=0.089, tight(<0.40mm)=0.079
+- by clutter: high=0.090, low=0.090
+- by start mix: all_upright=0.100, has_tray=0.096, mixed_lying=0.084
 
-The strong policy is only slightly above the baseline on this mix: multi-peg free order,
-tight fits down to 0.05 mm, act-delay, dropout, and clutter dominate. Single-peg
-grasped / near_hole / loose probes seat reliably under the strong heuristic; the round
-average stays low because most episodes mix lying/tray starts and K≥4.
+### obs-only scripted (anti-scripting gate)
+- raw: mean=0.0167 sd=0.0099 min=0.0048 max=0.0324 (n=10)
+- peg seat frac: mean=0.0179
+- in-process wall: mean=58.5s [52.3,65.7]
+- per-K: 3=0.020, 4=0.017, 5=0.016, 6=0.014
+- by clearance: loose(>=0.60mm)=0.027, mid(0.40-0.60mm)=0.012, tight(<0.40mm)=0.012
+- by clutter: high=0.020, low=0.013
+- by start mix: all_upright=0.020, has_tray=0.013, mixed_lying=0.021
 
-## ONNX baseline full eval (2 workers, HTTP gym_v1)
+### privileged reference (tools/; true state)
+- raw: mean=0.5102 sd=0.0406 min=0.4264 max=0.5533 (n=10)
+- peg seat frac: mean=0.5581
+- in-process wall: mean=87.3s [79.7,93.2]
+- per-K: 3=0.548, 4=0.530, 5=0.490, 6=0.473
+- by clearance: loose(>=0.60mm)=0.617, mid(0.40-0.60mm)=0.494, tight(<0.40mm)=0.406
+- by clutter: high=0.494, low=0.527
+- by start mix: all_upright=0.564, has_tray=0.596, mixed_lying=0.411
 
-| Seed | raw_score | wall_s |
-|---|---:|---:|
-| 1 | 0.0031 | 56.6 |
-| 2 | 0.0026 | 64.4 |
-| 3 | 0.0031 | 56.3 |
+## ONNX baseline (2 workers)
 
-Mean wall ≈ **59 s** (2 workers). Distilled linear ONNX tracks the Python baseline weakly
-(expected); well under the 120 s box budget and the 900 s platform timeout.
+- seed 1: raw=0.0134 wall=83.7s
 
-ONNX zero policy (seed 3): raw ≈ 0.006 — junk stays near 0.
+## Held-out (throwaway secret)
 
-## Held-out split (dev reserve from throwaway secret)
+- reserved axes: `{'backlash': [0.0002548, 0.0003073], 'pose_bias_xy': [0.0056421, 0.0065421]}`
+- reference live: 0.4942
+- reference reserved (held-out shapes): 0.3312
+- drop: +0.1630
 
-Secret: `calibration-throwaway-secret-v020` (not a production secret).
+## Targets
+- privileged reference 0.50–0.75 → **met** (mean=0.510)
+- obs-only scripted ≤ ~0.25 → **met** (mean=0.017)
+- baseline ≤ ~0.15 → **met** (mean=0.090)
+- junk ~0 → met
+- eval ≤ ~400 s @ 2 workers → see ONNX wall
 
-Reserved axes for this throwaway secret: `clearance ∈ [0.000372, 0.000454]`,
-`obs_noise_rad ∈ [0.00821, 0.01271]`.
+## Learning evidence
+- quick_learn hillclimb best=0.0305 (warm=0.0123); held delta vs obs=+0.0000
 
-Strong scripted over 5 seeds:
+## Solvers
+- `tools/reference_solver.py` — privileged; not in player
+- `ObsOnlyScripted` — strongest obs-only hand-coded controller
 
-| split | mean raw |
-|---|---:|
-| live | 0.0354 |
-| reserved | 0.0408 |
-| drop (live − reserved) | **−0.0054** |
-
-This throwaway reserve landed on mid-range clearance / angular noise, so the reserved
-split is slightly *easier* than live here. Production reserves are chosen from a real
-build secret and scored out of band; the mechanism (LHS inside reserved sub-ranges,
-never revealing the seed) is what this check validates.
-
-## Clearance note
-
-Minimum radial clearance is **0.05 mm**. Contact `solimp` width is `0.00002` m (0.02 mm),
-below the clearance, so soft contacts cannot cheat the fit. Seating at 0.05 mm was verified
-by teleport-and-push. Round holes use 12 walls (was 16) to cut contact pairs on the full board.
-
-## Physics throughput
-
-Full board (K=6, 3 clutter) ≈ **15k physics steps/s** on this box (MuJoCo 3.16, 1 core),
-in line with the brief’s ~17k estimate. `PHYSICS_DT = 0.001` kept.
