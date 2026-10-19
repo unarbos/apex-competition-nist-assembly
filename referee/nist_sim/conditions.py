@@ -3,14 +3,15 @@
 Strata are (K, clutter_bucket) with K in {3,4,5,6} and clutter_bucket in {low, high}.
 Eight strata × episodes_per_stratum (default 8) = 64 episodes; mean K = 4.5.
 
-Within each stratum a Latin hypercube covers the live ranges of clearance, friction,
-mass, gain, observation noise, angular noise, dropout, actuation delay, backlash,
-pose-estimate bias, chamfer, and whether a mid-episode disturbance fires. Peg
-identities, start poses, and board pose rotate with the seed. Records reveal
-conditions; they never reveal the seed.
+Within each stratum a Latin hypercube covers the live ranges, then each episode is
+assigned a **difficulty tier** so every round has a learnable gradient:
 
-Held-out: reserved sub-ranges plus a D-flat keyed shape family that never appears
-in live rounds (baked into the private referee via reserved.json).
+- ~25% **easy** — grasped / near-hole starts, low noise & residual bias, little clutter
+- ~35% **medium** — mixed upright starts, moderate anti-scripting
+- ~40% **hard** — full residual bias / drift / disturbances; reserved split puts
+  held-out shapes here
+
+Held-out: reserved LHS sub-ranges plus hex / D-flat keyed pegs (reserved split only).
 """
 
 from __future__ import annotations
@@ -75,6 +76,9 @@ RANGES = {
 STEPS_PER_PEG = 280  # 11.2 s @ 25 Hz — room for contact search + sequencing
 DEFAULT_EPISODES_PER_STRATUM = 8
 WALL_CLEAR = 0.028
+# Per-stratum tier mix ≈ 25% / 35% / 40% (exact for episodes_per_stratum=8 → 2/3/3).
+DIFFICULTY_TIERS = ("easy", "medium", "hard")
+TIER_FRACTIONS = (0.25, 0.35, 0.40)
 
 
 @dataclass
@@ -149,6 +153,7 @@ class EpisodeConditions:
     # Hidden search-scale cue (not in obs): spiral pitch that fits this episode's
     # clearance/chamfer. Scripts cannot read it; learners can infer from contact.
     search_pitch: float = 0.0002
+    difficulty_tier: str = "hard"  # easy | medium | hard — baked into every live round
     pegs: list[PegStart] = field(default_factory=list)
     clutter: list[ClutterStart] = field(default_factory=list)
     disturbance_step: int = 0
@@ -184,6 +189,7 @@ class EpisodeConditions:
             "backlash": round(self.backlash, 7),
             "chamfer": round(self.chamfer, 4),
             "search_pitch": round(self.search_pitch, 7),
+            "difficulty_tier": self.difficulty_tier,
             "pegs": [p.public() for p in self.pegs],
             "clutter": [c.public() for c in self.clutter],
             "disturbance_step": int(self.disturbance_step),
@@ -328,6 +334,148 @@ def _draw_clutter(rng: np.random.Generator, n: int, pegs: list[PegStart]) -> lis
     return out
 
 
+def _tier_counts(n: int) -> tuple[int, int, int]:
+    """Integer (easy, medium, hard) counts summing to n ≈ 25/35/40.
+
+    Small ``n`` is special-cased so every live round keeps an easy↔hard
+    gradient (largest-remainder alone can drop easy or hard at n≤3).
+    """
+    if n <= 0:
+        return 0, 0, 0
+    if n == 1:
+        return 0, 0, 1
+    if n == 2:
+        return 1, 0, 1  # easy + hard
+    if n == 3:
+        return 1, 1, 1
+    raw = [f * n for f in TIER_FRACTIONS]
+    counts = [int(x) for x in raw]  # floor
+    rem = n - sum(counts)
+    order = sorted(range(3), key=lambda i: (raw[i] - counts[i], -i), reverse=True)
+    for k in range(rem):
+        counts[order[k % 3]] += 1
+    return counts[0], counts[1], counts[2]
+
+
+def _assign_tiers(rng: np.random.Generator, n: int) -> list[str]:
+    n_easy, n_med, n_hard = _tier_counts(n)
+    tiers = (["easy"] * n_easy) + (["medium"] * n_med) + (["hard"] * n_hard)
+    rng.shuffle(tiers)
+    return tiers
+
+
+def _easy_peg_starts(rng: np.random.Generator, slot_ids: list[int]) -> list[PegStart]:
+    """Grasped / near_hole only — partial-credit friendly."""
+    n = len(slot_ids)
+    types = ["grasped"] + ["near_hole"] * (n - 1)
+    rng.shuffle(types)
+    # At most one grasped.
+    grasped = [i for i, t in enumerate(types) if t == "grasped"]
+    for i in grasped[1:]:
+        types[i] = "near_hole"
+    pegs: list[PegStart] = []
+    for local_i, slot in enumerate(slot_ids):
+        st = types[local_i]
+        _, dia, _, _ = SLOT_SPECS[slot]
+        if st == "grasped":
+            r = _u(rng, 0.0, 0.008)
+            th = _u(rng, 0, 2 * math.pi)
+            off = (r * math.cos(th), r * math.sin(th))
+            h = _u(rng, 0.015, 0.035)
+            yaw = 0.0
+        else:
+            r = min(0.04, (dia / 2) + WALL_CLEAR + _u(rng, 0.0, 0.003))
+            th = _u(rng, 0, 2 * math.pi)
+            off = (r * math.cos(th), r * math.sin(th))
+            h = 0.0003
+            yaw = _u(rng, -0.08, 0.08) if SLOT_SPECS[slot][0] == "square" else 0.0
+        pegs.append(
+            PegStart(
+                slot=int(slot),
+                start_type=st,
+                offset_xy=(float(off[0]), float(off[1])),
+                height=float(h),
+                yaw_err=float(yaw),
+            )
+        )
+    return pegs
+
+
+def _medium_peg_starts(rng: np.random.Generator, slot_ids: list[int]) -> list[PegStart]:
+    """Mostly upright; rare lying."""
+    weights = np.array([0.30, 0.04, 0.08, 0.38, 0.20])  # suppress lying
+    return _draw_peg_starts_with_weights(rng, slot_ids, weights, held_out=False)
+
+
+def _draw_peg_starts_with_weights(
+    rng: np.random.Generator,
+    slot_ids: list[int],
+    weights: np.ndarray,
+    held_out: bool,
+) -> list[PegStart]:
+    """Same as _draw_peg_starts but with explicit start-type weights."""
+    n = len(slot_ids)
+    types = list(rng.choice(PEG_START_TYPES, size=n, replace=True, p=weights / weights.sum()))
+    grasped_idx = [i for i, t in enumerate(types) if t == "grasped"]
+    if len(grasped_idx) > 1:
+        keep = int(rng.choice(grasped_idx))
+        for i in grasped_idx:
+            if i != keep:
+                types[i] = str(rng.choice(["loose", "near_hole", "tray"]))
+    tray_centre = (_u(rng, -0.03, 0.03), _u(rng, -0.095, -0.070))
+    tray_i = 0
+    pegs: list[PegStart] = []
+    for local_i, slot in enumerate(slot_ids):
+        st = types[local_i]
+        shape, dia, _, _ = SLOT_SPECS[slot]
+        keyed = shape in ("square", "hex", "dflat")
+        if st == "grasped":
+            r = _u(rng, 0.0, 0.01)
+            th = _u(rng, 0, 2 * math.pi)
+            off = (r * math.cos(th), r * math.sin(th))
+            h = _u(rng, 0.01, 0.04)
+            yaw = _u(rng, -0.3, 0.3) if keyed else 0.0
+        elif st == "near_hole":
+            r = min(0.055, (dia / 2) + WALL_CLEAR + _u(rng, 0.0, 0.004))
+            th = _u(rng, 0, 2 * math.pi)
+            off = (r * math.cos(th), r * math.sin(th))
+            h = 0.0003
+            yaw = _u(rng, -0.15, 0.15) if keyed else 0.0
+        elif st == "lying":
+            r = _u(rng, 0.05, 0.07)
+            th = _u(rng, 0, 2 * math.pi)
+            off = (r * math.cos(th), r * math.sin(th))
+            h = _u(rng, 0.01, 0.03)
+            yaw = _u(rng, -math.pi, math.pi)
+        elif st == "tray":
+            n_tray = max(1, sum(1 for t in types if t == "tray"))
+            ang = tray_i * (2 * math.pi / n_tray)
+            rad = 0.016 + 0.6 * dia
+            off = (tray_centre[0] + rad * math.cos(ang), tray_centre[1] + rad * math.sin(ang))
+            h = _u(rng, 0.005, 0.02)
+            yaw = _u(rng, -math.pi / 4, math.pi / 4)
+            tray_i += 1
+        else:
+            r = _u(rng, 0.04, 0.07)
+            th = _u(rng, 0, 2 * math.pi)
+            off = (r * math.cos(th), r * math.sin(th))
+            h = _u(rng, 0.01, 0.03)
+            yaw = _u(rng, -math.pi / 4, math.pi / 4)
+        pegs.append(
+            PegStart(
+                slot=int(slot),
+                start_type=st,
+                offset_xy=(float(off[0]), float(off[1])),
+                height=float(h),
+                yaw_err=float(yaw),
+            )
+        )
+    if held_out and pegs:
+        i = int(rng.integers(0, len(pegs)))
+        pegs[i].shape_override = str(rng.choice(HELD_OUT_SHAPES))
+    return pegs
+
+
 def sample_episodes(
     seed: int, episodes_per_stratum: int, split: str = "live"
 ) -> tuple[dict[str, list[float]], list[EpisodeConditions]]:
@@ -340,13 +488,37 @@ def sample_episodes(
     eps: list[EpisodeConditions] = []
     for k_pegs, bucket in strata():
         lhs = _lhs(rng, episodes_per_stratum, reserved, inside)
+        tiers = _assign_tiers(rng, episodes_per_stratum)
         for j in range(episodes_per_stratum):
+            tier = tiers[j]
             slot_ids = sorted(rng.choice(N_SLOTS, size=k_pegs, replace=False).tolist())
-            n_clutter = _draw_clutter_count(rng, bucket)
-            pegs = _draw_peg_starts(rng, slot_ids, n_clutter, held_out=inside)
+            # ---- tier-dependent starts / clutter / anti-scripting scales ----
+            if tier == "easy":
+                pegs = _easy_peg_starts(rng, slot_ids)
+                n_clutter = 0 if bucket == "low" else int(rng.integers(0, 2))
+                noise_scale, delta_scale, drift_scale = 0.35, 0.25, 0.0
+                drop_scale, disturb_gate = 0.25, 1.01  # never disturbance
+                clear_boost, chamfer_floor = 0.00015, 0.75
+                act_delay_force0 = True
+            elif tier == "medium":
+                pegs = _medium_peg_starts(rng, slot_ids)
+                n_clutter = _draw_clutter_count(rng, bucket)
+                if n_clutter > 2:
+                    n_clutter = 2
+                noise_scale, delta_scale, drift_scale = 0.65, 0.55, 0.4
+                drop_scale, disturb_gate = 0.6, 0.85
+                clear_boost, chamfer_floor = 0.00005, 0.5
+                act_delay_force0 = False
+            else:  # hard — full difficulty; held-out shapes on reserved split
+                pegs = _draw_peg_starts(rng, slot_ids, 0, held_out=inside)
+                n_clutter = _draw_clutter_count(rng, bucket)
+                noise_scale, delta_scale, drift_scale = 1.0, 1.0, 1.0
+                drop_scale, disturb_gate = 1.0, 0.65
+                clear_boost, chamfer_floor = 0.0, 0.35
+                act_delay_force0 = False
             clutter = _draw_clutter(rng, n_clutter, pegs)
-            act_delay = int(np.clip(round(float(lhs["act_delay"][j])), 0, 1))
-            disturbance = 1 if float(lhs["disturbance"][j]) >= 0.65 else 0
+            act_delay = 0 if act_delay_force0 else int(np.clip(round(float(lhs["act_delay"][j])), 0, 1))
+            disturbance = 1 if float(lhs["disturbance"][j]) >= disturb_gate else 0
             max_steps = STEPS_PER_PEG * k_pegs
             if disturbance:
                 d_step = int(rng.integers(max(1, max_steps // 5), max(2, (4 * max_steps) // 5)))
@@ -354,24 +526,37 @@ def sample_episodes(
                 if roll < 0.50:
                     d_target = f"peg:{int(rng.integers(0, k_pegs))}"
                 elif roll < 0.70:
-                    d_target = "drop"  # open gripper / slip mid-episode
+                    d_target = "drop"
                 else:
                     d_target = "board"
             else:
                 d_step = 0
                 d_target = "none"
-            # Slot bias + independent peg delta so relative features retain residual.
             bias_mag = float(lhs["pose_bias_xy"][j])
+            # Easy/medium shrink slot bias toward the low end of the live range.
+            if tier == "easy":
+                bias_mag = RANGES["pose_bias_xy"][0] * 0.6 + bias_mag * 0.25
+            elif tier == "medium":
+                bias_mag = RANGES["pose_bias_xy"][0] * 0.4 + bias_mag * 0.55
             bias_ang = _u(rng, 0, 2 * math.pi)
             bias_xy = (bias_mag * math.cos(bias_ang), bias_mag * math.sin(bias_ang))
             bias_yaw = float(lhs["pose_bias_yaw"][j]) * (1.0 if rng.random() < 0.5 else -1.0)
-            dmag = float(lhs["peg_bias_delta"][j])
+            if tier == "easy":
+                bias_yaw *= 0.35
+            elif tier == "medium":
+                bias_yaw *= 0.65
+            dmag = float(lhs["peg_bias_delta"][j]) * delta_scale
             dang = _u(rng, 0, 2 * math.pi)
             peg_delta = (dmag * math.cos(dang), dmag * math.sin(dang))
-            # Hidden search pitch scales with clearance / chamfer (not observable).
-            clr = float(lhs["clearance"][j])
-            ch = float(lhs["chamfer"][j])
+            clr = min(RANGES["clearance"][1], float(lhs["clearance"][j]) + clear_boost)
+            ch = max(chamfer_floor, float(lhs["chamfer"][j]))
             search_pitch = 0.00008 + 0.55 * clr + 0.00012 * ch
+            lo_n, hi_n = RANGES["obs_noise"]
+            obs_noise = float(np.clip(float(lhs["obs_noise"][j]) * noise_scale, lo_n * 0.3, hi_n))
+            lo_r, hi_r = RANGES["obs_noise_rad"]
+            obs_noise_rad = float(
+                np.clip(float(lhs["obs_noise_rad"][j]) * noise_scale, lo_r * 0.3, hi_r)
+            )
             eps.append(
                 EpisodeConditions(
                     n_pegs=k_pegs,
@@ -380,9 +565,9 @@ def sample_episodes(
                     friction=float(lhs["friction"][j]),
                     peg_mass=float(lhs["peg_mass"][j]),
                     gain_scale=float(lhs["gain_scale"][j]),
-                    obs_noise=float(lhs["obs_noise"][j]),
-                    obs_noise_rad=float(lhs["obs_noise_rad"][j]),
-                    dropout_prob=float(lhs["dropout_prob"][j]),
+                    obs_noise=obs_noise,
+                    obs_noise_rad=obs_noise_rad,
+                    dropout_prob=float(lhs["dropout_prob"][j]) * drop_scale,
                     act_delay=act_delay,
                     disturbance=disturbance,
                     board_xy=(_u(rng, -0.03, 0.03), _u(rng, -0.03, 0.03)),
@@ -390,10 +575,11 @@ def sample_episodes(
                     pose_bias_xy=(float(bias_xy[0]), float(bias_xy[1])),
                     pose_bias_yaw=float(bias_yaw),
                     peg_bias_delta_xy=(float(peg_delta[0]), float(peg_delta[1])),
-                    bias_drift=float(lhs["bias_drift"][j]),
-                    backlash=float(lhs["backlash"][j]),
+                    bias_drift=float(lhs["bias_drift"][j]) * drift_scale,
+                    backlash=float(lhs["backlash"][j]) * (0.3 if tier == "easy" else 1.0),
                     chamfer=ch,
                     search_pitch=float(search_pitch),
+                    difficulty_tier=tier,
                     pegs=pegs,
                     clutter=clutter,
                     disturbance_step=d_step,

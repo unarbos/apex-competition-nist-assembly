@@ -470,8 +470,23 @@ def _peg_order(ep: Episode) -> list[int]:
     return [i for _, i in scored]
 
 
-def solve_episode(ep: Episode, budget_per_peg: int | None = None) -> dict:
-    """Run the privileged solver on one Episode. Mutates ep in place."""
+def solve_episode(
+    ep: Episode,
+    budget_per_peg: int | None = None,
+    record: list | None = None,
+    noise_rng: np.random.Generator | None = None,
+) -> dict:
+    """Run the privileged solver on one Episode. Mutates ep in place.
+
+    If ``record`` is a list and ``noise_rng`` is set, append ``(obs, action)``
+    pairs (policy observation paired with privileged action) for BC.
+    """
+
+    def _step(a: np.ndarray) -> None:
+        if record is not None and noise_rng is not None and not ep.done:
+            record.append((ep.observe(noise_rng).astype(np.float64), np.asarray(a, dtype=np.float64)))
+        ep.step(a)
+
     if budget_per_peg is None:
         # Leave room for K pegs; lying attempts get a shorter cap so upright
         # pegs still get a turn within the episode horizon.
@@ -507,14 +522,14 @@ def solve_episode(ep: Episode, budget_per_peg: int | None = None) -> dict:
                 break
             if ep.steps - n0 > peg_budget:
                 break
-            ep.step(a)
+            _step(a)
         # Retreat between pegs (open gripper, lift) so seated pegs stay clear.
         for _ in range(12):
             if ep.done:
                 break
-            ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+            _step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
     while not ep.done:
-        ep.step(np.array([0.0, 0.0, 0.2, 0.0, 1.0]))
+        _step(np.array([0.0, 0.0, 0.2, 0.0, 1.0]))
     seated = ep.peg_seated_at_end()
     first = ep.peg_first_seat_steps()
     msa = ep.action_l2 / max(1, ep.steps)

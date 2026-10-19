@@ -35,7 +35,7 @@ defaults:
   # round with no top scorer takes it; after that challengers must beat the incumbent by 1%.
   baseline_raw_score: 0.0
   round_length_in_days: 1
-  submission_reveal_days: 4
+  submission_reveal_days: 1
   lower_is_better: false
 
 entrypoints:
