@@ -4,10 +4,10 @@ One episode is a full ATB-1-style peg board (8 slots: round / square / hex, plus
 held-out D-flat keyed family) with K in {3..6} active pegs, 0–3 clutter blocks,
 and a 2-finger parallel gripper on a 4-DoF (x, y, z, yaw) Cartesian stage.
 
-Observations are intentionally partial: peg/slot pose channels carry a fixed
-per-episode bias plus noise and dropout, so geometry-following scripts that
-trust the vector miss the hole. Wrist force/torque is included so contact-driven
-search can adapt. The privileged reference solver in tools/ reads true state.
+Observations are intentionally partial: peg and slot pose channels carry
+*different* per-episode biases (plus optional mid-episode drift), noise, and
+dropout — relative peg−slot does not cancel. Wrist force/torque supports
+contact-driven search. The privileged reference solver in tools/ reads true state.
 
 Control at 25 Hz; physics at 1 kHz. Partial credit is per peg.
 """
@@ -357,9 +357,12 @@ class Episode:
         self._last_peg_obs = [None] * self.n_pegs
         self._last_clutter_obs = [None] * self.n_clutter
         self._disturbance_applied = False
-        # Fixed per-episode pose-estimate bias (never revealed; applied in observe).
-        self._pose_bias_xy = np.array(cond.pose_bias_xy, dtype=float)
+        # Pose-estimate biases (never revealed; applied in observe). Slot and peg
+        # biases differ so relative features retain a residual of several mm.
+        self._slot_bias_xy = np.array(cond.pose_bias_xy, dtype=float)
+        self._peg_bias_xy = self._slot_bias_xy + np.array(cond.peg_bias_delta_xy, dtype=float)
         self._pose_bias_yaw = float(cond.pose_bias_yaw)
+        self._bias_drift = float(cond.bias_drift)
         self._backlash = float(cond.backlash)
         self._cmd_applied = np.zeros(4)  # last Cartesian cmd that passed backlash
         self._wrist_force = np.zeros(3)
@@ -655,20 +658,29 @@ class Episode:
             and self._upright(pquat)
         )
 
-    def _noisy_pose(self, pos, quat, noise_rng, apply_bias: bool = True):
+    def _noisy_pose(self, pos, quat, noise_rng, bias_xy: np.ndarray | None = None):
         p = np.asarray(pos, dtype=float).copy()
-        if apply_bias:
-            p[0] += self._pose_bias_xy[0]
-            p[1] += self._pose_bias_xy[1]
+        if bias_xy is not None:
+            p[0] += float(bias_xy[0])
+            p[1] += float(bias_xy[1])
         p = p + noise_rng.normal(0, self.c.obs_noise, 3)
         dth = noise_rng.normal(0, self.c.obs_noise_rad, 3)
-        yaw_extra = float(dth[2]) + (self._pose_bias_yaw if apply_bias else 0.0)
+        yaw_extra = float(dth[2]) + (self._pose_bias_yaw if bias_xy is not None else 0.0)
         dq = _yaw_quat(yaw_extra)
         q = _quat_mul(dq, quat)
         n = float(np.linalg.norm(q))
         if n > 0:
             q = q / n
         return p, q
+
+    def _drift_biases(self) -> None:
+        """Non-stationary estimate bias: random-walk so EMA−rel scripts go stale."""
+        if self._bias_drift <= 0.0:
+            return
+        step = self.rng.normal(0.0, self._bias_drift, 2)
+        self._slot_bias_xy = self._slot_bias_xy + step
+        # Peg bias walks independently (distractor: residual keeps moving).
+        self._peg_bias_xy = self._peg_bias_xy + self.rng.normal(0.0, self._bias_drift, 2)
 
     def _update_wrist_wrench(self) -> None:
         """Estimate wrist force/torque from contacts on hand / pad geoms."""
@@ -701,11 +713,11 @@ class Episode:
         self._pad_force = 0.7 * self._pad_force + 0.3 * pad_f
 
     def observe(self, noise_rng: np.random.Generator) -> np.ndarray:
-        """Partial observation: biased/noisy peg+slot estimates + wrist wrench.
+        """Partial observation: differently-biased peg/slot estimates + wrench.
 
-        True hole and peg poses are never revealed. A fixed per-episode bias of
-        several mm / deg is applied to every peg and slot estimate so a
-        geometry-following script that trusts the vector systematically misses.
+        True hole/peg poses are never revealed. Slot and peg estimates use
+        independent biases (plus optional drift), so relative peg−slot retains
+        a several-mm residual that contact search must resolve.
         """
         d = self.data
         bx, by = self.c.board_xy
@@ -729,11 +741,11 @@ class Episode:
         for i, peg in enumerate(self.c.pegs):
             base = i * PEG_FEAT
             ppos, pquat = self.peg_pose(i)
-            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, apply_bias=True)
+            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._peg_bias_xy)
             hx, hy = self.slot_xy[i]
-            # Biased slot estimate (same fixed bias) — no exact hole coordinates.
-            hx_e = hx + self._pose_bias_xy[0] + float(noise_rng.normal(0, self.c.obs_noise))
-            hy_e = hy + self._pose_bias_xy[1] + float(noise_rng.normal(0, self.c.obs_noise))
+            # Slot estimate uses slot bias (≠ peg bias) — no exact hole coordinates.
+            hx_e = hx + self._slot_bias_xy[0] + float(noise_rng.normal(0, self.c.obs_noise))
+            hy_e = hy + self._slot_bias_xy[1] + float(noise_rng.normal(0, self.c.obs_noise))
             prel = np.array([ppos_n[0] - hx_e, ppos_n[1] - hy_e, ppos_n[2] - BLOCK_H])
             shape = peg.shape()
             dia = peg.diameter()
@@ -756,7 +768,7 @@ class Episode:
         for i, cl in enumerate(self.c.clutter):
             base = i * CLUTTER_FEAT
             ppos, pquat = self.clutter_pose(i)
-            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, apply_bias=True)
+            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._slot_bias_xy)
             prel = np.array([ppos_n[0] - bx, ppos_n[1] - by, ppos_n[2]])
             size = max(cl.size_xy) * 50
             feat = np.concatenate([[1.0], prel * 10, pquat_n, [size]])
@@ -835,6 +847,7 @@ class Episode:
             self._apply_ctrl()
             mujoco.mj_step(self.model, self.data)
         self.steps += 1
+        self._drift_biases()
         self._update_wrist_wrench()
         self._apply_disturbance()
 

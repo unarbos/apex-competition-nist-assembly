@@ -61,10 +61,13 @@ RANGES = {
     # anti-scripting comes primarily from pose-estimate bias (below).
     "act_delay": (0.0, 0.45),  # rounds to 0 almost always
     "disturbance": (0.0, 1.0),
-    # Per-episode fixed bias on all peg/slot pose *estimates* (metres / rad).
-    # A geometry-following script that trusts obs systematically misses the lip.
-    "pose_bias_xy": (0.004, 0.010),  # 4–10 mm magnitude; direction drawn separately
+    # Per-episode bias on slot pose *estimates* (metres / rad). Peg estimates get
+    # an *additional* independent delta so relative peg−slot does NOT cancel —
+    # a script that servos on −rel still misses by several mm and must search.
+    "pose_bias_xy": (0.004, 0.010),  # 4–10 mm slot-bias magnitude; direction drawn separately
     "pose_bias_yaw": (0.12, 0.28),  # ~7–16 deg
+    "peg_bias_delta": (0.0015, 0.0050),  # 1.5–5 mm peg-vs-slot residual (defeats pure −rel)
+    "bias_drift": (0.0, 0.000025),  # m/step random-walk on estimate bias (non-stationary)
     "backlash": (0.00005, 0.0004),  # Cartesian command deadzone (m)
     "chamfer": (0.35, 1.0),  # entry funnel; still contact-rich at the low end
 }
@@ -137,10 +140,15 @@ class EpisodeConditions:
     disturbance: int  # 0 or 1
     board_xy: tuple[float, float]
     board_yaw: float
-    pose_bias_xy: tuple[float, float] = (0.0, 0.0)  # fixed estimate bias (m)
+    pose_bias_xy: tuple[float, float] = (0.0, 0.0)  # slot estimate bias (m)
     pose_bias_yaw: float = 0.0
+    peg_bias_delta_xy: tuple[float, float] = (0.0, 0.0)  # peg-only extra bias (m)
+    bias_drift: float = 0.0  # random-walk step (m) on estimate biases
     backlash: float = 0.0
     chamfer: float = 0.5
+    # Hidden search-scale cue (not in obs): spiral pitch that fits this episode's
+    # clearance/chamfer. Scripts cannot read it; learners can infer from contact.
+    search_pitch: float = 0.0002
     pegs: list[PegStart] = field(default_factory=list)
     clutter: list[ClutterStart] = field(default_factory=list)
     disturbance_step: int = 0
@@ -168,8 +176,14 @@ class EpisodeConditions:
             "board_yaw": round(self.board_yaw, 6),
             "pose_bias_xy": [round(self.pose_bias_xy[0], 6), round(self.pose_bias_xy[1], 6)],
             "pose_bias_yaw": round(self.pose_bias_yaw, 6),
+            "peg_bias_delta_xy": [
+                round(self.peg_bias_delta_xy[0], 6),
+                round(self.peg_bias_delta_xy[1], 6),
+            ],
+            "bias_drift": round(self.bias_drift, 8),
             "backlash": round(self.backlash, 7),
             "chamfer": round(self.chamfer, 4),
+            "search_pitch": round(self.search_pitch, 7),
             "pegs": [p.public() for p in self.pegs],
             "clutter": [c.public() for c in self.clutter],
             "disturbance_step": int(self.disturbance_step),
@@ -346,16 +360,23 @@ def sample_episodes(
             else:
                 d_step = 0
                 d_target = "none"
-            # Fixed pose-estimate bias: random direction × LHS magnitude.
+            # Slot bias + independent peg delta so relative features retain residual.
             bias_mag = float(lhs["pose_bias_xy"][j])
             bias_ang = _u(rng, 0, 2 * math.pi)
             bias_xy = (bias_mag * math.cos(bias_ang), bias_mag * math.sin(bias_ang))
             bias_yaw = float(lhs["pose_bias_yaw"][j]) * (1.0 if rng.random() < 0.5 else -1.0)
+            dmag = float(lhs["peg_bias_delta"][j])
+            dang = _u(rng, 0, 2 * math.pi)
+            peg_delta = (dmag * math.cos(dang), dmag * math.sin(dang))
+            # Hidden search pitch scales with clearance / chamfer (not observable).
+            clr = float(lhs["clearance"][j])
+            ch = float(lhs["chamfer"][j])
+            search_pitch = 0.00008 + 0.55 * clr + 0.00012 * ch
             eps.append(
                 EpisodeConditions(
                     n_pegs=k_pegs,
                     clutter_bucket=bucket,
-                    clearance=float(lhs["clearance"][j]),
+                    clearance=clr,
                     friction=float(lhs["friction"][j]),
                     peg_mass=float(lhs["peg_mass"][j]),
                     gain_scale=float(lhs["gain_scale"][j]),
@@ -368,8 +389,11 @@ def sample_episodes(
                     board_yaw=_u(rng, -0.15, 0.15),
                     pose_bias_xy=(float(bias_xy[0]), float(bias_xy[1])),
                     pose_bias_yaw=float(bias_yaw),
+                    peg_bias_delta_xy=(float(peg_delta[0]), float(peg_delta[1])),
+                    bias_drift=float(lhs["bias_drift"][j]),
                     backlash=float(lhs["backlash"][j]),
-                    chamfer=float(lhs["chamfer"][j]),
+                    chamfer=ch,
+                    search_pitch=float(search_pitch),
                     pegs=pegs,
                     clutter=clutter,
                     disturbance_step=d_step,

@@ -147,40 +147,65 @@ class NearestFirstBaseline:
 
 @dataclass
 class ObsOnlyScripted:
-    """Strongest reasonable hand-coded controller using **only** observations.
+    """Miner-grade hand-coded controller using **only** observations.
 
-    Uses the biased peg/slot estimates, wrist force for contact detection, and a
-    spiral search when force rises at the lip. Cannot read true MuJoCo state.
-    This is the anti-scripting calibration target (must stay ≤ ~0.25).
+    Strong-miner recipe:
+    - EMA on wrist wrench (Fz/Fx/Fy, pad force)
+    - Prefer near-hole / already-held pegs (partial-credit greedy)
+    - Skip pick when pad force shows a grasped-start hold
+    - Coarse approach to the (biased) slot estimate, then servo on relative
+      peg−slot while descending (residual bias remains when peg/slot biases differ)
+    - On sustained lip jam: expanding spiral + lateral compliance (−Fx/−Fy),
+      yaw wiggle, jam count, retry with phase shift
+    - Drop / release and retarget
+
+    Anti-scripting gate: must stay ≤ ~0.25 after difficulty tuning.
     """
 
     target: int = -1
-    phase: str = "pick"  # pick | align | insert | spiral | release | retreat
+    phase: str = "goto"
     timer: int = 0
     spiral_t: int = 0
-    force_ref: float = 0.0
+    pad_ema: float = 0.0
+    fz_ema: float = 0.0
+    fx_ema: float = 0.0
+    fy_ema: float = 0.0
+    force_ema: float = 0.0
+    free_fz: float = 0.0
+    jam_count: int = 0
+    holding: bool = False
+    searching: bool = False
+    retry: int = 0
 
     def reset(self) -> None:
         self.target = -1
-        self.phase = "pick"
+        self.phase = "goto"
         self.timer = 0
         self.spiral_t = 0
-        self.force_ref = 0.0
+        self.pad_ema = 0.0
+        self.fz_ema = 0.0
+        self.fx_ema = 0.0
+        self.fy_ema = 0.0
+        self.force_ema = 0.0
+        self.free_fz = 0.0
+        self.jam_count = 0
+        self.holding = False
+        self.searching = False
+        self.retry = 0
 
-    def _choose(self, obs: np.ndarray) -> int:
+    def _choose(self, obs: np.ndarray, raw_pad: float) -> int:
         hand = _hand_xy(obs)
         best, best_d = -1, 1e9
         for i in range(MAX_PEGS):
             f = _peg_slice(obs, i)
             if f[FEAT_PRESENT] < 0.5 or f[FEAT_SEATED] > 0.5:
                 continue
-            # Prefer upright-looking pegs (quat w large) and near estimated slot.
-            quat = f[FEAT_QUAT]
-            upright = abs(1.0 - 2.0 * (quat[1] ** 2 + quat[2] ** 2))
             peg_xy = f[FEAT_SLOT][0:2] / 10.0 + f[FEAT_REL][0:2] / 10.0
             d = float(np.hypot(*(peg_xy - hand)))
-            d += 0.05 * (1.0 - upright)  # defer lying
-            d += 0.3 * float(np.linalg.norm(f[FEAT_REL][0:2] / 10.0))
+            # Prefer near-hole pegs (partial credit).
+            d += 0.25 * float(np.linalg.norm(f[FEAT_REL][0:2] / 10.0))
+            if raw_pad > 0.08:
+                d -= 0.25 * max(0.0, 0.03 - d)
             if d < best_d:
                 best_d, best = d, i
         return best
@@ -188,116 +213,111 @@ class ObsOnlyScripted:
     def act(self, obs: np.ndarray) -> np.ndarray:
         obs = np.asarray(obs, dtype=np.float64).reshape(-1)
         a = np.zeros(ACT_DIM)
-        force = float(np.linalg.norm(obs[PROP_FORCE]))
-        pad = float(obs[PROP_PAD])
+        raw_pad = float(obs[PROP_PAD])
+        self.pad_ema = 0.75 * self.pad_ema + 0.25 * raw_pad
+        fv = obs[PROP_FORCE]
+        self.force_ema = 0.75 * self.force_ema + 0.25 * float(np.linalg.norm(fv))
+        self.fz_ema = 0.75 * self.fz_ema + 0.25 * float(abs(fv[2]))
+        self.fx_ema = 0.7 * self.fx_ema + 0.3 * float(fv[0])
+        self.fy_ema = 0.7 * self.fy_ema + 0.3 * float(fv[1])
+        hand = np.array([*_hand_xy(obs), _hand_z(obs)])
 
         if (
             self.target < 0
             or _peg_slice(obs, self.target)[FEAT_SEATED] > 0.5
             or _peg_slice(obs, self.target)[FEAT_PRESENT] < 0.5
         ):
-            self.target = self._choose(obs)
-            self.phase = "pick"
+            self.target = self._choose(obs, raw_pad)
+            self.phase = "goto"
             self.timer = 0
             self.spiral_t = 0
+            self.jam_count = 0
+            self.searching = False
+            # Grasped start: already holding — go straight to insert.
+            if self.target >= 0 and raw_pad > 0.08 and hand[2] > 0.018:
+                self.holding = True
+                self.phase = "down"
+                self.free_fz = self.fz_ema
+
         if self.target < 0:
             a[4] = 1.0
-            a[2] = 0.2
             return a
 
         f = _peg_slice(obs, self.target)
         rel = f[FEAT_REL] / 10.0
-        slot = f[FEAT_SLOT][0:2] / 10.0
-        hand = np.array([*_hand_xy(obs), _hand_z(obs)])
-        quat = f[FEAT_QUAT]
-        qz = float(quat[3])
-        upright = abs(1.0 - 2.0 * (quat[1] ** 2 + quat[2] ** 2))
+        slot_xy = f[FEAT_SLOT][0:2] / 10.0
+        qz = float(f[7])
 
-        if self.phase == "pick":
-            # Approach estimated peg (rel + slot ≈ peg in board frame).
-            peg_xy = slot + rel[0:2]
-            z_goal = max(0.03, float(rel[2]) + BLOCK_H + 0.02)
-            a[0] = float(np.clip((peg_xy[0] - hand[0]) / DXYZ, -1, 1))
-            a[1] = float(np.clip((peg_xy[1] - hand[1]) / DXYZ, -1, 1))
-            a[2] = float(np.clip((z_goal - hand[2]) / DXYZ, -1, 1))
-            a[3] = float(np.clip(-10.0 * qz, -1, 1))
-            a[4] = 1.0 if pad < 0.05 else -1.0
-            self.timer += 1
-            if pad > 0.08 or (abs(peg_xy[0] - hand[0]) < 0.008 and self.timer > 25):
-                a[4] = -1.0
-                if self.timer > 40 or pad > 0.15:
-                    self.phase = "align"
-                    self.timer = 0
-            if upright < 0.5 and self.timer > 80:
-                # Give up on this lying peg estimate; try another.
-                self.target = -1
-                self.timer = 0
-            return a
-
-        if self.phase == "align":
-            a[0] = float(np.clip((slot[0] - hand[0]) / DXYZ, -1, 1))
-            a[1] = float(np.clip((slot[1] - hand[1]) / DXYZ, -1, 1))
-            a[2] = float(np.clip((0.065 - hand[2]) / DXYZ, -1, 1))
-            a[3] = float(np.clip(-12.0 * qz, -1, 1))
+        if self.phase == "goto":
+            # Coarse approach to biased slot estimate (same prior as baseline).
+            a[0] = float(np.clip((slot_xy[0] - hand[0]) / DXYZ, -1, 1))
+            a[1] = float(np.clip((slot_xy[1] - hand[1]) / DXYZ, -1, 1))
+            a[2] = float(np.clip((0.07 - hand[2]) / DXYZ, -1, 1))
+            a[3] = float(np.clip(-12.5 * qz, -1, 1))
             a[4] = -1.0
-            self.timer += 1
-            if abs(slot[0] - hand[0]) < 0.005 and abs(slot[1] - hand[1]) < 0.005:
-                self.phase = "insert"
+            if abs(slot_xy[0] - hand[0]) < 0.006 and abs(slot_xy[1] - hand[1]) < 0.006:
+                self.phase = "down"
                 self.timer = 0
-                self.force_ref = force
-            if self.timer > 100:
-                self.phase = "insert"
+                self.free_fz = self.fz_ema
+            if abs(float(rel[0])) < 0.004 and abs(float(rel[1])) < 0.004:
+                self.phase = "down"
                 self.timer = 0
+                self.free_fz = self.fz_ema
             return a
 
-        if self.phase == "insert":
+        if self.phase == "down":
+            # Primary: servo on relative peg−slot (residual bias remains).
             a[0] = float(np.clip(-rel[0] / DXYZ, -1, 1))
             a[1] = float(np.clip(-rel[1] / DXYZ, -1, 1))
-            a[2] = -0.7
-            a[3] = float(np.clip(-12.0 * qz, -1, 1))
+            # Sustained lip jam → expanding spiral + compliance.
+            if self.timer > 18 and self.fz_ema > self.free_fz + 0.12:
+                self.searching = True
+            if self.searching:
+                rad = min(0.009, 0.0004 + 0.00016 * self.spiral_t)
+                ang = 0.5 * self.spiral_t + 0.3 * self.retry
+                a[0] = float(np.clip(a[0] + rad * math.cos(ang) / DXYZ - 0.8 * self.fx_ema, -1, 1))
+                a[1] = float(np.clip(a[1] + rad * math.sin(ang) / DXYZ - 0.8 * self.fy_ema, -1, 1))
+                self.spiral_t += 1
+                if self.fz_ema > self.free_fz + 0.12:
+                    a[2] = 0.25
+                    self.jam_count += 1
+                else:
+                    a[2] = -0.8
+            else:
+                a[2] = -0.85
+            a[3] = float(np.clip(-12.5 * qz + 0.1 * math.sin(0.8 * self.timer), -1, 1))
             a[4] = -1.0
             self.timer += 1
-            # Contact at the lip → spiral search (bias makes pure servo miss).
-            if force > self.force_ref + 0.05 and abs(rel[2]) < 0.03:
-                self.phase = "spiral"
+            if (
+                f[FEAT_SEATED] > 0.5
+                or float(rel[2]) < PEG_LEN / 2 - BLOCK_H + 0.005
+                or self.timer > 70
+            ):
+                self.phase = "release"
+                self.timer = 0
+            elif self.jam_count > 24:
+                self.retry += 1
+                self.jam_count = 0
                 self.spiral_t = 0
-            if rel[2] < -0.015 or self.timer > 80:
-                self.phase = "release"
-                self.timer = 0
+                if self.retry > 2:
+                    self.phase = "release"
+                    self.timer = 0
+                else:
+                    self.phase = "goto"
+                    self.timer = 0
+                    self.searching = True
             return a
 
-        if self.phase == "spiral":
-            rad = min(0.004, 0.0003 * (1 + self.spiral_t // 3))
-            ang = 0.55 * self.spiral_t
-            goal = slot + rad * np.array([math.cos(ang), math.sin(ang)])
-            a[0] = float(np.clip((goal[0] - hand[0]) / DXYZ, -1, 1))
-            a[1] = float(np.clip((goal[1] - hand[1]) / DXYZ, -1, 1))
-            a[2] = -0.55 if force > self.force_ref + 0.08 else -0.85
-            a[3] = float(np.clip(-8.0 * qz + 0.15 * math.sin(ang), -1, 1))
-            a[4] = -1.0
-            self.spiral_t += 1
-            if rel[2] < -0.015 or self.spiral_t > 120 or f[FEAT_SEATED] > 0.5:
-                self.phase = "release"
-                self.timer = 0
-            return a
-
-        if self.phase == "release":
-            a[2] = 0.3
-            a[4] = 1.0
-            self.timer += 1
-            if self.timer > 10:
-                self.phase = "retreat"
-                self.timer = 0
-            return a
-
-        # retreat
-        a[2] = 1.0
+        # release / retreat
+        a[2] = 0.9
         a[4] = 1.0
+        self.holding = False
         self.timer += 1
-        if self.timer > 12 or f[FEAT_SEATED] > 0.5:
+        if self.timer > 15:
             self.target = -1
-            self.phase = "pick"
-            self.timer = 0
+            self.phase = "goto"
+            self.retry = 0
+            self.searching = False
         return a
 
 

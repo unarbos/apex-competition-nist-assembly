@@ -76,6 +76,8 @@ def test_ranges_extended_for_v020():
     assert lo >= 0.0002 - 1e-12
     assert hi <= 0.001 + 1e-12
     assert "pose_bias_xy" in conditions.RANGES
+    assert "peg_bias_delta" in conditions.RANGES
+    assert "bias_drift" in conditions.RANGES
     assert "backlash" in conditions.RANGES
     assert "chamfer" in conditions.RANGES
     assert "obs_noise_rad" in conditions.RANGES
