@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.2.0
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.2.1
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that sequentially assembles several
@@ -14,8 +14,8 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.2.0` | ☑ |
-| `spec.yaml` version `0.2.0`, digests pinned | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.2.1` (spec-only; images from `v0.2.0`) | ☑ |
+| `spec.yaml` version `0.2.1`, v0.2.0 digests pinned | `spec.yaml` | ☑ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:3c5c1d048b8e2d4ff541a14a37a9c777872727f82456ec71865897f24b6b8652` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:ff3fb58c1e5d8e9154545e79c6b98022fecccdbc3e3c07fd9613a5a2360f2943` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -37,7 +37,7 @@ onnxruntime 1.31.0. Image digests from release run 39363449941 (tag `v0.2.0`), b
 | lower_is_better | false | |
 | baseline_raw_score / baseline_score | 0.0 / 0.0 | platform convention |
 | resources | 2 CPU / 2Gi / 0 GPU | 2 sim workers |
-| evaluate / referee timeout_s | 900 / 900 | worst-case multi-peg budget |
+| evaluate / referee timeout_s | 1800 / 1800 | 128-episode live rounds took ~400–660 s on Macrocosmos staging |
 | deadline_ms | 500 per batched step | |
 
 ## 4. Round variation & evaluation sizing
@@ -49,7 +49,7 @@ onnxruntime 1.31.0. Image digests from release run 39363449941 (tag `v0.2.0`), b
 - **Scoring:** per-peg `0.75 + 0.25·(time/effort)`; episode mean; round mean. Wrong slot / knocked out = 0.
 - **Reserved region:** `reserve.py` draws from extended `RANGES` at referee build time.
 - **Budget:** full board ~15k physics steps/s on the box; 64 × 1200 × 40 ≈ 3.1M substeps → ~100–120 s
-  with 2 workers locally; prod ~3–4× slower still inside 900 s. See `CALIBRATION.md`.
+  with 2 workers locally; prod ~3–4× slower; live 128-episode rounds ~400–660 s, inside the 1800 s timeout. See `CALIBRATION.md`.
 
 ## 5. Threat-model questionnaire
 Unchanged process: answers withheld from the public repo; available to Macrocosmos privately.

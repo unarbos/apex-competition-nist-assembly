@@ -5,8 +5,8 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.2.0** (multi-peg board). Spec digests are left as-is until the maintainer
-> release; do not treat pinned digests as shipping this code yet.
+> Version: **v0.2.1** (multi-peg board). v0.2.1 is spec-only: same v0.2.0 player and referee
+> images, with `timeout_s` raised to 1800 s for 128-episode live rounds.
 
 ## Relation to AlphaNIST
 
@@ -49,7 +49,7 @@ can adapt. Hex and D-flat keyed shapes are held out of live rounds.
 - **Score:** for episode `e` with `K` pegs,
   `S_e = (1/K) Σ_k s_k`, where `s_k = 0` if peg `k` is not seated at end, else
   `0.75 + 0.25 · time/effort term`. Partial credit rewards even one or two seated pegs.
-- **Round size:** 64 episodes (8 strata × 8) by default; 2 sim workers; timeout 900 s.
+- **Round size:** 64 episodes (8 strata × 8) in the fixture; live rounds use 16 per stratum (128 episodes); 2 sim workers; timeout 1800 s.
 
 ## Policy interface
 

@@ -1,6 +1,6 @@
 schema: apex.competition.v1
 id: nist_lite_assembly
-version: 0.2.0
+version: 0.2.1
 display_name: "NIST-Lite Robot Assembly (RL)"
 kind: solo
 process_type: cpu
@@ -42,7 +42,8 @@ entrypoints:
     command: ["python", "/app/launch.py", "--port", "8000"]
     network_disabled: false
     allow_internet: false
-    timeout_s: 900
+    # 0.2.1: 1800 s headroom for the live 128-episode rounds (16/stratum); ~400-660 s observed on Macrocosmos staging.
+    timeout_s: 1800
     http_api:
       port: 8000
       readiness_path: /health
@@ -54,7 +55,7 @@ referee:
     # Private package; built with reserved.json from the NIST_HELDOUT_SEED build secret.
     ref: ghcr.io/unarbos/apex-competition-nist-assembly-referee
     digest: sha256:ff3fb58c1e5d8e9154545e79c6b98022fecccdbc3e3c07fd9613a5a2360f2943
-  timeout_s: 900
+  timeout_s: 1800
 
 signature:
   # Fulcio SAN of a GitHub keyless signature is `<workflow path>@<ref>`; the platform matches it exactly.
