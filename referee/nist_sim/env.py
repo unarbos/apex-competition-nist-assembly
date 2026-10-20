@@ -1,8 +1,9 @@
 """NIST-lite multi-peg board in MuJoCo (CPU).
 
-One episode is a full ATB-1-style peg board (8 slots: round / square / hex, plus a
-held-out D-flat keyed family) with K in {3..6} active pegs, 0–3 clutter blocks,
-and a 2-finger parallel gripper on a 4-DoF (x, y, z, yaw) Cartesian stage.
+One episode is a full ATB-1-style peg board (8 slots, round / square live; hex and
+D-flat keyed families appear only on the held-out reserved split) with K in {3..6}
+active pegs, 0–3 clutter blocks, and a 2-finger parallel gripper on a 4-DoF
+(x, y, z, yaw) Cartesian stage.
 
 Observations are intentionally partial: peg and slot pose channels carry
 *different* per-episode biases (plus optional mid-episode drift), noise, and
@@ -57,7 +58,10 @@ DYAW = 0.08
 SEAT_TOL_Z = 0.001
 SEATED_HOLD = 5
 MAX_SEAT_TILT = math.radians(10.0)
-MAX_PART_SPEED = 2.0
+# Catches numerical blow-ups only. Soft-contact pops (a dropped 4 mm peg landing across a
+# hole lip) can briefly reach ~2.1 m/s in a recoverable way; 2.0 ended those episodes as
+# 'unstable' (seed 7 / episode 8 under a no-op). Real blow-ups go far higher or non-finite.
+MAX_PART_SPEED = 4.0
 HAND_Z_MIN = -0.003
 PAD_BOTTOM_OFFSET = 0.004
 PAD_CENTRE_Z = 0.012
