@@ -365,11 +365,11 @@ def _assign_tiers(rng: np.random.Generator, n: int) -> list[str]:
 
 
 def _easy_peg_starts(rng: np.random.Generator, slot_ids: list[int]) -> list[PegStart]:
-    """Grasped / near_hole only — partial-credit friendly."""
+    """Grasped / near_hole only — partial-credit friendly, low lateral offset."""
     n = len(slot_ids)
+    # Prefer one grasped + near-hole neighbors so a single successful insert scores.
     types = ["grasped"] + ["near_hole"] * (n - 1)
     rng.shuffle(types)
-    # At most one grasped.
     grasped = [i for i, t in enumerate(types) if t == "grasped"]
     for i in grasped[1:]:
         types[i] = "near_hole"
@@ -378,17 +378,19 @@ def _easy_peg_starts(rng: np.random.Generator, slot_ids: list[int]) -> list[PegS
         st = types[local_i]
         _, dia, _, _ = SLOT_SPECS[slot]
         if st == "grasped":
-            r = _u(rng, 0.0, 0.008)
+            # Hover near the hole — privileged succeeds; residual bias still bites −rel.
+            r = _u(rng, 0.0, 0.006)
             th = _u(rng, 0, 2 * math.pi)
             off = (r * math.cos(th), r * math.sin(th))
-            h = _u(rng, 0.015, 0.035)
+            h = _u(rng, 0.012, 0.028)
             yaw = 0.0
         else:
-            r = min(0.04, (dia / 2) + WALL_CLEAR + _u(rng, 0.0, 0.003))
+            # Near-hole but outside the chamfer funnel so scripts must approach+search.
+            r = min(0.048, (dia / 2) + WALL_CLEAR + _u(rng, 0.0, 0.005))
             th = _u(rng, 0, 2 * math.pi)
             off = (r * math.cos(th), r * math.sin(th))
             h = 0.0003
-            yaw = _u(rng, -0.08, 0.08) if SLOT_SPECS[slot][0] == "square" else 0.0
+            yaw = _u(rng, -0.06, 0.06) if SLOT_SPECS[slot][0] == "square" else 0.0
         pegs.append(
             PegStart(
                 slot=int(slot),
@@ -402,8 +404,8 @@ def _easy_peg_starts(rng: np.random.Generator, slot_ids: list[int]) -> list[PegS
 
 
 def _medium_peg_starts(rng: np.random.Generator, slot_ids: list[int]) -> list[PegStart]:
-    """Mostly upright; rare lying."""
-    weights = np.array([0.30, 0.04, 0.08, 0.38, 0.20])  # suppress lying
+    """Mostly upright / near-hole; rare lying."""
+    weights = np.array([0.28, 0.02, 0.06, 0.42, 0.22])  # favor near_hole/grasped
     return _draw_peg_starts_with_weights(rng, slot_ids, weights, held_out=False)
 
 
@@ -496,18 +498,20 @@ def sample_episodes(
             if tier == "easy":
                 pegs = _easy_peg_starts(rng, slot_ids)
                 n_clutter = 0 if bucket == "low" else int(rng.integers(0, 2))
-                noise_scale, delta_scale, drift_scale = 0.35, 0.25, 0.0
-                drop_scale, disturb_gate = 0.25, 1.01  # never disturbance
-                clear_boost, chamfer_floor = 0.00015, 0.75
+                # Residual peg−slot bias stays material so −rel scripts miss; roomy
+                # chamfer + one grasped start let the privileged solver score.
+                noise_scale, delta_scale, drift_scale = 0.35, 0.70, 0.0
+                drop_scale, disturb_gate = 0.22, 1.01  # never disturbance
+                clear_boost, chamfer_floor = 0.00018, 0.75
                 act_delay_force0 = True
             elif tier == "medium":
                 pegs = _medium_peg_starts(rng, slot_ids)
                 n_clutter = _draw_clutter_count(rng, bucket)
                 if n_clutter > 2:
                     n_clutter = 2
-                noise_scale, delta_scale, drift_scale = 0.65, 0.55, 0.4
-                drop_scale, disturb_gate = 0.6, 0.85
-                clear_boost, chamfer_floor = 0.00005, 0.5
+                noise_scale, delta_scale, drift_scale = 0.60, 0.50, 0.30
+                drop_scale, disturb_gate = 0.55, 0.85
+                clear_boost, chamfer_floor = 0.00008, 0.55
                 act_delay_force0 = False
             else:  # hard — full difficulty; held-out shapes on reserved split
                 pegs = _draw_peg_starts(rng, slot_ids, 0, held_out=inside)
@@ -533,18 +537,18 @@ def sample_episodes(
                 d_step = 0
                 d_target = "none"
             bias_mag = float(lhs["pose_bias_xy"][j])
-            # Easy/medium shrink slot bias toward the low end of the live range.
+            # Easy/medium shrink slot bias; residual peg delta (above) still bites scripts.
             if tier == "easy":
-                bias_mag = RANGES["pose_bias_xy"][0] * 0.6 + bias_mag * 0.25
+                bias_mag = RANGES["pose_bias_xy"][0] * 0.40 + bias_mag * 0.18
             elif tier == "medium":
-                bias_mag = RANGES["pose_bias_xy"][0] * 0.4 + bias_mag * 0.55
+                bias_mag = RANGES["pose_bias_xy"][0] * 0.40 + bias_mag * 0.50
             bias_ang = _u(rng, 0, 2 * math.pi)
             bias_xy = (bias_mag * math.cos(bias_ang), bias_mag * math.sin(bias_ang))
             bias_yaw = float(lhs["pose_bias_yaw"][j]) * (1.0 if rng.random() < 0.5 else -1.0)
             if tier == "easy":
-                bias_yaw *= 0.35
+                bias_yaw *= 0.30
             elif tier == "medium":
-                bias_yaw *= 0.65
+                bias_yaw *= 0.60
             dmag = float(lhs["peg_bias_delta"][j]) * delta_scale
             dang = _u(rng, 0, 2 * math.pi)
             peg_delta = (dmag * math.cos(dang), dmag * math.sin(dang))
@@ -552,10 +556,10 @@ def sample_episodes(
             ch = max(chamfer_floor, float(lhs["chamfer"][j]))
             search_pitch = 0.00008 + 0.55 * clr + 0.00012 * ch
             lo_n, hi_n = RANGES["obs_noise"]
-            obs_noise = float(np.clip(float(lhs["obs_noise"][j]) * noise_scale, lo_n * 0.3, hi_n))
+            obs_noise = float(np.clip(float(lhs["obs_noise"][j]) * noise_scale, lo_n * 0.25, hi_n))
             lo_r, hi_r = RANGES["obs_noise_rad"]
             obs_noise_rad = float(
-                np.clip(float(lhs["obs_noise_rad"][j]) * noise_scale, lo_r * 0.3, hi_r)
+                np.clip(float(lhs["obs_noise_rad"][j]) * noise_scale, lo_r * 0.25, hi_r)
             )
             eps.append(
                 EpisodeConditions(
@@ -576,7 +580,8 @@ def sample_episodes(
                     pose_bias_yaw=float(bias_yaw),
                     peg_bias_delta_xy=(float(peg_delta[0]), float(peg_delta[1])),
                     bias_drift=float(lhs["bias_drift"][j]) * drift_scale,
-                    backlash=float(lhs["backlash"][j]) * (0.3 if tier == "easy" else 1.0),
+                    backlash=float(lhs["backlash"][j])
+                    * (0.15 if tier == "easy" else 0.55 if tier == "medium" else 1.0),
                     chamfer=ch,
                     search_pitch=float(search_pitch),
                     difficulty_tier=tier,
