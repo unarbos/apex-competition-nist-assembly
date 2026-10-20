@@ -84,15 +84,16 @@ pip install numpy==2.5.4 mujoco==3.16.0 onnx==1.23.2 onnxruntime==1.31.0
 python tools/make_policies.py                       # builds baselines/baseline.onnx
 python tools/local_run.py --policy baselines/baseline.onnx --seed 1
 python tools/read_records.py out/history
-python tools/calibrate.py                           # CALIBRATION.md (anti-scripting)
+python tools/write_calibration.py                   # CALIBRATION.md (tiered live mix)
 python tools/reference_solver.py --seed 0           # privileged solvability check
-python tools/quick_learn.py                         # short hill-climb vs obs scripted
+python tools/train_ppo.py --steps 100000 --workers 2  # residual PPO learnability
 ```
 
+Every live round mixes ~25% easy / 35% medium / 40% hard (`difficulty_tier`).
 The reference baseline is a soft-nearest-first insert/release servo on the biased obs.
 `ObsOnlyScripted` is the strongest hand-coded obs-only controller (anti-scripting
-gate: EMA + F/T spiral + jam retry). `tools/train_ppo.py` is the BC-then-PPO
-learnability harness (curriculum curve in `CALIBRATION.md`).
+gate: EMA + F/T spiral + jam retry). `tools/train_ppo.py` is the residual-PPO
+learnability harness (scripted base + privileged demos; curve in `CALIBRATION.md`).
 The privileged solver in `tools/reference_solver.py` is **not** shipped in the player.
 See `CALIBRATION.md` for measured scores and wall times.
 
