@@ -109,7 +109,7 @@ class ActorCritic(nn.Module):
             nn.Tanh(),
         )
         self.mu = nn.Linear(hidden, act_dim)
-        self.log_std = nn.Parameter(torch.full((act_dim,), -1.6))
+        self.log_std = nn.Parameter(torch.full((act_dim,), -1.8))
         self.v = nn.Linear(hidden, 1)
         nn.init.orthogonal_(self.mu.weight, 0.01)
         nn.init.zeros_(self.mu.bias)
@@ -134,25 +134,31 @@ class ActorCritic(nn.Module):
         return {k: v.detach().cpu().clone() for k, v in self.state_dict().items()}
 
 
-def _collect_privileged_demos(n_eps: int = 48) -> tuple[np.ndarray, np.ndarray]:
+def _collect_privileged_demos(n_eps: int = 96) -> tuple[np.ndarray, np.ndarray]:
     xs, ys = [], []
-    for seed in range(8):
+    for seed in range(16):
         _, conds = sample_episodes(seed, 2)
-        for i, c in enumerate(conds):
-            if len(xs) >= n_eps * 400:  # ~cap transitions
+        # Prefer easy/medium demos (dense success); keep ~1/4 hard.
+        ordered = sorted(
+            enumerate(conds),
+            key=lambda ic: {"easy": 0, "medium": 1, "hard": 2}[ic[1].difficulty_tier],
+        )
+        for i, c in ordered:
+            if len(xs) >= n_eps * 500:
                 break
-            # Prefer easy/medium for dense successful demos; still include hard.
-            if c.difficulty_tier == "hard" and i % 3 != 0:
+            if c.difficulty_tier == "hard" and (i + seed) % 4 != 0:
                 continue
             ss = np.random.SeedSequence([seed, 0xBC11, i])
             r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
             e = Episode(c, r1)
             rec: list = []
             solve_episode(e, record=rec, noise_rng=r2)
+            if not rec:
+                continue
             for o, a in rec:
                 xs.append(o)
                 ys.append(np.clip(a, -1, 1))
-        if len(xs) >= n_eps * 400:
+        if len(xs) >= n_eps * 500:
             break
     X = np.asarray(xs, np.float32)
     Y = np.asarray(ys, np.float32)
@@ -160,13 +166,13 @@ def _collect_privileged_demos(n_eps: int = 48) -> tuple[np.ndarray, np.ndarray]:
     return X, Y
 
 
-def _distill(X: np.ndarray, Y: np.ndarray, epochs: int = 200) -> ActorCritic:
+def _distill(X: np.ndarray, Y: np.ndarray, epochs: int = 400) -> ActorCritic:
     net = ActorCritic().to(DEVICE)
-    opt = torch.optim.Adam(net.parameters(), lr=2e-3)
+    opt = torch.optim.Adam(net.parameters(), lr=1.5e-3)
     Xt = torch.as_tensor(X)
     Yt = torch.as_tensor(Y)
     n = Xt.shape[0]
-    bs = min(1024, n)
+    bs = min(2048, n)
     for ep in range(epochs):
         idx = torch.randint(0, n, (bs,))
         mu, _, _ = net.forward(Xt[idx])
@@ -387,7 +393,7 @@ def main() -> int:
     a = ap.parse_args()
 
     print("collecting privileged solver demos…", flush=True)
-    X, Y = _collect_privileged_demos(64)
+    X, Y = _collect_privileged_demos(96)
     print("distilling BC…", flush=True)
     net = _distill(X, Y)
     bc = ActorCritic().to(DEVICE)
@@ -429,8 +435,8 @@ def main() -> int:
     while total < a.steps:
         # Early: oversample easy/medium; later: full live mix.
         frac = total / max(1, a.steps)
-        stage_bias = max(0.0, 0.7 - frac)  # 0.7 → 0
-        bc_coef = 0.35 * (1.0 - 0.7 * frac)
+        stage_bias = max(0.0, 0.85 - 0.85 * frac)  # 0.85 → 0
+        bc_coef = 0.45 * (1.0 - 0.6 * frac)  # keep BC anchor longer
         batch = _parallel_collect(net, a.rollout, a.workers, a.seed + total, stage_bias)
         _ppo_update(net, opt, batch, bc, bc_coef=bc_coef)
         total += batch["obs"].shape[0]
