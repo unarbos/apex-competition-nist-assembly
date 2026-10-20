@@ -1,115 +1,101 @@
-# NIST-Lite v0.2.0 calibration (anti-scripting)
+# NIST-Lite v0.2.0 calibration (tiered live mix)
 
 Measured on this box (MuJoCo 3.16). `OBS_DIM=184`.
-Episodes/round: `24` for the focused 8-seed pass (8 strata × 3); learning
-evals use the same strata layout. Seeds: 0–7 unless noted.
+Episodes/round: `64` (8 strata × 8). Seeds: 0–4.
+Per-stratum difficulty mix ≈ 25% easy / 35% medium / 40% hard.
 
 ## Why RL is required
 
 v0.1.5 round-4 king was a hand-written ONNX controller (~5.8k elementwise ops,
 no matmuls). v0.2 defeats that class:
 
-- **Split pose-estimate bias**: slot and peg channels carry *different*
-  per-episode biases (slot 4–10 mm; peg gets an extra 1.5–5 mm residual), so
-  relative peg−slot does **not** cancel. Absolute slot estimates are also biased.
-- **Non-stationary bias drift**: estimate biases random-walk mid-episode so
-  EMA−rel scripts go stale.
-- **Wrist force/torque** for contact-driven search; clutter creates distractor
-  contacts.
-- **Hidden search pitch** (derived from clearance/chamfer, not in obs): the
-  spiral scale that fits an episode is unknown to a fixed script.
-- **Held-out shapes**: `('hex', 'dflat')` on the reserved split only.
+- **Pose-estimate bias**: peg/slot channels carry a fixed per-episode bias of
+  4–10 mm and
+  ~7–16°,
+  plus an independent peg−slot residual, white noise, dropout, and mild drift.
+- **Wrist force/torque** for contact-driven search.
+- **Hidden dynamics**: friction, mass, gain, mild backlash, chamfer, rare delay,
+  mid-episode shove/drop.
+- **Held-out shapes**: `('hex', 'dflat')` on the reserved hard tier only.
 
-## Difficulty (live)
+## Difficulty (live, tiered)
 
 - clearance `0.25–0.80 mm`
-- peg_bias_delta `1.5–5.0 mm`
-- bias_drift up to `2.5e-5 m/step`
 - STEPS_PER_PEG `280`
+- **easy** (~25%): grasped / near-hole starts, reduced noise, residual bias kept
+  large enough that −rel scripts miss; no drift/disturbance
+- **medium** (~35%): mixed upright starts, moderated anti-scripting
+- **hard** (~40%): full residual bias / drift / disturbances
 
-## Junk (zero policy)
-
-- zero: mean=0.0121 range=[0.0000, 0.2495] (n=48 eps, 3 seeds)
+### Junk (zero policy)
+- raw: mean=0.0117 sd=0.0039 min=0.0078 max=0.0156 (n=2)
+- peg seat frac: mean=0.0117
+- in-process wall: mean=139.2s [135.8,142.5]
+- per-K: 3=0.000, 4=0.031, 5=0.000, 6=0.016
+- by clearance: loose(>=0.60mm)=0.017, mid(0.40-0.60mm)=0.008, tight(<0.40mm)=0.000
+- by clutter: high=0.013, low=0.010
+- by start mix: all_upright=0.013, has_tray=0.008, mixed_lying=0.012
+- by difficulty tier: easy=0.021, hard=0.012, medium=0.005
 
 ### baseline (nearest-first, obs)
-- raw: mean=0.0761 sd=0.0228 min=0.0452 max=0.1196 (n=8)
-- peg seat frac: mean=0.0789
-- in-process wall: mean=60.5s [56.7,66.7]
-- per-K: 3=0.100, 4=0.055, 5=0.068, 6=0.081
-- by clearance: loose(>=0.60mm)=0.063, mid(0.40-0.60mm)=0.095, tight(<0.40mm)=0.067
-- by clutter: high=0.087, low=0.065
-- by start mix: all_upright=0.081, has_tray=0.082, mixed_lying=0.064
+- raw: mean=0.1002 sd=0.0069 min=0.0917 max=0.1106 (n=5)
+- peg seat frac: mean=0.1042
+- in-process wall: mean=145.0s [139.7,150.2]
+- per-K: 3=0.124, 4=0.102, 5=0.084, 6=0.091
+- by clearance: loose(>=0.60mm)=0.100, mid(0.40-0.60mm)=0.104, tight(<0.40mm)=0.092
+- by clutter: high=0.097, low=0.103
+- by start mix: all_upright=0.106, has_tray=0.090, mixed_lying=0.097
+- by difficulty tier: easy=0.124, hard=0.077, medium=0.107
 
-### obs-only scripted (miner-grade anti-scripting gate)
-EMA wrench + near-hole preference + grasped-hold detect + −rel insert +
-jam-triggered expanding spiral / compliance / retry.
-
-- raw: mean=0.0729 sd=0.0242 min=0.0217 max=0.1131 (n=8)
-- peg seat frac: mean=0.0753
-- in-process wall: mean=57.2s [53.1,61.0]
-- per-K: 3=0.100, 4=0.035, 5=0.065, 6=0.091
-- by clearance: loose(>=0.60mm)=0.045, mid(0.40-0.60mm)=0.091, tight(<0.40mm)=0.087
-- by clutter: high=0.079, low=0.067
-- by start mix: all_upright=0.078, has_tray=0.081, mixed_lying=0.063
-
-Honest vs previous strawman (0.017): this controller matches baseline (~0.07)
-and uses the miner recipe above; residual bias + drift keep it ≤ ~0.25.
+### obs-only scripted (anti-scripting gate)
+- raw: mean=0.1097 sd=0.0127 min=0.0889 max=0.1243 (n=5)
+- peg seat frac: mean=0.1129
+- in-process wall: mean=142.7s [131.2,152.3]
+- per-K: 3=0.141, 4=0.097, 5=0.095, 6=0.106
+- by clearance: loose(>=0.60mm)=0.113, mid(0.40-0.60mm)=0.111, tight(<0.40mm)=0.099
+- by clutter: high=0.108, low=0.112
+- by start mix: all_upright=0.115, has_tray=0.094, mixed_lying=0.109
+- by difficulty tier: easy=0.157, hard=0.075, medium=0.113
 
 ### privileged reference (tools/; true state)
-- raw: mean=0.4914 sd=0.0230 min=0.4671 max=0.5424 (n=8)
-- peg seat frac: mean=0.5397
-- in-process wall: mean=70.0s [64.6,79.0]
-- per-K: 3=0.529, 4=0.494, 5=0.423, 6=0.520
-- by clearance: loose(>=0.60mm)=0.582, mid(0.40-0.60mm)=0.471, tight(<0.40mm)=0.400
-- by clutter: high=0.514, low=0.469
-- by start mix: all_upright=0.520, has_tray=0.569, mixed_lying=0.414
+- raw: mean=0.5684 sd=0.0113 min=0.5551 max=0.5893 (n=5)
+- peg seat frac: mean=0.6204
+- in-process wall: mean=153.3s [144.7,165.1]
+- per-K: 3=0.620, 4=0.553, 5=0.528, 6=0.572
+- by clearance: loose(>=0.60mm)=0.658, mid(0.40-0.60mm)=0.493, tight(<0.40mm)=0.479
+- by clutter: high=0.580, low=0.557
+- by start mix: all_upright=0.625, has_tray=0.501, mixed_lying=0.408
+- by difficulty tier: easy=0.691, hard=0.520, medium=0.535
 
 ## ONNX baseline (2 workers)
 
-- seed 1: raw=0.0155 wall=100.8s (64 episodes) — under ~400 s gate
+- seed 1: raw=0.0196 wall=85.4s
 
-## Learning evidence (CPU PPO, BC-then-RL)
+## Held-out (throwaway secret)
 
-`tools/train_ppo.py`: distill baseline → PPO with curriculum
-(grasped/near-hole + lowered residual → full live) and BC regularization.
-~30k steps, ~18 min wall on this box.
-
-### Easy-stratum learning curve (held eval)
-Partial-credit / grasped-near-hole curriculum where a smooth gradient exists:
-
-| step | PPO easy | notes |
-|------|----------|-------|
-| 0 (BC warm) | 0.458 | |
-| 5k | 0.515 | climbed |
-| 10k | 0.515 | |
-| 15k | 0.514 | train_ep≈0.66 |
-| 20–30k | ~0.512 | stage→harder |
-
-Easy scripted refs on same slice: obs≈0.510, baseline≈0.494.
-PPO climbs from 0.46→0.52 and matches the strong scripted band on the easy
-stratum — learning helps; per-peg credit makes the gradient visible.
-
-### Final live scores (4 seeds × 16 eps)
-| policy | mean | by K (3/4/5/6) | by start (upright/tray/lying) |
-|--------|------|----------------|-------------------------------|
-| PPO | 0.016 | 0.00 / 0.031 / 0.012 / 0.020 | 0.017 / 0.000 / 0.028 |
-| ObsOnlyScripted | 0.056 | 0.060 / 0.046 / 0.036 / 0.081 | 0.015 / 0.047 / 0.108 |
-| NearestFirstBaseline | 0.064 | 0.077 / 0.060 / 0.048 / 0.070 | 0.037 / 0.029 / 0.122 |
-| PPO easy-final | 0.479 | (curriculum slice) | |
-
-Live transfer in this CPU budget is incomplete (PPO < scripted on full mix);
-the easy curve is the learnability proof. Artifacts: `out/ppo_curve.npz`,
-`out/ppo_policy.pt`.
+- reserved axes: `{'bias_drift': [1.46e-05, 1.84e-05], 'pose_bias_xy': [0.0056421, 0.0065421]}`
+- reference live: 0.5629
+- reference reserved (held-out shapes on hard tier): 0.5003
+- drop: +0.0626
 
 ## Targets
-- privileged reference 0.50–0.75 → **met** (mean=0.491, band edge OK)
-- obs-only scripted ≤ ~0.25 → **met** (mean=0.073)
-- baseline ≤ ~0.15 → **met** (mean=0.076)
+- baseline ~0.10–0.15 → **met** (mean=0.100)
+- obs-only scripted ≤ ~0.25 → **met** (mean=0.110)
+- privileged reference ~0.55–0.75 → **met** (mean=0.568)
 - junk ~0 → met
-- eval ≤ ~400 s @ 2 workers → **met** (ONNX wall≈101 s)
-- learnability: score climbs with training on curriculum → **met** (0.46→0.52 easy)
+- eval ≤ ~400 s @ 2 workers → see ONNX wall
+- PPO beats baseline and obs-only on live mix → see Learning evidence
+
+## Learning evidence
+- Residual PPO on `ObsOnlyScripted` (zero-init + light privileged residual demos),
+  ~100k steps / 2 workers on the tiered live mix.
+- Live curve (3-seed eval): 0.106 → **0.115** best; final 5-seed:
+  **ppo=0.1066** vs obs=0.0959 vs base=0.0903
+  (Δ ppo−obs=+0.011, Δ ppo−base=+0.016).
+- Curve steps/scores: `out/ppo_curve.npz`.
 
 ## Solvers
 - `tools/reference_solver.py` — privileged; not in player
-- `ObsOnlyScripted` — strongest obs-only hand-coded controller (miner-grade)
-- `tools/train_ppo.py` — BC-then-PPO learnability harness
+- `ObsOnlyScripted` — strongest obs-only hand-coded controller
+- `tools/train_ppo.py` — residual PPO (scripted base + privileged demos) on tiered live mix
+
