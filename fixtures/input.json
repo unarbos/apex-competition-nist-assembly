@@ -1,7 +1,7 @@
 {
-  "episodes_per_stratum": 16,
+  "episodes_per_stratum": 8,
   "deadline_ms": 500,
   "workers": 2,
-  "record_stride": 16,
+  "record_stride": 8,
   "records_enabled": true
 }

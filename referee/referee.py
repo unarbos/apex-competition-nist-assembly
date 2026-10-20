@@ -1,17 +1,20 @@
-"""nist_lite REFEREE: runs the NIST-lite assembly simulation and scores the player's policy.
+"""nist_lite REFEREE: multi-peg board simulation and scoring (v0.2.0).
 
-Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the platform
-SEED. All episodes are stepped in lockstep at 25 Hz; at each control step the player gets one
-batched observation for the episodes still running and returns one action per episode.
+Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
+platform SEED. Episodes are stepped in lockstep at 25 Hz; at each control step the
+player gets one batched observation for the episodes still running and returns one
+action per episode.
 
-raw_score = assembled episodes / total episodes (fixed denominator).
+raw_score = mean of per-episode scores (fixed denominator). Each episode score is
+the mean per-peg partial credit (see nist_sim.scoring). A fault (NaN / wrong shape /
+late) ends that episode: remaining unseated pegs score 0; already-seated pegs keep
+their credit if still seated when the episode stops.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
-import math
 import multiprocessing as mp
 import os
 import sys
@@ -23,21 +26,21 @@ import numpy as np
 from gym_v1.client import PlayerClient, PlayerError
 from gym_v1.referee import GameResult, Referee, RefereeContext
 
-from nist_sim.conditions import sample_episodes
+from nist_sim.conditions import SLOT_SPECS, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
+from nist_sim.scoring import episode_score, raw_score_from_episodes
 
-RECORD_FORMAT = "nist_lite_record/1"
+RECORD_FORMAT = "nist_lite_record/2"
 HISTORY_DIR = Path(os.environ.get("NIST_HISTORY_DIR", "/data/history"))
 DEFAULTS = {
-    "episodes_per_stratum": 16,
+    "episodes_per_stratum": 8,
     "deadline_ms": 500,
     "workers": 2,
-    "record_stride": 16,
+    "record_stride": 8,
     "records_enabled": True,
 }
 
 
-# ---- worker processes: each owns a fixed slice of episodes ---------------------------------
 def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, split: str):
     _, conds = sample_episodes(seed, per_stratum, split)
     eps = {}
@@ -54,7 +57,11 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
         msg = conn.recv()
         if msg[0] == "obs":
             ids = [i for i in indices if not eps[i].done]
-            obs = np.stack([eps[i].observe(noise[i]) for i in ids]) if ids else np.zeros((0, OBS_DIM), np.float32)
+            obs = (
+                np.stack([eps[i].observe(noise[i]) for i in ids])
+                if ids
+                else np.zeros((0, OBS_DIM), np.float32)
+            )
             conn.send((ids, obs))
         elif msg[0] == "act":
             acts: dict[int, Any] = msg[1]
@@ -65,11 +72,16 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                 else:
                     e.step(a)
                 if i in traj:
-                    p, q = e.part_pose()
+                    pegs = []
+                    for pi in range(e.n_pegs):
+                        p, q = e.peg_pose(pi)
+                        pegs.append({"pos": np.round(p, 5).tolist(), "quat": np.round(q, 4).tolist()})
                     traj[i].append({
-                        "t": e.steps, "part_pos": np.round(p, 5).tolist(), "part_quat": np.round(q, 4).tolist(),
+                        "t": e.steps,
+                        "pegs": pegs,
                         "hand": np.round(e.data.qpos[0:4], 5).tolist(),
                         "action": None if a is None else np.round(np.clip(a, -1, 1), 3).tolist(),
+                        "seated": list(e.seated_now),
                     })
             conn.send(True)
         elif msg[0] == "fail_all":
@@ -81,12 +93,24 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
             rows = []
             for i in indices:
                 e = eps[i]
+                seated = e.peg_seated_at_end()
+                first = e.peg_first_seat_steps()
+                msa = e.action_l2 / max(1, e.steps)
+                score = episode_score(seated, first, e.c.max_steps, msa)
                 rows.append({
-                    "format": RECORD_FORMAT, "episode": i, "conditions": conds[i].public(),
-                    "success": bool(e.success), "success_step": e.success_step, "steps": e.steps,
+                    "format": RECORD_FORMAT,
+                    "episode": i,
+                    "conditions": conds[i].public(),
+                    "success": bool(e.success),
+                    "success_step": e.success_step,
+                    "steps": e.steps,
                     "terminal_reason": e.terminal_reason,
-                    "mean_sq_action": round(e.action_l2 / max(1, e.steps), 5),
-                    "score": 1.0 if e.success else 0.0,
+                    "mean_sq_action": round(msa, 5),
+                    "peg_seated_at_end": seated,
+                    "peg_first_seat_step": first,
+                    "pegs_seated": int(sum(seated)),
+                    "n_pegs": e.n_pegs,
+                    "score": score,
                 })
             conn.send((rows, traj))
             return
@@ -98,8 +122,11 @@ def _validate_actions(raw: Any, n: int) -> list[np.ndarray | None] | None:
         return None
     out: list[np.ndarray | None] = []
     for row in raw:
-        if (not isinstance(row, list) or len(row) != ACT_DIM
-                or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in row)):
+        if (
+            not isinstance(row, list)
+            or len(row) != ACT_DIM
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in row)
+        ):
             out.append(None)
             continue
         a = np.asarray(row, dtype=np.float64)
@@ -124,7 +151,9 @@ class NistLiteReferee(Referee):
         conns, procs = [], []
         for sl in slices:
             a, b = ctx_mp.Pipe()
-            p = ctx_mp.Process(target=_worker, args=(b, ctx.seed, per, sl, stride, split), daemon=True)
+            p = ctx_mp.Process(
+                target=_worker, args=(b, ctx.seed, per, sl, stride, split), daemon=True
+            )
             p.start()
             conns.append(a)
             procs.append(p)
@@ -132,11 +161,13 @@ class NistLiteReferee(Referee):
         player = players[0]
         player_fault = None
         try:
-            player.reset(match_id=ctx.match_id, player_index=0, seed=0,
-                         config={"obs_dim": OBS_DIM, "act_dim": ACT_DIM, "control_hz": CONTROL_HZ})
+            player.reset(
+                match_id=ctx.match_id,
+                player_index=0,
+                seed=0,
+                config={"obs_dim": OBS_DIM, "act_dim": ACT_DIM, "control_hz": CONTROL_HZ},
+            )
         except (PlayerError, OSError, http.client.HTTPException) as e:
-            # The vendored client only wraps URLError/TimeoutError; a player that dies mid-response
-            # (RemoteDisconnected, IncompleteRead, connection reset) is still the player's fault.
             player_fault = f"reset failed: {type(e).__name__}"
 
         calls = 0
@@ -185,61 +216,105 @@ class NistLiteReferee(Referee):
         rows.sort(key=lambda r: r["episode"])
 
         successes = sum(1 for r in rows if r["success"])
-        raw_score = successes / n  # fixed denominator: every episode counts
+        success_rate = successes / n
+        pegs_seated = sum(r["pegs_seated"] for r in rows)
+        pegs_total = sum(r["n_pegs"] for r in rows)
+        peg_fraction = pegs_seated / max(1, pegs_total)
+        raw_score = raw_score_from_episodes(rows)
         self._write_records(rows, traj, round_ranges)
 
-        by_type: dict[str, list[int]] = {}
-        by_task: dict[str, list[int]] = {}
+        by_k: dict[str, list[float]] = {}
+        by_size: dict[str, list[int]] = {}
         for r in rows:
             c = r["conditions"]
-            by_type.setdefault(c["reset_type"], []).append(int(r["success"]))
-            by_task.setdefault(f'{c["shape"]}_{round(c["diameter"]*1000)}mm', []).append(int(r["success"]))
-        # Envelope follows the platform's StandardEvalMetadata: formats from
-        # {number, percent, duration_s, score, count, text}, unit types from
-        # {match, game, task, subset, instance, completion, other}, and every `metrics` entry
-        # names the unit it belongs to.
+            by_k.setdefault(f'k{c["n_pegs"]}', []).append(float(r["score"]))
+            for peg, seated in zip(c["pegs"], r["peg_seated_at_end"]):
+                shape, dia, _, _ = SLOT_SPECS[peg["slot"]]
+                key = f"{shape}_{round(dia * 1000)}mm"
+                by_size.setdefault(key, []).append(int(seated))
+
         summary = [
-            {"key": "success_rate", "label": "Assembly success rate", "value": raw_score, "format": "percent"},
+            {"key": "mean_episode_score", "label": "Mean episode score", "value": raw_score, "format": "score"},
+            {"key": "success_rate", "label": "Full-board success rate", "value": success_rate, "format": "percent"},
+            {"key": "peg_seat_fraction", "label": "Fraction of pegs seated", "value": peg_fraction, "format": "percent"},
             {"key": "episodes", "label": "Episodes", "value": n, "format": "count"},
         ] + [
-            {"key": f"success_{k}", "label": f"Success: {k}", "value": sum(v) / len(v), "format": "percent"}
-            for k, v in sorted(by_type.items())
+            {
+                "key": f"score_{k}",
+                "label": f"Score: {k}",
+                "value": sum(v) / len(v),
+                "format": "score",
+            }
+            for k, v in sorted(by_k.items())
         ] + [
-            {"key": f"success_{k}", "label": f"Success: {k.replace('_', ' ')}", "value": sum(v) / len(v),
-             "format": "percent"}
-            for k, v in sorted(by_task.items())
+            {
+                "key": f"seat_{k}",
+                "label": f"Seat rate: {k.replace('_', ' ')}",
+                "value": sum(v) / len(v),
+                "format": "percent",
+            }
+            for k, v in sorted(by_size.items())
         ]
-
-        def _task(r):
-            return f'{r["conditions"]["shape"]}_{round(r["conditions"]["diameter"]*1000)}mm'
 
         metadata = {
             "schema_version": 1,
             "summary": summary,
             "units": [
-                {"id": f"ep-{r['episode']}", "type": "instance", "index": r["episode"],
-                 "label": f'{r["conditions"]["shape"]} {round(r["conditions"]["diameter"]*1000)}mm / {r["conditions"]["reset_type"]}',
-                 "category": _task(r), "steps": r["steps"],
-                 "outcome": "assembled" if r["success"] else r["terminal_reason"]}
+                {
+                    "id": f"ep-{r['episode']}",
+                    "type": "instance",
+                    "index": r["episode"],
+                    "label": f'K={r["conditions"]["n_pegs"]} / {r["conditions"]["clutter_bucket"]} clutter',
+                    "category": f'k{r["conditions"]["n_pegs"]}',
+                    "steps": r["steps"],
+                    "outcome": "assembled" if r["success"] else r["terminal_reason"],
+                }
                 for r in rows
             ],
             "metrics": [
-                {"key": "assembled", "label": "Assembled", "value": r["score"], "format": "score",
-                 "unit_id": f"ep-{r['episode']}"}
+                {
+                    "key": "episode_score",
+                    "label": "Episode score",
+                    "value": r["score"],
+                    "format": "score",
+                    "unit_id": f"ep-{r['episode']}",
+                }
+                for r in rows
+            ]
+            + [
+                {
+                    "key": "pegs_seated",
+                    "label": "Pegs seated",
+                    "value": r["pegs_seated"],
+                    "format": "count",
+                    "unit_id": f"ep-{r['episode']}",
+                }
                 for r in rows
             ],
-            "capabilities": {"outcome_breakdown": True, "score_distribution": True, "category_breakdown": True},
+            "capabilities": {
+                "outcome_breakdown": True,
+                "score_distribution": True,
+                "category_breakdown": True,
+            },
             "details": {
                 "format": RECORD_FORMAT,
                 "round_condition_ranges": round_ranges,
                 "player_calls": calls,
                 "player_fault": player_fault,
-                "terminal_reasons": {k: sum(1 for r in rows if r["terminal_reason"] == k)
-                                     for k in sorted({r["terminal_reason"] for r in rows})},
+                "peg_seat_fraction": peg_fraction,
+                "terminal_reasons": {
+                    k: sum(1 for r in rows if r["terminal_reason"] == k)
+                    for k in sorted({r["terminal_reason"] for r in rows})
+                },
             },
         }
-        return GameResult(raw_scores=[raw_score], winner=0 if successes else -1,
-                          terminal_reason=reason if player_fault else "scored", steps=calls, metadata=metadata)
+        return GameResult(
+            raw_scores=[raw_score],
+            winner=0 if successes else -1,
+            terminal_reason=reason if player_fault else "scored",
+            steps=calls,
+            metadata=metadata,
+        )
 
     def run(self) -> None:
         """Like Referee.run, but a player that never becomes ready is scored (0), not a referee crash."""
@@ -253,10 +328,15 @@ class NistLiteReferee(Referee):
             for p in players:
                 p.wait_until_ready(self.readiness_timeout_s)
         except PlayerError:
-            result = GameResult(raw_scores=[0.0], winner=-1, terminal_reason="player_not_ready", steps=0,
-                                metadata={"details": {"player_fault": "policy server never became ready"}})
+            result = GameResult(
+                raw_scores=[0.0],
+                winner=-1,
+                terminal_reason="player_not_ready",
+                steps=0,
+                metadata={"details": {"player_fault": "policy server never became ready"}},
+            )
         else:
-            result = self.play_game(ctx, players)  # unexpected exceptions propagate -> referee failure
+            result = self.play_game(ctx, players)
         _r.RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
         _r.RESULT_PATH.write_text(json.dumps(dataclasses.asdict(result)))
 
@@ -264,13 +344,25 @@ class NistLiteReferee(Referee):
         try:
             HISTORY_DIR.mkdir(parents=True, exist_ok=True)
             with (HISTORY_DIR / "episodes.jsonl").open("w") as f:
-                f.write(json.dumps({"format": RECORD_FORMAT, "kind": "round", "round_condition_ranges": round_ranges}) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "format": RECORD_FORMAT,
+                            "kind": "round",
+                            "round_condition_ranges": round_ranges,
+                        }
+                    )
+                    + "\n"
+                )
                 for r in rows:
                     f.write(json.dumps(r) + "\n")
             for i, steps in traj.items():
                 (HISTORY_DIR / f"traj_{i:05d}.json").write_text(
-                    json.dumps({"format": RECORD_FORMAT, "kind": "trajectory", "episode": i, "steps": steps}))
-        except Exception as e:  # records are best-effort and never affect the score
+                    json.dumps(
+                        {"format": RECORD_FORMAT, "kind": "trajectory", "episode": i, "steps": steps}
+                    )
+                )
+        except Exception as e:
             print(f"record write failed: {e}", file=sys.stderr)
 
 

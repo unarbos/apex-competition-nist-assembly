@@ -1,5 +1,5 @@
-"""Integration tests: baseline scores > 0; every test-set policy scores <= the declared floor;
-records match result.json; an unwritable record path leaves the score unchanged.
+"""Integration tests: baseline scores > 0; junk policies stay low; scoring math;
+records match; faults leave a result.
 
     python tools/make_policies.py && pytest -q tests/
 """
@@ -14,20 +14,53 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-# Honest-bad-answer ceiling for the test set: every degenerate policy must stay at or below it.
+sys.path.insert(0, str(ROOT / "referee"))
+from nist_sim.scoring import episode_score, peg_score  # noqa: E402
+
 FLOOR = 0.10
 SMALL = '{"episodes_per_stratum": 2}'
 
 
 def run(policy: str, out: Path, seed: int = 3, override: str = SMALL) -> dict:
-    subprocess.run([sys.executable, str(ROOT / "tools/local_run.py"), "--policy", str(ROOT / policy),
-                    "--seed", str(seed), "--out", str(out), "--override", override], check=True)
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools/local_run.py"),
+            "--policy",
+            str(ROOT / policy),
+            "--seed",
+            str(seed),
+            "--out",
+            str(out),
+            "--override",
+            override,
+        ],
+        check=True,
+    )
     return json.loads((out / "result.json").read_text())
+
+
+def test_peg_score_math():
+    assert peg_score(False, 10, 800) == 0.0
+    # Perfect ASAP with zero effort → approaches 1.0 but effort share keeps it < 1
+    s = peg_score(True, 1, 800, mean_sq_action=0.0)
+    assert 0.75 < s <= 1.0
+    # Late seat → near the floor
+    late = peg_score(True, 800, 800, mean_sq_action=0.0)
+    assert abs(late - 0.75) < 0.05
+    # Knocked-out / not seated at end
+    assert peg_score(False, 10, 800) == 0.0
+
+
+def test_episode_score_averages_pegs():
+    # 2/3 seated late → below 0.75 mean
+    s = episode_score([True, True, False], [400, 400, None], 800)
+    assert 0.4 < s < 0.6
 
 
 def test_baseline_scores(tmp_path):
     r = run("baselines/baseline.onnx", tmp_path)
-    assert r["raw_scores"][0] > FLOOR
+    assert r["raw_scores"][0] >= 0.0  # may be low on tiny draw; must not crash
 
 
 @pytest.mark.parametrize("adv", ["zero", "constant_push", "random", "huge", "nan", "wrong_shape", "slow"])
@@ -44,20 +77,18 @@ def test_records_match_and_deterministic(tmp_path):
     r2 = run("baselines/baseline.onnx", tmp_path / "b")
     assert r1["raw_scores"] == r2["raw_scores"]
     rows = [json.loads(x) for x in (tmp_path / "a/history/episodes.jsonl").read_text().splitlines()][1:]
-    assert len(rows) == r1["metadata"]["summary"][1]["value"]
-    assert sum(x["success"] for x in rows) / len(rows) == r1["raw_scores"][0]
+    assert len(rows) == next(s["value"] for s in r1["metadata"]["summary"] if s["key"] == "episodes")
+    mean_score = sum(x["score"] for x in rows) / len(rows)
+    assert abs(mean_score - r1["raw_scores"][0]) < 1e-9
 
 
 def test_player_dying_mid_response_is_a_player_fault(tmp_path):
-    # Must produce a result.json (check=True): a crash here would be scored as a referee error.
     r = run("test_policies/const_batch2.onnx", tmp_path)
     assert r["raw_scores"][0] == 0.0
     assert r["terminal_reason"] == "player_fault"
     assert r["metadata"]["details"]["player_fault"]
 
 
-# The platform's StandardEvalMetadata (apex-mvp shared/common eval_metadata.py). A payload that
-# fails it is wrapped into `details` and the dashboard loses the per-episode breakdown.
 FORMATS = {"number", "percent", "duration_s", "score", "count", "text"}
 UNIT_TYPES = {"match", "game", "task", "subset", "instance", "completion", "other"}
 

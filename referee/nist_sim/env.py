@@ -1,152 +1,279 @@
-"""NIST-lite peg insertion in MuJoCo (CPU).
+"""NIST-lite multi-peg board in MuJoCo (CPU).
 
-Each episode is one assembly pair from the NIST Assembly Task Board #1 peg family
-(round / square pegs, 4-16 mm), built procedurally from primitives, plus a
-2-finger parallel gripper on a 4-DoF (x, y, z, yaw) Cartesian stage.
+One episode is a full ATB-1-style peg board (8 slots, round / square live; hex and
+D-flat keyed families appear only on the held-out reserved split) with K in {3..6}
+active pegs, 0–3 clutter blocks, and a 2-finger parallel gripper on a 4-DoF
+(x, y, z, yaw) Cartesian stage.
 
-Control at 25 Hz; physics at 1 kHz. One success flag per episode.
+Observations are intentionally partial: peg and slot pose channels carry
+*different* per-episode biases (plus optional mid-episode drift), noise, and
+dropout — relative peg−slot does not cancel. Wrist force/torque supports
+contact-driven search. The privileged reference solver in tools/ reads true state.
+
+Control at 25 Hz; physics at 1 kHz. Partial credit is per peg.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, asdict
+from collections import deque
+from typing import Deque
 
 import mujoco
 import numpy as np
 
-OBS_DIM = 26
+from .conditions import (
+    MAX_CLUTTER,
+    N_SLOTS,
+    SHAPE_NAMES,
+    SLOT_SPECS,
+    EpisodeConditions,
+    PegStart,
+    shape_one_hot,
+    slot_world_xy,
+)
+
+# ---- observation layout -------------------------------------------------------
+# proprio (16) + last_action (5) + 8 pegs × 17 + 3 clutter × 9 = 184
+PROPRIO_DIM = 16  # hand xyz*10 (3), sin/cos yaw (2), vel (3), gap (1), force (3), torque (3), pad_f (1)
 ACT_DIM = 5
+PEG_FEAT = 17  # present, est_rel_pos*10 (3), quat (4), shape_oh (4), size*50, est_slot*10 (3), seated
+CLUTTER_FEAT = 9  # present, pos*10 (3), quat (4), size*50
+MAX_PEGS = N_SLOTS
+OBS_DIM = PROPRIO_DIM + ACT_DIM + MAX_PEGS * PEG_FEAT + MAX_CLUTTER * CLUTTER_FEAT  # 184
+
 CONTROL_HZ = 25
 PHYSICS_DT = 0.001
 SUBSTEPS = int(round(1.0 / (CONTROL_HZ * PHYSICS_DT)))  # 40
+# Contact width must stay below the minimum radial clearance so soft contacts
+# cannot cheat the fit. 0.02 mm << 0.2 mm live lower bound.
+SOLIMP = "0.95 0.99 0.00002"
 
-BLOCK_H = 0.020  # hole depth / block height (m)
+BLOCK_H = 0.020
 PEG_LEN = 0.050
 WALL_T = 0.006
-MAX_OPEN = 0.012  # per-finger opening (m)
-DXYZ = 0.004  # m per control step at |a|=1
-DYAW = 0.08  # rad per control step at |a|=1
-SEAT_TOL_Z = 0.001  # within 1 mm of fully seated
-SEATED_HOLD = 5  # consecutive control steps
-# Upright tolerance for "seated". A peg fully inside the 20 mm hole cannot tilt more than
-# ~3.4 deg at the widest clearance (atan(2 * 0.6 / 20)); a peg lying across the mouth is at 90.
+MAX_OPEN = 0.012
+DXYZ = 0.004
+DYAW = 0.08
+SEAT_TOL_Z = 0.001
+SEATED_HOLD = 5
 MAX_SEAT_TILT = math.radians(10.0)
-MAX_PART_SPEED = 2.0  # m/s
-# Hand z floor. Pads are centred 12 mm above the hand with an 8 mm half-height, so their
-# bottom is at hand_z + PAD_BOTTOM_OFFSET. A lying 4 mm peg tops out at ~4 mm; allowing the
-# hand slightly below the board plane gives the pads ~3 mm of vertical overlap without the
-# pads (bottom at +1 mm) or palm (bottom at +21 mm) penetrating the board.
+# Catches numerical blow-ups only. Soft-contact pops (a dropped 4 mm peg landing across a
+# hole lip) can briefly reach ~2.1 m/s in a recoverable way; 2.0 ended those episodes as
+# 'unstable' (seed 7 / episode 8 under a no-op). Real blow-ups go far higher or non-finite.
+MAX_PART_SPEED = 4.0
 HAND_Z_MIN = -0.003
-PAD_BOTTOM_OFFSET = 0.004  # pad centre z (0.012) minus pad half-height (0.008)
+PAD_BOTTOM_OFFSET = 0.004
 PAD_CENTRE_Z = 0.012
 MAX_SPAWN_ATTEMPTS = 48
-# After the settle phase a valid spawn is nearly still. Well below MAX_PART_SPEED so
-# blow-ups are caught before the first control step.
-SPAWN_MAX_SPEED = 0.2  # m/s
-SPAWN_MAX_DRIFT = 0.05  # m from the intended hole+offset XY after settle
-SPAWN_BOARD_MARGIN = 0.22  # m; leave headroom vs the 0.28 part_lost limit
-SPAWN_MAX_PENETRATION = 0.001  # m; deeper part contacts mean the start is interlocking
+SPAWN_MAX_SPEED = 0.25
+SPAWN_BOARD_MARGIN = 0.18
+SPAWN_MAX_DRIFT = 0.04  # m from intended XY after settle
+SPAWN_MAX_PENETRATION = 0.0015
+
+# Round holes use 12 walls (was 16) to cut contact pairs on the full board.
+ROUND_HOLE_WALLS = 12
+HEX_SIDES = 6
+FORCE_SCALE = 0.05  # map Newtons → obs units
+TORQUE_SCALE = 0.5
 
 
-@dataclass
-class EpisodeConditions:
-    shape: str  # "round" | "square"
-    diameter: float  # m (peg nominal width)
-    clearance: float  # m (radial)
-    friction: float
-    peg_mass: float
-    gain_scale: float
-    obs_noise: float  # m, std on part position observations
-    reset_type: str  # grasped_above | grasped_far | near_hole | loose | lying
-    hole_xy: tuple[float, float]
-    offset_xy: tuple[float, float]
-    height: float
-    yaw_err: float
-    max_steps: int = 250
-
-    def public(self) -> dict:
-        d = asdict(self)
-        return {k: (round(v, 6) if isinstance(v, float) else v) for k, v in d.items()}
+def _peg_shape(peg: PegStart) -> str:
+    return peg.shape()
 
 
-def _hole_walls(shape: str, r_hole: float) -> str:
-    """Return MJCF geoms forming the hole block walls around (0,0)."""
+def _hole_walls(shape: str, r_hole: float, prefix: str, chamfer: float = 0.0) -> str:
+    """Hole wall geoms. ``chamfer`` in [0,1] adds a slightly wider upper lip."""
     geoms = []
     h2 = BLOCK_H / 2
-    if shape == "square":
-        outer = r_hole + WALL_T
-        # four walls
-        for sx, sy, hx, hy in [
-            (0, r_hole + WALL_T / 2, outer, WALL_T / 2),
-            (0, -(r_hole + WALL_T / 2), outer, WALL_T / 2),
-            (r_hole + WALL_T / 2, 0, WALL_T / 2, r_hole),
-            (-(r_hole + WALL_T / 2), 0, WALL_T / 2, r_hole),
-        ]:
+    # Entry funnel: upper third of the hole is wider by up to ~0.4 mm.
+    funnel = 0.00015 + 0.0004 * float(np.clip(chamfer, 0.0, 1.0))
+
+    def _square(r: float, z0: float, hz: float, tag: str) -> None:
+        outer = r + WALL_T
+        for i, (sx, sy, hx, hy) in enumerate([
+            (0, r + WALL_T / 2, outer, WALL_T / 2),
+            (0, -(r + WALL_T / 2), outer, WALL_T / 2),
+            (r + WALL_T / 2, 0, WALL_T / 2, r),
+            (-(r + WALL_T / 2), 0, WALL_T / 2, r),
+        ]):
             geoms.append(
-                f'<geom type="box" pos="{sx} {sy} {h2}" size="{hx} {hy} {h2}" class="fixed"/>'
+                f'<geom name="{prefix}_{tag}{i}" type="box" pos="{sx} {sy} {z0}" '
+                f'size="{hx} {hy} {hz}" class="fixed"/>'
             )
-    else:
-        n = 16
-        half_w = (r_hole + WALL_T) * math.tan(math.pi / n) + 1e-4
+
+    def _round(r: float, z0: float, hz: float, tag: str, n: int = ROUND_HOLE_WALLS) -> None:
+        half_w = (r + WALL_T) * math.tan(math.pi / n) + 1e-4
         for i in range(n):
             th = 2 * math.pi * i / n
-            c = r_hole + WALL_T / 2
+            c = r + WALL_T / 2
             geoms.append(
-                f'<geom type="box" pos="{c*math.cos(th):.6f} {c*math.sin(th):.6f} {h2}" '
-                f'euler="0 0 {th:.6f}" size="{WALL_T/2} {half_w:.6f} {h2}" class="fixed"/>'
+                f'<geom name="{prefix}_{tag}{i}" type="box" '
+                f'pos="{c * math.cos(th):.6f} {c * math.sin(th):.6f} {z0}" '
+                f'euler="0 0 {th:.6f}" size="{WALL_T / 2} {half_w:.6f} {hz}" class="fixed"/>'
             )
+
+    def _hex(r: float, z0: float, hz: float, tag: str) -> None:
+        # r = apothem (centre to flat).
+        half_w = r * math.tan(math.pi / HEX_SIDES) + 1e-4
+        for i in range(HEX_SIDES):
+            th = 2 * math.pi * i / HEX_SIDES
+            c = r + WALL_T / 2
+            geoms.append(
+                f'<geom name="{prefix}_{tag}{i}" type="box" '
+                f'pos="{c * math.cos(th):.6f} {c * math.sin(th):.6f} {z0}" '
+                f'euler="0 0 {th:.6f}" size="{WALL_T / 2} {half_w:.6f} {hz}" class="fixed"/>'
+            )
+
+    def _dflat(r: float, z0: float, hz: float, tag: str) -> None:
+        # Round hole with a flat keyway along +x (D-profile).
+        _round(r, z0, hz, tag, n=10)
+        # Flat face inset from the +x side.
+        flat_x = r * 0.55
+        geoms.append(
+            f'<geom name="{prefix}_{tag}_flat" type="box" '
+            f'pos="{flat_x + WALL_T / 2:.6f} 0 {z0}" '
+            f'size="{WALL_T / 2} {r * 0.9:.6f} {hz}" class="fixed"/>'
+        )
+
+    z_main = h2 * 0.7
+    hz_main = h2 * 0.7
+    z_lip = BLOCK_H - h2 * 0.35
+    hz_lip = h2 * 0.35
+    builders = {
+        "square": _square,
+        "round": _round,
+        "hex": _hex,
+        "dflat": _dflat,
+    }
+    build = builders.get(shape, _round)
+    build(r_hole, z_main, hz_main, "w")
+    build(r_hole + funnel, z_lip, hz_lip, "lip")
     return "\n".join(geoms)
 
 
+def _peg_geoms(shape: str, r: float, name: str) -> str:
+    half = PEG_LEN / 2
+    if shape == "square":
+        return f'<geom name="{name}" type="box" size="{r} {r} {half}" class="part"/>'
+    if shape == "hex":
+        # Six thin boxes forming a hexagonal prism (apothem = r).
+        parts = []
+        half_w = r * math.tan(math.pi / HEX_SIDES)
+        for i in range(HEX_SIDES):
+            th = 2 * math.pi * i / HEX_SIDES + math.pi / HEX_SIDES
+            cx = (r * 0.55) * math.cos(th)
+            cy = (r * 0.55) * math.sin(th)
+            parts.append(
+                f'<geom name="{name}_{i}" type="box" pos="{cx:.6f} {cy:.6f} 0" '
+                f'euler="0 0 {th:.6f}" size="{r * 0.55:.6f} {half_w:.6f} {half}" class="part"/>'
+            )
+        return "\n".join(parts)
+    if shape == "dflat":
+        # Cylinder plus a flat chord (key) along +x.
+        return (
+            f'<geom name="{name}" type="cylinder" size="{r} {half}" class="part"/>'
+            f'<geom name="{name}_key" type="box" pos="{r * 0.35:.6f} 0 0" '
+            f'size="{r * 0.35:.6f} {r * 0.75:.6f} {half}" class="part"/>'
+        )
+    return f'<geom name="{name}" type="cylinder" size="{r} {half}" class="part"/>'
+
+
+def _board_holes_xml(clearance: float, chamfer: float, overrides: dict[int, str] | None = None) -> str:
+    parts = []
+    overrides = overrides or {}
+    for i, (shape, dia, lx, ly) in enumerate(SLOT_SPECS):
+        shape = overrides.get(i, shape)
+        r_hole = dia / 2 + clearance
+        parts.append(
+            f'<body name="hole_{i}" pos="{lx} {ly} 0">\n'
+            f"{_hole_walls(shape, r_hole, f'h{i}', chamfer=chamfer)}\n</body>"
+        )
+    return "\n".join(parts)
+
+
 def build_xml(c: EpisodeConditions) -> str:
-    r = c.diameter / 2
-    r_hole = r + c.clearance
-    if c.shape == "square":
-        peg_geom = f'<geom name="peg" type="box" size="{r} {r} {PEG_LEN/2}" class="part"/>'
-    else:
-        peg_geom = f'<geom name="peg" type="cylinder" size="{r} {PEG_LEN/2}" class="part"/>'
+    """Build one MuJoCo model: board + 8 holes + K pegs + clutter + gripper."""
     kp = 2000.0 * c.gain_scale
     kv = 2 * math.sqrt(kp * 0.6)
-    hx, hy = c.hole_xy
+    bx, by = c.board_xy
+    byaw = c.board_yaw
+    # Per-slot shape overrides for held-out D-flat pegs.
+    hole_overrides = {peg.slot: peg.shape() for peg in c.pegs if peg.shape_override}
+
+    peg_bodies = []
+    for i, peg in enumerate(c.pegs):
+        shape = peg.shape()
+        dia = peg.diameter()
+        r = dia / 2
+        geom = _peg_geoms(shape, r, f"peg{i}")
+        peg_bodies.append(
+            f"""
+    <body name="peg{i}" pos="0 0 0.15">
+      <freejoint name="peg{i}"/>
+      <inertial pos="0 0 0" mass="{c.peg_mass}"
+        diaginertia="{c.peg_mass * r * r / 2 + 1e-8} {c.peg_mass * r * r / 2 + 1e-8} {c.peg_mass * r * r / 2 + 1e-8}"/>
+      {geom}
+    </body>"""
+        )
+
+    clutter_bodies = []
+    for i, cl in enumerate(c.clutter):
+        sx, sy = cl.size_xy
+        hz = cl.height / 2
+        clutter_bodies.append(
+            f"""
+    <body name="clutter{i}" pos="0 0 0.15">
+      <freejoint name="clutter{i}"/>
+      <inertial pos="0 0 0" mass="{max(0.01, c.peg_mass)}"
+        diaginertia="1e-6 1e-6 1e-6"/>
+      <geom name="clutter{i}" type="box" size="{sx} {sy} {hz}" class="part"
+        rgba="0.4 0.55 0.35 1"/>
+    </body>"""
+        )
+
+    # Contype/conaffinity: board+holes = bit 1, parts = bit 2, gripper = bit 4.
+    # Far-apart hole walls still collide with parts (needed for insertion); parts
+    # collide with each other and the gripper. Gripper does not collide with itself.
     return f"""
-<mujoco model="nist_lite">
+<mujoco model="nist_lite_board">
   <compiler angle="radian" autolimits="true"/>
   <option timestep="{PHYSICS_DT}" cone="elliptic" impratio="10" integrator="implicitfast"/>
   <default>
-    <geom friction="{c.friction} 0.01 0.001" solref="0.002 1" solimp="0.95 0.99 0.0005"/>
-    <default class="fixed"><geom rgba="0.5 0.5 0.55 1"/></default>
-    <default class="part"><geom condim="4" rgba="0.8 0.6 0.2 1"/></default>
-    <default class="pad"><geom condim="4" rgba="0.2 0.2 0.2 1" friction="{c.friction*1.5} 0.02 0.001"/></default>
+    <geom friction="{c.friction} 0.01 0.001" solref="0.002 1" solimp="{SOLIMP}"/>
+    <default class="fixed"><geom contype="1" conaffinity="2" rgba="0.5 0.5 0.55 1"/></default>
+    <default class="part"><geom condim="4" contype="2" conaffinity="7" rgba="0.8 0.6 0.2 1"/></default>
+    <default class="pad"><geom condim="4" contype="4" conaffinity="3"
+      rgba="0.2 0.2 0.2 1" friction="{c.friction * 1.5} 0.02 0.001"/></default>
   </default>
   <worldbody>
-    <geom name="board" type="box" pos="0 0 -0.005" size="0.3 0.3 0.005" class="fixed"/>
-    <body name="hole" pos="{hx} {hy} 0">
-      {_hole_walls(c.shape, r_hole)}
+    <body name="board" pos="{bx} {by} 0" euler="0 0 {byaw}">
+      <geom name="board_top" type="box" pos="0 0 -0.005" size="0.22 0.18 0.005" class="fixed"/>
+      {_board_holes_xml(c.clearance, c.chamfer, hole_overrides)}
     </body>
     <body name="hand" pos="0 0 0" gravcomp="1">
-      <joint name="jx" type="slide" axis="1 0 0" damping="{kv}" range="-0.25 0.25"/>
-      <joint name="jy" type="slide" axis="0 1 0" damping="{kv}" range="-0.25 0.25"/>
+      <joint name="jx" type="slide" axis="1 0 0" damping="{kv}" range="-0.28 0.28"/>
+      <joint name="jy" type="slide" axis="0 1 0" damping="{kv}" range="-0.28 0.28"/>
       <joint name="jz" type="slide" axis="0 0 1" damping="{kv}" range="{HAND_Z_MIN} 0.3"/>
       <joint name="jyaw" type="hinge" axis="0 0 1" damping="0.5" range="-3.2 3.2"/>
       <inertial pos="0 0 0.03" mass="0.6" diaginertia="0.001 0.001 0.001"/>
-      <geom name="palm" type="box" pos="0 0 0.027" size="0.02 0.03 0.006" rgba="0.3 0.3 0.8 1"/>
+      <geom name="palm" type="box" pos="0 0 0.027" size="0.02 0.03 0.006"
+        contype="4" conaffinity="3" rgba="0.3 0.3 0.8 1"/>
       <body name="fl" pos="0 0 0" gravcomp="1">
-        <joint name="jfl" type="slide" axis="0 1 0" limited="true" range="0 {MAX_OPEN}" damping="2" armature="0.001"/>
+        <joint name="jfl" type="slide" axis="0 1 0" limited="true" range="0 {MAX_OPEN}"
+          damping="2" armature="0.001"/>
         <inertial pos="0 0.003 0.012" mass="0.02" diaginertia="1e-6 1e-6 1e-6"/>
         <geom name="padl" type="box" pos="0 0.003 0.012" size="0.008 0.003 0.008" class="pad"/>
       </body>
       <body name="fr" pos="0 0 0" gravcomp="1">
-        <joint name="jfr" type="slide" axis="0 -1 0" limited="true" range="0 {MAX_OPEN}" damping="2" armature="0.001"/>
+        <joint name="jfr" type="slide" axis="0 -1 0" limited="true" range="0 {MAX_OPEN}"
+          damping="2" armature="0.001"/>
         <inertial pos="0 -0.003 0.012" mass="0.02" diaginertia="1e-6 1e-6 1e-6"/>
         <geom name="padr" type="box" pos="0 -0.003 0.012" size="0.008 0.003 0.008" class="pad"/>
       </body>
     </body>
-    <body name="part" pos="0 0 0.1">
-      <freejoint name="part"/>
-      <inertial pos="0 0 0" mass="{c.peg_mass}" diaginertia="{c.peg_mass*r*r/2+1e-8} {c.peg_mass*r*r/2+1e-8} {c.peg_mass*r*r/2+1e-8}"/>
-      {peg_geom}
-    </body>
+    {"".join(peg_bodies)}
+    {"".join(clutter_bodies)}
   </worldbody>
   <contact>
     <exclude body1="hand" body2="fl"/><exclude body1="hand" body2="fr"/><exclude body1="fl" body2="fr"/>
@@ -155,7 +282,7 @@ def build_xml(c: EpisodeConditions) -> str:
     <position name="ax" joint="jx" kp="{kp}"/>
     <position name="ay" joint="jy" kp="{kp}"/>
     <position name="az" joint="jz" kp="{kp}"/>
-    <position name="ayaw" joint="jyaw" kp="{2.0*c.gain_scale}"/>
+    <position name="ayaw" joint="jyaw" kp="{2.0 * c.gain_scale}"/>
     <position name="afl" joint="jfl" kp="400" forcerange="-15 15" ctrlrange="0 {MAX_OPEN}"/>
     <position name="afr" joint="jfr" kp="400" forcerange="-15 15" ctrlrange="0 {MAX_OPEN}"/>
   </actuator>
@@ -163,8 +290,23 @@ def build_xml(c: EpisodeConditions) -> str:
 """
 
 
+def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    out = np.zeros(4)
+    mujoco.mju_mulQuat(out, q1, q2)
+    return out
+
+
+def _yaw_quat(yaw: float) -> np.ndarray:
+    return np.array([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])
+
+
+def _lying_quat(yaw: float) -> np.ndarray:
+    qx = np.array([math.cos(math.pi / 4), math.sin(math.pi / 4), 0.0, 0.0])
+    return _quat_mul(_yaw_quat(yaw), qx)
+
+
 class Episode:
-    """One simulated episode. Steps only through `step(action)` at 25 Hz."""
+    """One multi-peg episode. Steps only through ``step(action)`` at 25 Hz."""
 
     def __init__(self, cond: EpisodeConditions, rng: np.random.Generator):
         self.c = cond
@@ -172,23 +314,67 @@ class Episode:
         self.model = mujoco.MjModel.from_xml_string(build_xml(cond))
         self.data = mujoco.MjData(self.model)
         m = self.model
-        self.part_qadr = m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "part")]
-        self.part_vadr = m.jnt_dofadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "part")]
-        self.part_body = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "part")
-        self.grip_bodies = {mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, n) for n in ("hand", "fl", "fr")}
-        self.hole = np.array([cond.hole_xy[0], cond.hole_xy[1], BLOCK_H])
-        self.r_hole = cond.diameter / 2 + cond.clearance
+        self.n_pegs = len(cond.pegs)
+        self.n_clutter = len(cond.clutter)
+        self.peg_qadr = []
+        self.peg_vadr = []
+        self.peg_body = []
+        for i in range(self.n_pegs):
+            jid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, f"peg{i}")
+            self.peg_qadr.append(m.jnt_qposadr[jid])
+            self.peg_vadr.append(m.jnt_dofadr[jid])
+            self.peg_body.append(mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"peg{i}"))
+        self.clutter_qadr = []
+        self.clutter_vadr = []
+        self.clutter_body = []
+        for i in range(self.n_clutter):
+            jid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, f"clutter{i}")
+            self.clutter_qadr.append(m.jnt_qposadr[jid])
+            self.clutter_vadr.append(m.jnt_dofadr[jid])
+            self.clutter_body.append(mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"clutter{i}"))
+        self.grip_bodies = {
+            mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, n) for n in ("hand", "fl", "fr")
+        }
+        self.slot_xy = [
+            slot_world_xy(cond.board_xy, cond.board_yaw, peg.slot) for peg in cond.pegs
+        ]
+        self.r_hole = [
+            peg.diameter() / 2 + cond.clearance for peg in cond.pegs
+        ]
         self.last_action = np.zeros(ACT_DIM)
         self.steps = 0
-        self.seated_run = 0
+        self.seated_run = [0] * self.n_pegs
+        self.first_seat_step: list[int | None] = [None] * self.n_pegs
+        self.seated_now = [False] * self.n_pegs
         self.done = False
-        self.success = False
+        self.success = False  # True iff all pegs seated at end (diagnostic)
         self.success_step: int | None = None
         self.terminal_reason = "running"
         self.action_l2 = 0.0
+        self._act_delay = int(cond.act_delay)
+        # FIFO of length act_delay: the command applied this step was issued
+        # act_delay control steps ago (zeros until the buffer fills).
+        self._act_buf: Deque[np.ndarray] = deque(
+            [np.zeros(ACT_DIM) for _ in range(self._act_delay)]
+        )
+        # Pose dropout: last emitted pose features per peg / clutter.
+        self._last_peg_obs = [None] * self.n_pegs
+        self._last_clutter_obs = [None] * self.n_clutter
+        self._disturbance_applied = False
+        # Pose-estimate biases (never revealed; applied in observe). Slot and peg
+        # biases differ so relative features retain a residual of several mm.
+        self._slot_bias_xy = np.array(cond.pose_bias_xy, dtype=float)
+        self._peg_bias_xy = self._slot_bias_xy + np.array(cond.peg_bias_delta_xy, dtype=float)
+        self._pose_bias_yaw = float(cond.pose_bias_yaw)
+        self._bias_drift = float(cond.bias_drift)
+        self._backlash = float(cond.backlash)
+        self._cmd_applied = np.zeros(4)  # last Cartesian cmd that passed backlash
+        self._wrist_force = np.zeros(3)
+        self._wrist_torque = np.zeros(3)
+        self._pad_force = 0.0
         self._reset()
 
-    # ---- reset -----------------------------------------------------------------
+    # ---- hand / part helpers -------------------------------------------------
     def _set_hand(self, xyz, yaw, open_frac):
         d = self.data
         d.qpos[0:3] = xyz
@@ -197,231 +383,525 @@ class Episode:
         self.target = np.array([*xyz, yaw], dtype=float)
         self.grip = open_frac * MAX_OPEN
 
-    def _set_part(self, xyz, yaw):
-        q = self.part_qadr
-        self.data.qpos[q : q + 3] = xyz
-        self.data.qpos[q + 3 : q + 7] = [math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)]
-        self.data.qvel[self.part_vadr : self.part_vadr + 6] = 0
+    def _set_free(self, qadr: int, vadr: int, xyz, quat):
+        self.data.qpos[qadr : qadr + 3] = xyz
+        self.data.qpos[qadr + 3 : qadr + 7] = quat
+        self.data.qvel[vadr : vadr + 6] = 0
 
     def _apply_ctrl(self):
         d = self.data
         d.ctrl[0:4] = self.target
         d.ctrl[4] = d.ctrl[5] = self.grip
 
-    def _resample_start(self) -> None:
-        """Re-draw start offsets from the same ranges as conditions.sample_episodes.
+    def peg_pose(self, i: int):
+        q = self.peg_qadr[i]
+        return self.data.qpos[q : q + 3].copy(), self.data.qpos[q + 3 : q + 7].copy()
 
-        Consumes self.rng so the whole reset stays deterministic from the platform seed.
-        Stratum identity (shape, diameter, reset_type) is unchanged.
-        """
-        c = self.c
-        rng = self.rng
-        rt = c.reset_type
-        if rt == "grasped_above":
-            r = float(rng.uniform(0.0, 0.005))
-            th = float(rng.uniform(0, 2 * math.pi))
-            c.offset_xy = (r * math.cos(th), r * math.sin(th))
-            c.height = float(rng.uniform(0.005, 0.025))
-            c.yaw_err = float(rng.uniform(-0.15, 0.15)) if c.shape == "square" else 0.0
-        elif rt == "grasped_far":
-            r = float(rng.uniform(0.01, 0.03))
-            th = float(rng.uniform(0, 2 * math.pi))
-            c.offset_xy = (r * math.cos(th), r * math.sin(th))
-            c.height = float(rng.uniform(0.02, 0.05))
-            c.yaw_err = float(rng.uniform(-0.5, 0.5)) if c.shape == "square" else 0.0
-        elif rt == "near_hole":
-            r = float(rng.uniform(0.0008, 0.0025))
-            th = float(rng.uniform(0, 2 * math.pi))
-            c.offset_xy = (r * math.cos(th), r * math.sin(th))
-            c.height = 0.0003
-            c.yaw_err = float(rng.uniform(-0.1, 0.1)) if c.shape == "square" else 0.0
-        elif rt == "lying":
-            r = float(rng.uniform(0.03, 0.06))
-            th = float(rng.uniform(0, 2 * math.pi))
-            c.offset_xy = (r * math.cos(th), r * math.sin(th))
-            c.height = float(rng.uniform(0.01, 0.03))
-            c.yaw_err = float(rng.uniform(-math.pi, math.pi))
-        elif rt == "loose":
-            r = float(rng.uniform(0.03, 0.06))
-            th = float(rng.uniform(0, 2 * math.pi))
-            c.offset_xy = (r * math.cos(th), r * math.sin(th))
-            c.height = float(rng.uniform(0.01, 0.03))
-            c.yaw_err = float(rng.uniform(-math.pi / 4, math.pi / 4))
+    def clutter_pose(self, i: int):
+        q = self.clutter_qadr[i]
+        return self.data.qpos[q : q + 3].copy(), self.data.qpos[q + 3 : q + 7].copy()
+
+    # ---- reset ---------------------------------------------------------------
+    def _slot_origin(self, peg: PegStart) -> tuple[float, float]:
+        return slot_world_xy(self.c.board_xy, self.c.board_yaw, peg.slot)
+
+    def _place_peg(self, i: int, peg: PegStart) -> None:
+        hx, hy = self._slot_origin(peg)
+        ox, oy = peg.offset_xy
+        # Rotate offset into world by board yaw.
+        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+        wx = hx + c * ox - s * oy
+        wy = hy + s * ox + c * oy
+        dia = peg.diameter()
+        r = dia / 2
+        yaw = peg.yaw_err + self.c.board_yaw
+        if peg.start_type == "lying":
+            self._set_free(self.peg_qadr[i], self.peg_vadr[i], [wx, wy, r + 1e-4], _lying_quat(yaw))
+        elif peg.start_type == "grasped":
+            pz = BLOCK_H + peg.height + PEG_LEN / 2
+            self._set_free(self.peg_qadr[i], self.peg_vadr[i], [wx, wy, pz], _yaw_quat(yaw))
         else:
-            raise ValueError(f"unknown reset_type: {rt!r}")
+            # loose / tray / near_hole: upright on the board plane, clear of the hole void.
+            self._set_free(
+                self.peg_qadr[i], self.peg_vadr[i], [wx, wy, PEG_LEN / 2 + 1e-4], _yaw_quat(yaw)
+            )
+
+    def _place_clutter(self, i: int) -> None:
+        cl = self.c.clutter[i]
+        bx, by = self.c.board_xy
+        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+        ox, oy = cl.offset_xy
+        wx = bx + c * ox - s * oy
+        wy = by + s * ox + c * oy
+        hz = cl.height / 2 + 1e-4
+        self._set_free(
+            self.clutter_qadr[i],
+            self.clutter_vadr[i],
+            [wx, wy, hz],
+            _yaw_quat(cl.yaw + self.c.board_yaw),
+        )
+
+    def _place_and_settle(self) -> None:
+        c = self.c
+        grasped = [i for i, p in enumerate(c.pegs) if p.start_type == "grasped"]
+        for i, peg in enumerate(c.pegs):
+            self._place_peg(i, peg)
+        for i in range(self.n_clutter):
+            self._place_clutter(i)
+
+        if grasped:
+            i = grasped[0]
+            peg = c.pegs[i]
+            ppos, _ = self.peg_pose(i)
+            r = peg.diameter() / 2
+            open_frac = min(1.0, (r + 0.0005) / MAX_OPEN)
+            finger_z = PEG_LEN / 2 - 0.008
+            self._set_hand(
+                [ppos[0], ppos[1], ppos[2] + finger_z - PAD_CENTRE_Z],
+                peg.yaw_err + c.board_yaw,
+                open_frac,
+            )
+            settle_grip = 0.0
+        else:
+            # Park the hand above board centre.
+            bx, by = c.board_xy
+            self._set_hand([bx, by, 0.12], c.board_yaw, 1.0)
+            settle_grip = MAX_OPEN
+
+        mujoco.mj_forward(self.model, self.data)
+        self.grip = settle_grip
+        hold = set(grasped)
+        for _ in range(150):
+            self._apply_ctrl()
+            for i in hold:
+                q = self.peg_qadr[i]
+                ppos, _ = self.peg_pose(i)
+                self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 6] = 0
+                # Keep XY/Z of the grasped peg fixed while fingers close.
+                self.data.qpos[q : q + 3] = ppos
+            mujoco.mj_step(self.model, self.data)
+        self.grip = settle_grip if grasped else MAX_OPEN
+        for _ in range(80):
+            self._apply_ctrl()
+            mujoco.mj_step(self.model, self.data)
+        # Kill residual part velocities so a settled start cannot walk off the board.
+        for i in range(self.n_pegs):
+            self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 6] = 0
+        for i in range(self.n_clutter):
+            self.data.qvel[self.clutter_vadr[i] : self.clutter_vadr[i] + 6] = 0
+        mujoco.mj_forward(self.model, self.data)
+
+    def _intended_peg_xy(self, peg: PegStart) -> tuple[float, float]:
+        hx, hy = self._slot_origin(peg)
+        ox, oy = peg.offset_xy
+        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+        return hx + c * ox - s * oy, hy + s * ox + c * oy
 
     def _spawn_ok(self) -> bool:
-        """True if the settled start is finite, on-board, slow, and not interlocking."""
         d = self.data
         if not (np.all(np.isfinite(d.qpos)) and np.all(np.isfinite(d.qvel))):
             return False
-        ppos, _ = self.part_pose()
-        pv = d.qvel[self.part_vadr : self.part_vadr + 3]
-        if float(np.linalg.norm(pv)) > SPAWN_MAX_SPEED:
-            return False
-        if abs(ppos[0]) > SPAWN_BOARD_MARGIN or abs(ppos[1]) > SPAWN_BOARD_MARGIN or ppos[2] < -0.01:
-            return False
-        hx, hy = self.c.hole_xy
-        ox, oy = self.c.offset_xy
-        if float(np.hypot(ppos[0] - (hx + ox), ppos[1] - (hy + oy))) > SPAWN_MAX_DRIFT:
-            return False
+        for i, peg in enumerate(self.c.pegs):
+            ppos, pquat = self.peg_pose(i)
+            pv = d.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 3]
+            if float(np.linalg.norm(pv)) > SPAWN_MAX_SPEED:
+                return False
+            if abs(ppos[0]) > SPAWN_BOARD_MARGIN or abs(ppos[1]) > SPAWN_BOARD_MARGIN or ppos[2] < -0.005:
+                return False
+            ix, iy = self._intended_peg_xy(peg)
+            if float(np.hypot(ppos[0] - ix, ppos[1] - iy)) > SPAWN_MAX_DRIFT:
+                return False
+            # Non-lying starts must stay roughly upright after settle.
+            if peg.start_type != "lying":
+                w, x, y, z = pquat
+                if abs(1.0 - 2.0 * (x * x + y * y)) < 0.85:
+                    return False
+        for i, cl in enumerate(self.c.clutter):
+            ppos, _ = self.clutter_pose(i)
+            if abs(ppos[0]) > SPAWN_BOARD_MARGIN or abs(ppos[1]) > SPAWN_BOARD_MARGIN or ppos[2] < -0.005:
+                return False
+            bx, by = self.c.board_xy
+            c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+            ox, oy = cl.offset_xy
+            ix, iy = bx + c * ox - s * oy, by + s * ox + c * oy
+            if float(np.hypot(ppos[0] - ix, ppos[1] - iy)) > SPAWN_MAX_DRIFT:
+                return False
+        part_bodies = set(self.peg_body) | set(self.clutter_body)
         for i in range(d.ncon):
             con = d.contact[i]
             b1 = self.model.geom_bodyid[con.geom1]
             b2 = self.model.geom_bodyid[con.geom2]
-            if self.part_body in (b1, b2) and con.dist < -SPAWN_MAX_PENETRATION:
+            if (b1 in part_bodies or b2 in part_bodies) and con.dist < -SPAWN_MAX_PENETRATION:
+                # Allow light peg-peg / clutter contacts in tray clusters.
+                if b1 in part_bodies and b2 in part_bodies and con.dist > -0.003:
+                    continue
                 return False
         return True
 
-    def _place_and_settle(self) -> None:
-        c = self.c
-        hx, hy = c.hole_xy
-        ox, oy = c.offset_xy
-        r = c.diameter / 2
-        finger_z_on_part = PEG_LEN / 2 - 0.008  # grasp point (part frame)
-        if c.reset_type in ("loose", "lying"):
-            px, py = hx + ox, hy + oy
-            if c.reset_type == "loose":
-                self._set_part([px, py, PEG_LEN / 2 + 1e-4], c.yaw_err)
-            else:  # on its side: rotate 90 deg about x, then yaw
-                q = self.part_qadr
-                self.data.qpos[q : q + 3] = [px, py, r + 1e-4]
-                qx = np.array([math.cos(math.pi / 4), math.sin(math.pi / 4), 0, 0])
-                qz = np.array([math.cos(c.yaw_err / 2), 0, 0, math.sin(c.yaw_err / 2)])
-                out = np.zeros(4)
-                mujoco.mju_mulQuat(out, qz, qx)
-                self.data.qpos[q + 3 : q + 7] = out
-                self.data.qvel[self.part_vadr : self.part_vadr + 6] = 0
-            self._set_hand([px + self.rng.uniform(-0.004, 0.004), py + self.rng.uniform(-0.004, 0.004),
-                            PEG_LEN + 0.01 + c.height], 0.0, 1.0)
-            settle_grip = MAX_OPEN
-            pz = None
-        else:
-            bottom = BLOCK_H + c.height
-            pz = bottom + PEG_LEN / 2
-            px, py = hx + ox, hy + oy
-            self._set_part([px, py, pz], c.yaw_err)
-            open_frac = min(1.0, (r + 0.0005) / MAX_OPEN)
-            self._set_hand([px, py, pz + finger_z_on_part - PAD_CENTRE_Z], c.yaw_err, open_frac)
-            settle_grip = 0.0
-        mujoco.mj_forward(self.model, self.data)
-        self.grip = settle_grip
-        for _ in range(150):
-            self._apply_ctrl()
-            if c.reset_type not in ("loose", "lying"):
-                # hold the part in place while the fingers close
-                q = self.part_qadr
-                self.data.qvel[self.part_vadr : self.part_vadr + 6] = 0
-                self.data.qpos[q : q + 3] = [px, py, pz]
-            mujoco.mj_step(self.model, self.data)
-        for _ in range(50):
-            self._apply_ctrl()
-            mujoco.mj_step(self.model, self.data)
+    def _nudge_offsets(self) -> None:
+        """Re-jitter free peg / clutter offsets within the same stratum identity."""
+        rng = self.rng
+        for peg in self.c.pegs:
+            if peg.start_type == "grasped":
+                continue
+            peg.offset_xy = (
+                peg.offset_xy[0] + float(rng.uniform(-0.01, 0.01)),
+                peg.offset_xy[1] + float(rng.uniform(-0.01, 0.01)),
+            )
+            peg.yaw_err += float(rng.uniform(-0.2, 0.2))
+        for cl in self.c.clutter:
+            cl.offset_xy = (
+                cl.offset_xy[0] + float(rng.uniform(-0.015, 0.015)),
+                cl.offset_xy[1] + float(rng.uniform(-0.015, 0.015)),
+            )
 
     def _force_safe_start(self) -> None:
-        """Last-resort placement that clears the hole block for loose/lying parts."""
-        c = self.c
-        if c.reset_type in ("loose", "lying"):
-            # Far from the hole, long axis tangential so a 50 mm peg cannot hit the walls.
-            c.offset_xy = (0.06, 0.0)
-            c.height = 0.02
-            c.yaw_err = math.pi / 2 if c.reset_type == "lying" else 0.0
-        else:
-            self._resample_start()
+        """Spread parts away from holes so settle cannot interlock."""
+        for i, peg in enumerate(self.c.pegs):
+            if peg.start_type == "grasped":
+                continue
+            ang = 2 * math.pi * i / max(1, self.n_pegs)
+            # Place in board corners relative to each hole, short radial offset.
+            peg.offset_xy = (0.055 * math.cos(ang), 0.055 * math.sin(ang))
+            if peg.start_type == "lying":
+                peg.yaw_err = ang + math.pi / 2  # long axis tangential to radial
+            else:
+                peg.start_type = "loose"
+                peg.yaw_err = 0.0
+        for i, cl in enumerate(self.c.clutter):
+            cl.offset_xy = (0.10, -0.10 + 0.035 * i)
 
-    def _reset(self):
-        # First attempt keeps the Latin-hypercube draw. Failures (blow-ups, wall
-        # interlocking) re-sample offsets from the episode rng within the same stratum.
+    def _teleport_safe_grid(self) -> None:
+        """Last-resort: snap free parts onto a clear grid on the board and freeze."""
+        bx, by = self.c.board_xy
+        for i, peg in enumerate(self.c.pegs):
+            if peg.start_type == "grasped":
+                continue
+            shape, dia, _, _ = SLOT_SPECS[peg.slot]
+            r = dia / 2
+            row, col = divmod(i, 3)
+            wx = bx - 0.06 + 0.06 * col
+            wy = by - 0.12 + 0.04 * row
+            if peg.start_type == "lying":
+                self._set_free(
+                    self.peg_qadr[i],
+                    self.peg_vadr[i],
+                    [wx, wy, r + 1e-4],
+                    _lying_quat(math.pi / 2),
+                )
+            else:
+                peg.start_type = "loose"
+                self._set_free(
+                    self.peg_qadr[i],
+                    self.peg_vadr[i],
+                    [wx, wy, PEG_LEN / 2 + 1e-4],
+                    _yaw_quat(0.0),
+                )
+        for i, cl in enumerate(self.c.clutter):
+            wx = bx + 0.10
+            wy = by - 0.10 + 0.04 * i
+            self._set_free(
+                self.clutter_qadr[i],
+                self.clutter_vadr[i],
+                [wx, wy, cl.height / 2 + 1e-4],
+                _yaw_quat(0.0),
+            )
+        if not any(p.start_type == "grasped" for p in self.c.pegs):
+            self._set_hand([bx, by, 0.12], self.c.board_yaw, 1.0)
+            self.grip = MAX_OPEN
+        mujoco.mj_forward(self.model, self.data)
+        self._apply_ctrl()
+        for _ in range(30):
+            self._apply_ctrl()
+            mujoco.mj_step(self.model, self.data)
+        for i in range(self.n_pegs):
+            self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 6] = 0
+        for i in range(self.n_clutter):
+            self.data.qvel[self.clutter_vadr[i] : self.clutter_vadr[i] + 6] = 0
+        mujoco.mj_forward(self.model, self.data)
+
+    def _reset(self) -> None:
         for attempt in range(MAX_SPAWN_ATTEMPTS):
             if attempt > 0:
-                self._resample_start()
+                self._nudge_offsets()
             self._place_and_settle()
             if self._spawn_ok():
                 return
         self._force_safe_start()
         self._place_and_settle()
+        if not self._spawn_ok():
+            self._teleport_safe_grid()
 
-    # ---- observation -----------------------------------------------------------
-    def part_pose(self):
-        q = self.part_qadr
-        return self.data.qpos[q : q + 3].copy(), self.data.qpos[q + 3 : q + 7].copy()
+    # ---- observation ---------------------------------------------------------
+    def _upright(self, quat) -> bool:
+        w, x, y, z = quat
+        return abs(1.0 - 2.0 * (x * x + y * y)) >= math.cos(MAX_SEAT_TILT)
 
-    def observe(self, noise_rng: np.random.Generator) -> np.ndarray:
-        d = self.data
-        hand = d.qpos[0:3] - self.hole
-        yaw = d.qpos[3]
-        hand_v = d.qvel[0:3]
-        gap = d.qpos[4] + d.qpos[5]
-        ppos, pquat = self.part_pose()
-        prel = ppos - self.hole + noise_rng.normal(0, self.c.obs_noise, 3)
-        pvel = d.qvel[self.part_vadr : self.part_vadr + 3]
-        o = np.concatenate([
-            hand * 10, [math.sin(yaw), math.cos(yaw)], hand_v, [gap * 50],
-            prel * 10, pquat, pvel,
-            [self.c.diameter * 50, 1.0 if self.c.shape == "square" else 0.0],
-            self.last_action,
-        ])
-        return o.astype(np.float32)
-
-    def _gripper_touching_part(self) -> bool:
+    def _gripper_touching(self, body_id: int) -> bool:
         m, d = self.model, self.data
         for i in range(d.ncon):
             con = d.contact[i]
             b1, b2 = m.geom_bodyid[con.geom1], m.geom_bodyid[con.geom2]
-            if self.part_body in (b1, b2) and (b1 in self.grip_bodies or b2 in self.grip_bodies):
+            if body_id in (b1, b2) and (b1 in self.grip_bodies or b2 in self.grip_bodies):
                 return True
         return False
 
-    def _upright(self) -> bool:
-        # World-z component of the part's long axis is 1 - 2(x^2 + y^2) for quat (w, x, y, z).
-        # The peg is end-symmetric, so either end down counts.
-        _, (w, x, y, z) = self.part_pose()
-        return abs(1.0 - 2.0 * (x * x + y * y)) >= math.cos(MAX_SEAT_TILT)
+    def _peg_seated(self, i: int) -> bool:
+        ppos, pquat = self.peg_pose(i)
+        hx, hy = self.slot_xy[i]
+        bottom = ppos[2] - PEG_LEN / 2
+        xy_err = float(np.hypot(ppos[0] - hx, ppos[1] - hy))
+        pad_bottom = self.data.qpos[2] + PAD_BOTTOM_OFFSET
+        clear = pad_bottom >= ppos[2] + PEG_LEN / 2 + 0.002 and not self._gripper_touching(
+            self.peg_body[i]
+        )
+        return (
+            bottom <= SEAT_TOL_Z
+            and xy_err <= self.r_hole[i]
+            and clear
+            and self._upright(pquat)
+        )
 
-    # ---- step ------------------------------------------------------------------
-    def fail(self, reason: str):
+    def _noisy_pose(self, pos, quat, noise_rng, bias_xy: np.ndarray | None = None):
+        p = np.asarray(pos, dtype=float).copy()
+        if bias_xy is not None:
+            p[0] += float(bias_xy[0])
+            p[1] += float(bias_xy[1])
+        p = p + noise_rng.normal(0, self.c.obs_noise, 3)
+        dth = noise_rng.normal(0, self.c.obs_noise_rad, 3)
+        yaw_extra = float(dth[2]) + (self._pose_bias_yaw if bias_xy is not None else 0.0)
+        dq = _yaw_quat(yaw_extra)
+        q = _quat_mul(dq, quat)
+        n = float(np.linalg.norm(q))
+        if n > 0:
+            q = q / n
+        return p, q
+
+    def _drift_biases(self) -> None:
+        """Non-stationary estimate bias: random-walk so EMA−rel scripts go stale."""
+        if self._bias_drift <= 0.0:
+            return
+        step = self.rng.normal(0.0, self._bias_drift, 2)
+        self._slot_bias_xy = self._slot_bias_xy + step
+        # Peg bias walks independently (distractor: residual keeps moving).
+        self._peg_bias_xy = self._peg_bias_xy + self.rng.normal(0.0, self._bias_drift, 2)
+
+    def _update_wrist_wrench(self) -> None:
+        """Estimate wrist force/torque from contacts on hand / pad geoms."""
+        m, d = self.model, self.data
+        force = np.zeros(3)
+        torque = np.zeros(3)
+        pad_f = 0.0
+        hand_pos = d.qpos[0:3]
+        for i in range(d.ncon):
+            con = d.contact[i]
+            b1, b2 = m.geom_bodyid[con.geom1], m.geom_bodyid[con.geom2]
+            if not (b1 in self.grip_bodies or b2 in self.grip_bodies):
+                continue
+            cforce = np.zeros(6)
+            mujoco.mj_contactForce(m, d, i, cforce)
+            # Contact frame force (normal along x of contact frame).
+            fn = float(cforce[0])
+            # Approximate world-frame push along contact normal.
+            frame = con.frame.reshape(3, 3)
+            f_world = frame[:, 0] * fn
+            force += f_world
+            r = con.pos - hand_pos
+            torque += np.cross(r, f_world)
+            if b1 in self.grip_bodies and b2 in self.grip_bodies:
+                continue
+            pad_f += abs(fn)
+        # Light EMA so the signal is usable at 25 Hz.
+        self._wrist_force = 0.7 * self._wrist_force + 0.3 * force
+        self._wrist_torque = 0.7 * self._wrist_torque + 0.3 * torque
+        self._pad_force = 0.7 * self._pad_force + 0.3 * pad_f
+
+    def observe(self, noise_rng: np.random.Generator) -> np.ndarray:
+        """Partial observation: differently-biased peg/slot estimates + wrench.
+
+        True hole/peg poses are never revealed. Slot and peg estimates use
+        independent biases (plus optional drift), so relative peg−slot retains
+        a several-mm residual that contact search must resolve.
+        """
+        d = self.data
+        bx, by = self.c.board_xy
+        hand = d.qpos[0:3].copy()
+        hand[0] -= bx
+        hand[1] -= by
+        yaw = d.qpos[3]
+        hand_v = d.qvel[0:3]
+        gap = d.qpos[4] + d.qpos[5]
+        proprio = np.concatenate([
+            hand * 10,
+            [math.sin(yaw), math.cos(yaw)],
+            hand_v,
+            [gap * 50],
+            self._wrist_force * FORCE_SCALE,
+            self._wrist_torque * TORQUE_SCALE,
+            [self._pad_force * FORCE_SCALE],
+        ])
+
+        peg_feats = np.zeros(MAX_PEGS * PEG_FEAT, dtype=np.float64)
+        for i, peg in enumerate(self.c.pegs):
+            base = i * PEG_FEAT
+            ppos, pquat = self.peg_pose(i)
+            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._peg_bias_xy)
+            hx, hy = self.slot_xy[i]
+            # Slot estimate uses slot bias (≠ peg bias) — no exact hole coordinates.
+            hx_e = hx + self._slot_bias_xy[0] + float(noise_rng.normal(0, self.c.obs_noise))
+            hy_e = hy + self._slot_bias_xy[1] + float(noise_rng.normal(0, self.c.obs_noise))
+            prel = np.array([ppos_n[0] - hx_e, ppos_n[1] - hy_e, ppos_n[2] - BLOCK_H])
+            shape = peg.shape()
+            dia = peg.diameter()
+            feat = np.concatenate([
+                [1.0],
+                prel * 10,
+                pquat_n,
+                shape_one_hot(shape),
+                [dia * 50],
+                [(hx_e - bx) * 10, (hy_e - by) * 10, BLOCK_H * 10],
+                [1.0 if self.seated_now[i] else 0.0],
+            ])
+            if noise_rng.random() < self.c.dropout_prob and self._last_peg_obs[i] is not None:
+                feat = self._last_peg_obs[i]
+            else:
+                self._last_peg_obs[i] = feat.copy()
+            peg_feats[base : base + PEG_FEAT] = feat
+
+        clutter_feats = np.zeros(MAX_CLUTTER * CLUTTER_FEAT, dtype=np.float64)
+        for i, cl in enumerate(self.c.clutter):
+            base = i * CLUTTER_FEAT
+            ppos, pquat = self.clutter_pose(i)
+            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._slot_bias_xy)
+            prel = np.array([ppos_n[0] - bx, ppos_n[1] - by, ppos_n[2]])
+            size = max(cl.size_xy) * 50
+            feat = np.concatenate([[1.0], prel * 10, pquat_n, [size]])
+            if noise_rng.random() < self.c.dropout_prob and self._last_clutter_obs[i] is not None:
+                feat = self._last_clutter_obs[i]
+            else:
+                self._last_clutter_obs[i] = feat.copy()
+            clutter_feats[base : base + CLUTTER_FEAT] = feat
+
+        o = np.concatenate([proprio, self.last_action, peg_feats, clutter_feats])
+        assert o.shape[0] == OBS_DIM, (o.shape[0], OBS_DIM)
+        return o.astype(np.float32)
+
+    # ---- step ----------------------------------------------------------------
+    def fail(self, reason: str) -> None:
         self.done = True
         self.success = False
         self.terminal_reason = reason
 
+    def _apply_disturbance(self) -> None:
+        if self._disturbance_applied or self.c.disturbance <= 0:
+            return
+        if self.steps != self.c.disturbance_step:
+            return
+        self._disturbance_applied = True
+        tgt = self.c.disturbance_target
+        if tgt.startswith("peg:"):
+            i = int(tgt.split(":")[1])
+            if 0 <= i < self.n_pegs and not self.seated_now[i]:
+                self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 3] += self.rng.normal(0, 0.18, 3)
+        elif tgt == "drop":
+            # Slip: open gripper and nudge any held peg downward.
+            self.grip = MAX_OPEN
+            self.target[2] = min(0.25, self.target[2] + 0.01)
+            for i in range(self.n_pegs):
+                if self.seated_now[i]:
+                    continue
+                if self._gripper_touching(self.peg_body[i]):
+                    self.data.qvel[self.peg_vadr[i] + 2] -= 0.25
+                    self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 2] += self.rng.normal(0, 0.05, 2)
+        elif tgt == "board":
+            self.target[0] += float(self.rng.uniform(-0.005, 0.005))
+            self.target[1] += float(self.rng.uniform(-0.005, 0.005))
+
     def step(self, action: np.ndarray) -> None:
         if self.done:
             return
-        a = np.clip(action, -1.0, 1.0)
+        a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
         self.action_l2 += float(np.sum(a * a))
-        self.last_action = a
-        self.target[0:3] += a[0:3] * DXYZ
-        self.target[0] = np.clip(self.target[0], -0.2, 0.2)
-        self.target[1] = np.clip(self.target[1], -0.2, 0.2)
+        self.last_action = a.copy()
+
+        if self._act_delay > 0:
+            self._act_buf.append(a.copy())
+            applied = self._act_buf.popleft()  # issued act_delay steps ago
+        else:
+            applied = a
+
+        # Backlash / deadzone on Cartesian commands: small desired moves are eaten.
+        delta = applied[0:3] * DXYZ
+        for i in range(3):
+            if abs(delta[i]) < self._backlash:
+                delta[i] = 0.0
+            else:
+                delta[i] -= math.copysign(self._backlash, delta[i])
+        self.target[0:3] += delta
+        self.target[0] = np.clip(self.target[0], -0.25, 0.25)
+        self.target[1] = np.clip(self.target[1], -0.25, 0.25)
         self.target[2] = np.clip(self.target[2], HAND_Z_MIN, 0.25)
-        self.target[3] = np.clip(self.target[3] + a[3] * DYAW, -3.1, 3.1)
-        self.grip = (a[4] + 1.0) / 2.0 * MAX_OPEN  # +1 = open, -1 = closed
+        dyaw = applied[3] * DYAW
+        if abs(dyaw) < self._backlash * 20:  # ~yaw deadzone scaled
+            dyaw = 0.0
+        self.target[3] = np.clip(self.target[3] + dyaw, -3.1, 3.1)
+        self.grip = (applied[4] + 1.0) / 2.0 * MAX_OPEN
+
         for _ in range(SUBSTEPS):
             self._apply_ctrl()
             mujoco.mj_step(self.model, self.data)
         self.steps += 1
+        self._drift_biases()
+        self._update_wrist_wrench()
+        self._apply_disturbance()
+
         d = self.data
         if not (np.all(np.isfinite(d.qpos)) and np.all(np.isfinite(d.qvel))):
             return self.fail("unstable")
-        ppos, _ = self.part_pose()
-        pv = d.qvel[self.part_vadr : self.part_vadr + 3]
-        if float(np.linalg.norm(pv)) > MAX_PART_SPEED:
-            return self.fail("unstable")
-        if abs(ppos[0]) > 0.28 or abs(ppos[1]) > 0.28 or ppos[2] < -0.01:
-            return self.fail("part_lost")
-        bottom = ppos[2] - PEG_LEN / 2
-        xy_err = float(np.hypot(ppos[0] - self.hole[0], ppos[1] - self.hole[1]))
-        # Assembled = seated within 1 mm, inside the hole, and the gripper released and clear
-        # of the part (fingertips above the part's top face, no gripper contact).
-        pad_bottom = d.qpos[2] + PAD_BOTTOM_OFFSET
-        clear = pad_bottom >= ppos[2] + PEG_LEN / 2 + 0.002 and not self._gripper_touching_part()
-        seated = bottom <= SEAT_TOL_Z and xy_err <= self.r_hole and clear and self._upright()
-        self.seated_run = self.seated_run + 1 if seated else 0
-        if self.seated_run >= SEATED_HOLD:
+
+        for i in range(self.n_pegs):
+            ppos, _ = self.peg_pose(i)
+            pv = d.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 3]
+            if float(np.linalg.norm(pv)) > MAX_PART_SPEED:
+                return self.fail("unstable")
+            if abs(ppos[0]) > 0.30 or abs(ppos[1]) > 0.30 or ppos[2] < -0.01:
+                return self.fail("part_lost")
+
+        for i in range(self.n_pegs):
+            seated = self._peg_seated(i)
+            self.seated_run[i] = self.seated_run[i] + 1 if seated else 0
+            if self.seated_run[i] >= SEATED_HOLD:
+                if self.first_seat_step[i] is None:
+                    self.first_seat_step[i] = self.steps
+                self.seated_now[i] = True
+            else:
+                # Knocked out after a prior seat → no longer seated at end.
+                self.seated_now[i] = False
+
+        if all(self.seated_now) and self.n_pegs > 0:
+            # Gripper already clear by seated predicate; end early.
             self.done = True
             self.success = True
             self.success_step = self.steps
             self.terminal_reason = "assembled"
             return
+
         if self.steps >= self.c.max_steps:
-            self.fail("time_limit")
+            self.done = True
+            self.success = all(self.seated_now) and self.n_pegs > 0
+            self.terminal_reason = "assembled" if self.success else "time_limit"
+            if self.success:
+                self.success_step = self.steps
+
+    def peg_seated_at_end(self) -> list[bool]:
+        return [bool(x) for x in self.seated_now]
+
+    def peg_first_seat_steps(self) -> list[int | None]:
+        # Only credit first-seat time if still seated at end.
+        out: list[int | None] = []
+        for i in range(self.n_pegs):
+            if self.seated_now[i]:
+                out.append(self.first_seat_step[i])
+            else:
+                out.append(None)
+        return out

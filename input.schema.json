@@ -1,15 +1,29 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "nist_lite round input",
-  "description": "Evaluation knobs for one round. Episode instances are NOT in the round input: the referee derives every episode (task, start state, physics conditions) from the platform-injected SEED, which never enters the player sandbox.",
+  "description": "Evaluation knobs for one round. Episode instances are NOT in the round input: the referee derives every episode (task mix, start states, physics conditions) from the platform-injected SEED, which never enters the player sandbox.",
   "type": "object",
   "additionalProperties": false,
   "required": ["episodes_per_stratum", "deadline_ms"],
   "properties": {
-    "episodes_per_stratum": {"type": "integer", "minimum": 1, "maximum": 64, "description": "Episodes per (shape x size x start-type) stratum; 40 strata."},
-    "deadline_ms": {"type": "integer", "minimum": 50, "maximum": 2000, "description": "Per-control-step deadline for one batched /act call."},
+    "episodes_per_stratum": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "description": "Episodes per (K x clutter_bucket) stratum; 8 strata (K in {3,4,5,6} x {low,high}). Default 8 → 64 episodes/round."
+    },
+    "deadline_ms": {
+      "type": "integer",
+      "minimum": 50,
+      "maximum": 2000,
+      "description": "Per-control-step deadline for one batched /act call."
+    },
     "workers": {"type": "integer", "minimum": 1, "maximum": 4},
-    "record_stride": {"type": "integer", "minimum": 0, "description": "Write a full trajectory for every Nth episode (0 = none)."},
+    "record_stride": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Write a full trajectory for every Nth episode (0 = none)."
+    },
     "records_enabled": {"type": "boolean"}
   }
 }
