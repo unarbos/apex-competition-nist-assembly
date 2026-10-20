@@ -147,6 +147,12 @@ class EpisodeConditions:
     pose_bias_xy: tuple[float, float] = (0.0, 0.0)  # slot estimate bias (m)
     pose_bias_yaw: float = 0.0
     peg_bias_delta_xy: tuple[float, float] = (0.0, 0.0)  # peg-only extra bias (m)
+    # Per-slot / per-clutter independent estimate biases (anti-leak). Each active
+    # slot gets its OWN bias so a single global bias cannot be inverted from the
+    # fixed, public slot layout. Empty => fall back to the global pose_bias_xy.
+    slot_bias_list: list[tuple[float, float]] = field(default_factory=list)
+    slot_bias_yaw_list: list[float] = field(default_factory=list)
+    clutter_bias_list: list[tuple[float, float]] = field(default_factory=list)
     bias_drift: float = 0.0  # random-walk step (m) on estimate biases
     backlash: float = 0.0
     chamfer: float = 0.5
@@ -561,6 +567,19 @@ def sample_episodes(
             obs_noise_rad = float(
                 np.clip(float(lhs["obs_noise_rad"][j]) * noise_scale, lo_r * 0.25, hi_r)
             )
+            # Independent per-slot estimate bias: same magnitude as the global draw,
+            # independent direction per active slot, so slot estimates no longer share
+            # one global offset that the fixed slot geometry could solve away.
+            slot_bias_list = []
+            slot_bias_yaw_list = []
+            for _si in range(len(pegs)):
+                _a = _u(rng, 0, 2 * math.pi)
+                slot_bias_list.append((bias_mag * math.cos(_a), bias_mag * math.sin(_a)))
+                slot_bias_yaw_list.append(abs(bias_yaw) * (1.0 if rng.random() < 0.5 else -1.0))
+            clutter_bias_list = []
+            for _ci in range(len(clutter)):
+                _a = _u(rng, 0, 2 * math.pi)
+                clutter_bias_list.append((bias_mag * math.cos(_a), bias_mag * math.sin(_a)))
             eps.append(
                 EpisodeConditions(
                     n_pegs=k_pegs,
@@ -579,6 +598,9 @@ def sample_episodes(
                     pose_bias_xy=(float(bias_xy[0]), float(bias_xy[1])),
                     pose_bias_yaw=float(bias_yaw),
                     peg_bias_delta_xy=(float(peg_delta[0]), float(peg_delta[1])),
+                    slot_bias_list=slot_bias_list,
+                    slot_bias_yaw_list=slot_bias_yaw_list,
+                    clutter_bias_list=clutter_bias_list,
                     bias_drift=float(lhs["bias_drift"][j]) * drift_scale,
                     backlash=float(lhs["backlash"][j])
                     * (0.15 if tier == "easy" else 0.55 if tier == "medium" else 1.0),
