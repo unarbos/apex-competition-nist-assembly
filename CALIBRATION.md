@@ -69,7 +69,11 @@ no matmuls). v0.2 defeats that class:
 
 ## ONNX baseline (2 workers)
 
-- seed 1: raw=0.0196 wall=85.4s
+- seed 1: raw=0.0196 wall=85.4s (measured before the final env retune; stale)
+- seed 1 on the released v0.2.0 images (podman, 2 CPU / 2 GiB, `fixtures/input.json`):
+  raw=0.0077, 64 episodes, referee wall 113 s. The memoryless ONNX twin in
+  `tools/make_policies.py` is much weaker than the stateful Python `NearestFirstBaseline`
+  (0.100 above); it is a plumbing / floor check, not the score bar.
 
 ## Held-out (throwaway secret)
 
