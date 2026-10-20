@@ -1,12 +1,15 @@
-"""BC-then-PPO learnability harness for v0.2 tiered live mix.
+"""Residual PPO learnability harness for v0.2 tiered live mix.
 
-1. Distill ``ObsOnlyScripted`` into a small MLP (obs-consistent BC).
-2. Optionally blend privileged-solver residuals on easy demos (miners can
-   collect the same offline) — kept small so BC stays near scripted.
-3. PPO on the tiered live mix with easy/medium oversampling, KL pull to BC.
-4. Report the live-mix learning curve vs ObsOnlyScripted / NearestFirstBaseline.
+Policy is a **zero-init residual** on top of ``ObsOnlyScripted``:
 
-    PYTHONPATH=referee:tools python tools/train_ppo.py --steps 120000 --workers 2
+    a = clip(scripted(obs) + scale * residual_net(obs), -1, 1)
+
+So warm-start live score equals the obs-only scripted gate. Privileged-solver
+demos supervise the residual only when they nearly agree with scripted
+(obs-learnable corrections miners can collect offline). PPO then improves the
+residual on the tiered live mix with easy/medium oversampling.
+
+    PYTHONPATH=referee:tools python tools/train_ppo.py --steps 100000 --workers 2
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from nist_sim.scoring import episode_score  # noqa: E402
 from reference_solver import solve_episode  # noqa: E402
 
 DEVICE = torch.device("cpu")
+RESIDUAL_SCALE = 0.30
 
 
 def _clearance_bin(c: float) -> str:
@@ -73,8 +77,8 @@ def _shaped_reward(obs, prev_obs, seated_now, prev_seated) -> float:
     if prev_seated is not None:
         for a, b in zip(prev_seated, seated_now):
             if b and not a:
-                r += 8.0
-    r += 0.1 * float(sum(seated_now))
+                r += 10.0
+    r += 0.12 * float(sum(seated_now))
     best = 1e9
     for i in range(MAX_PEGS):
         f = obs[PEG_TABLE0 + i * PEG_FEAT : PEG_TABLE0 + (i + 1) * PEG_FEAT]
@@ -82,8 +86,8 @@ def _shaped_reward(obs, prev_obs, seated_now, prev_seated) -> float:
             continue
         best = min(best, float(np.linalg.norm(f[FEAT_REL][0:2] / 10.0)))
     if best < 1e8:
-        r += 0.8 * math.exp(-best / 0.012)
-        r += 0.08 * float(obs[PROP_PAD])
+        r += 1.0 * math.exp(-best / 0.012)
+        r += 0.1 * float(obs[PROP_PAD])
         if prev_obs is not None:
             prev_best = 1e9
             for i in range(MAX_PEGS):
@@ -92,42 +96,43 @@ def _shaped_reward(obs, prev_obs, seated_now, prev_seated) -> float:
                     continue
                 prev_best = min(prev_best, float(np.linalg.norm(f[FEAT_REL][0:2] / 10.0)))
             if prev_best < 1e8:
-                r += 5.0 * (prev_best - best)
+                r += 6.0 * (prev_best - best)
     return float(r)
 
 
-class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int = OBS_DIM, act_dim: int = ACT_DIM, hidden: int = 256):
+def _combine(base: np.ndarray, resid: np.ndarray) -> np.ndarray:
+    return np.clip(base + RESIDUAL_SCALE * resid, -1.0, 1.0)
+
+
+class ResidualNet(nn.Module):
+    def __init__(self, obs_dim: int = OBS_DIM, act_dim: int = ACT_DIM, hidden: int = 128):
         super().__init__()
         self.body = nn.Sequential(
             nn.Linear(obs_dim, hidden),
             nn.Tanh(),
             nn.Linear(hidden, hidden),
             nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
         )
         self.mu = nn.Linear(hidden, act_dim)
-        # Low noise so BC clone is not destroyed immediately.
-        self.log_std = nn.Parameter(torch.full((act_dim,), -2.2))
+        self.log_std = nn.Parameter(torch.full((act_dim,), -2.5))
         self.v = nn.Linear(hidden, 1)
-        nn.init.orthogonal_(self.mu.weight, 0.01)
+        # Near-zero residual at init → warm score ≈ scripted.
+        nn.init.zeros_(self.mu.weight)
         nn.init.zeros_(self.mu.bias)
 
     def forward(self, x: torch.Tensor):
         h = self.body(x)
-        # Unbounded mu; clamp only at act time so BC can match scripted extremes.
-        mu = self.mu(h)
+        mu = torch.tanh(self.mu(h))
         return mu, self.log_std.expand_as(mu), self.v(h).squeeze(-1)
 
-    def act(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
+    def residual(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         x = torch.as_tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
         with torch.no_grad():
             mu, log_std, _ = self.forward(x)
             if deterministic:
                 a = mu
             else:
-                a = Normal(mu, log_std.exp().clamp(1e-3, 0.25)).sample()
+                a = Normal(mu, log_std.exp().clamp(1e-3, 0.2)).sample()
             a = a.squeeze(0).clamp(-1, 1)
         return a.cpu().numpy().astype(np.float64)
 
@@ -135,78 +140,61 @@ class ActorCritic(nn.Module):
         return {k: v.detach().cpu().clone() for k, v in self.state_dict().items()}
 
 
-def _collect_demos() -> tuple[np.ndarray, np.ndarray]:
-    """ObsOnlyScripted demos + mild privileged blend on easy episodes."""
+def _collect_residual_demos(n_max: int = 12_000) -> tuple[np.ndarray, np.ndarray]:
+    """Small privileged residual demos where privileged ≈ scripted (learnable)."""
     xs, ys = [], []
-    # --- primary: clone the strongest obs-only scripted controller ---
-    for seed in range(12):
+    for seed in range(10):
         _, conds = sample_episodes(seed, 2)
         for i, c in enumerate(conds):
-            if c.difficulty_tier == "hard" and (seed + i) % 2:
+            if c.difficulty_tier == "hard":
                 continue
-            ss = np.random.SeedSequence([seed, 0xBC30, i])
-            r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
-            e = Episode(c, r1)
-            pol = ObsOnlyScripted()
-            while not e.done:
-                o = e.observe(r2)
-                a = np.clip(pol.act(o), -1, 1)
-                xs.append(o)
-                ys.append(a)
-                e.step(a)
-    n_scripted = len(xs)
-    # --- privileged soft targets on easy (small mix; miners can do this too) ---
-    for seed in range(8):
-        _, conds = sample_episodes(seed + 50, 2)
-        for i, c in enumerate(conds):
-            if c.difficulty_tier != "easy":
-                continue
-            ss = np.random.SeedSequence([seed, 0xBC31, i])
+            if len(xs) >= n_max:
+                break
+            ss = np.random.SeedSequence([seed, 0xBC40, i])
             r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
             e = Episode(c, r1)
             rec: list = []
             solve_episode(e, record=rec, noise_rng=r2)
-            # Only keep steps where privileged and scripted roughly agree —
-            # those residuals are obs-learnable.
             pol = ObsOnlyScripted()
             for o, priv_a in rec:
                 base = np.clip(pol.act(o), -1, 1)
-                if float(np.linalg.norm(priv_a - base)) < 0.45:
-                    # Blend toward privileged.
-                    a = np.clip(0.65 * base + 0.35 * priv_a, -1, 1)
-                    xs.append(o)
-                    ys.append(a)
+                delta = priv_a - base
+                if float(np.linalg.norm(delta)) > 0.35:
+                    continue  # not obs-learnable
+                resid = np.clip(delta / max(RESIDUAL_SCALE, 1e-6), -1, 1)
+                xs.append(o)
+                ys.append(resid)
+        if len(xs) >= n_max:
+            break
+    if not xs:
+        return np.zeros((1, OBS_DIM), np.float32), np.zeros((1, ACT_DIM), np.float32)
     X = np.asarray(xs, np.float32)
     Y = np.asarray(ys, np.float32)
-    print(
-        f"demos: {X.shape[0]} transitions "
-        f"(scripted={n_scripted}, privileged-blend={X.shape[0]-n_scripted})",
-        flush=True,
-    )
+    print(f"residual demos: {X.shape[0]} (mean|r|={float(np.mean(np.abs(Y))):.3f})", flush=True)
     return X, Y
 
 
-def _distill(X: np.ndarray, Y: np.ndarray, epochs: int = 350) -> ActorCritic:
-    net = ActorCritic().to(DEVICE)
-    opt = torch.optim.Adam(net.parameters(), lr=1.5e-3)
-    Xt = torch.as_tensor(X)
-    Yt = torch.as_tensor(Y)
-    n = Xt.shape[0]
-    bs = min(2048, n)
+def _light_distill(net: ResidualNet, X: np.ndarray, Y: np.ndarray, epochs: int = 80) -> None:
+    if X.shape[0] < 32:
+        print("skip distill (too few demos)", flush=True)
+        return
+    opt = torch.optim.Adam(net.parameters(), lr=8e-4)
+    Xt, Yt = torch.as_tensor(X), torch.as_tensor(Y)
+    bs = min(512, Xt.shape[0])
     for ep in range(epochs):
-        idx = torch.randint(0, n, (bs,))
+        idx = torch.randint(0, Xt.shape[0], (bs,))
         mu, _, _ = net.forward(Xt[idx])
-        loss = ((mu.clamp(-1, 1) - Yt[idx]) ** 2).mean()
+        # Stay close to zero: only learn small corrections.
+        loss = ((mu - Yt[idx]) ** 2).mean() + 0.05 * (mu**2).mean()
         opt.zero_grad()
         loss.backward()
         opt.step()
-        if ep % 50 == 0:
+        if ep % 20 == 0:
             print(f"  distill ep {ep} mse={float(loss.detach()):.5f}", flush=True)
-    return net
 
 
 def _rollout_worker(args):
-    """Spawn worker bootstrap — late imports required for ProcessPoolExecutor."""
+    """Spawn worker — late imports required for ProcessPoolExecutor safety."""
     weights, n_steps, seed, stage_bias, root = args
     sys.path.insert(0, root)
     sys.path.insert(0, str(Path(root) / "referee"))
@@ -214,10 +202,15 @@ def _rollout_worker(args):
     import torch as _torch  # noqa: PLC0415
     from nist_sim.conditions import sample_episodes as _sample  # noqa: PLC0415
     from nist_sim.env import Episode as _Episode  # noqa: PLC0415
+    from nist_sim.policies import ObsOnlyScripted as _Scripted  # noqa: PLC0415
     from nist_sim.scoring import episode_score as _score  # noqa: PLC0415
-    from train_ppo import ActorCritic as _AC, _shaped_reward as _rew  # noqa: PLC0415
+    from train_ppo import (  # noqa: PLC0415
+        ResidualNet as _Net,
+        _combine as _comb,
+        _shaped_reward as _rew,
+    )
 
-    net = _AC()
+    net = _Net()
     net.load_state_dict(weights)
     net.eval()
     rng = np.random.default_rng(seed)
@@ -227,37 +220,39 @@ def _rollout_worker(args):
     ep_i = 0
     while steps < n_steps:
         _, conds = _sample(int(rng.integers(0, 100_000)), 2)
-        if stage_bias > 0 and rng.random() < stage_bias:
-            easyish = [c for c in conds if c.difficulty_tier in ("easy", "medium")]
-            c = easyish[ep_i % len(easyish)] if easyish else conds[ep_i % len(conds)]
+        roll = rng.random()
+        if roll < stage_bias:
+            pool = [c for c in conds if c.difficulty_tier == "easy"] or [
+                c for c in conds if c.difficulty_tier == "medium"
+            ] or conds
+        elif roll < stage_bias + 0.25:
+            pool = [c for c in conds if c.difficulty_tier == "medium"] or conds
         else:
-            # Prefer easy even in the "live" branch early on.
-            tier_pref = rng.random()
-            if tier_pref < 0.45:
-                pool = [c for c in conds if c.difficulty_tier == "easy"] or conds
-            elif tier_pref < 0.75:
-                pool = [c for c in conds if c.difficulty_tier == "medium"] or conds
-            else:
-                pool = conds
-            c = pool[ep_i % len(pool)]
+            pool = conds
+        c = pool[ep_i % len(pool)]
         ss = np.random.SeedSequence([int(seed), 0x5050, int(ep_i)])
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
         e = _Episode(c, r1)
+        scripted = _Scripted()
         prev = None
         prev_seated = [False] * e.n_pegs
         while not e.done and steps < n_steps:
             o = e.observe(r2).astype(np.float64)
+            base = np.clip(scripted.act(o), -1, 1)
             x = _torch.as_tensor(o, dtype=_torch.float32).unsqueeze(0)
             with _torch.no_grad():
                 mu, log_std, v = net.forward(x)
-                dist = _torch.distributions.Normal(mu, log_std.exp().clamp(1e-3, 0.25))
-                a_t = dist.sample()
-                logp = dist.log_prob(a_t).sum(-1)
-                a = a_t.squeeze(0).clamp(-1, 1).numpy()
+                dist = _torch.distributions.Normal(mu, log_std.exp().clamp(1e-3, 0.2))
+                resid_t = dist.sample()
+                logp = dist.log_prob(resid_t).sum(-1)
+                resid = resid_t.squeeze(0).clamp(-1, 1).numpy()
                 val = float(v.item())
+            a = _comb(base, resid)
             e.step(a)
             nxt = e.observe(r2) if not e.done else o
             r = _rew(nxt, prev, e.seated_now, prev_seated)
+            # Soft penalty for large residuals (keep scripted intact).
+            r -= 0.02 * float(np.sum(resid**2))
             if e.done:
                 sc = _score(
                     e.peg_seated_at_end(),
@@ -265,10 +260,10 @@ def _rollout_worker(args):
                     c.max_steps,
                     e.action_l2 / max(1, e.steps),
                 )
-                r += 15.0 * sc
+                r += 18.0 * sc
                 ep_scores.append(sc)
             obs_l.append(o)
-            act_l.append(a.astype(np.float32))
+            act_l.append(resid.astype(np.float32))
             logp_l.append(float(logp.item()))
             rew_l.append(r)
             val_l.append(val)
@@ -289,7 +284,7 @@ def _rollout_worker(args):
     }
 
 
-def _parallel_collect(net: ActorCritic, n_steps: int, workers: int, seed: int, stage_bias: float):
+def _parallel_collect(net: ResidualNet, n_steps: int, workers: int, seed: int, stage_bias: float):
     weights = net.state_dict_cpu()
     per = max(256, n_steps // max(1, workers))
     root = str(ROOT)
@@ -323,7 +318,7 @@ def _gae(rews, vals, dones, gamma=0.995, lam=0.95):
     return adv.astype(np.float32), ret.astype(np.float32)
 
 
-def _ppo_update(net, opt, batch, bc_net, bc_coef: float, epochs: int = 4):
+def _ppo_update(net, opt, batch, epochs: int = 4, l2_coef: float = 0.02):
     adv, ret = _gae(batch["rews"], batch["vals"], batch["dones"])
     obs = torch.as_tensor(batch["obs"])
     acts = torch.as_tensor(batch["acts"])
@@ -336,7 +331,7 @@ def _ppo_update(net, opt, batch, bc_net, bc_coef: float, epochs: int = 4):
         for s in range(0, n, 512):
             b = idx[s : s + 512]
             mu, log_std, v = net.forward(obs[b])
-            dist = Normal(mu, log_std.exp().clamp(1e-3, 0.25))
+            dist = Normal(mu, log_std.exp().clamp(1e-3, 0.2))
             logp = dist.log_prob(acts[b]).sum(-1)
             ratio = (logp - old_logp[b]).exp()
             surr1 = ratio * adv_t[b]
@@ -344,10 +339,8 @@ def _ppo_update(net, opt, batch, bc_net, bc_coef: float, epochs: int = 4):
             pg = -torch.min(surr1, surr2).mean()
             vf = ((v - ret_t[b]) ** 2).mean()
             ent = dist.entropy().sum(-1).mean()
-            with torch.no_grad():
-                bc_mu, _, _ = bc_net.forward(obs[b])
-            bc_loss = ((mu.clamp(-1, 1) - bc_mu.clamp(-1, 1)) ** 2).mean()
-            loss = pg + 0.5 * vf - 0.005 * ent + bc_coef * bc_loss
+            l2 = (mu**2).mean()
+            loss = pg + 0.5 * vf - 0.008 * ent + l2_coef * l2
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), 0.5)
@@ -400,25 +393,25 @@ def _eval_policy(act_fn, seeds, per=2) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps", type=int, default=120_000)
+    ap.add_argument("--steps", type=int, default=100_000)
     ap.add_argument("--rollout", type=int, default=4096)
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--eval-every", type=int, default=8_000)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
-    print("collecting demos (scripted + privileged blend)…", flush=True)
-    X, Y = _collect_demos()
-    print("distilling BC…", flush=True)
-    net = _distill(X, Y)
-    bc = ActorCritic().to(DEVICE)
-    bc.load_state_dict(net.state_dict_cpu())
-    for p in bc.parameters():
-        p.requires_grad_(False)
-    opt = torch.optim.Adam(net.parameters(), lr=2e-4)
+    net = ResidualNet().to(DEVICE)
+    print("collecting small privileged residual demos…", flush=True)
+    X, Y = _collect_residual_demos(12_000)
+    print("light residual distill…", flush=True)
+    _light_distill(net, X, Y)
+    opt = torch.optim.Adam(net.parameters(), lr=3e-4)
 
     def ppo_act(o, state):
-        return net.act(o, deterministic=True)
+        if state["pol"] is None:
+            state["pol"] = ObsOnlyScripted()
+        base = np.clip(state["pol"].act(o), -1, 1)
+        return _combine(base, net.residual(o, deterministic=True))
 
     def obs_act(o, state):
         if state["pol"] is None:
@@ -449,10 +442,10 @@ def main() -> int:
 
     while total < a.steps:
         frac = total / max(1, a.steps)
-        stage_bias = max(0.15, 0.95 - 0.7 * frac)  # always some easy bias
-        bc_coef = 0.55 * (1.0 - 0.4 * frac)  # strong BC anchor
+        stage_bias = max(0.25, 0.85 - 0.5 * frac)
+        l2_coef = 0.03 * (1.0 - 0.5 * frac)
         batch = _parallel_collect(net, a.rollout, a.workers, a.seed + total, stage_bias)
-        _ppo_update(net, opt, batch, bc, bc_coef=bc_coef)
+        _ppo_update(net, opt, batch, l2_coef=l2_coef)
         total += batch["obs"].shape[0]
         if total // a.eval_every > (total - batch["obs"].shape[0]) // a.eval_every:
             live = _eval_policy(ppo_act, eval_seeds, per=2)
