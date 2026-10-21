@@ -1,18 +1,25 @@
-# NIST-Lite v0.2.0 calibration (tiered live mix)
+# NIST-Lite v0.3.0 calibration (tiered live mix)
 
 Measured on this box (MuJoCo 3.16). `OBS_DIM=184`.
 Episodes/round: `64` (8 strata × 8). Seeds: 0–4.
 Per-stratum difficulty mix ≈ 25% easy / 35% medium / 40% hard.
+
+v0.3.0 vs v0.2.0: the observation noise model changed (independent per-slot / per-clutter /
+per-peg estimate offsets) and the extra draws shift every episode, so these numbers are a
+fresh sample, not a like-for-like rerun. v0.2.0 means (same harness): zero 0.012,
+baseline 0.100, obs-only scripted 0.110, privileged reference 0.568. The privileged/obs-only
+gap is unchanged (0.566 vs 0.124 here).
 
 ## Why RL is required
 
 v0.1.5 round-4 king was a hand-written ONNX controller (~5.8k elementwise ops,
 no matmuls). v0.2 defeats that class:
 
-- **Pose-estimate bias**: peg/slot channels carry a fixed per-episode bias of
+- **Pose-estimate bias**: peg/slot/clutter channels carry per-episode estimate offsets of
   4–10 mm and
   ~7–16°,
-  plus an independent peg−slot residual, white noise, dropout, and mild drift.
+  drawn independently per slot, clutter block and peg (v0.3.0 observation
+  hardening), plus a per-peg peg−slot residual, white noise, dropout, and mild drift.
 - **Wrist force/torque** for contact-driven search.
 - **Hidden dynamics**: friction, mass, gain, mild backlash, chamfer, rare delay,
   mid-episode shove/drop.
@@ -28,69 +35,69 @@ no matmuls). v0.2 defeats that class:
 - **hard** (~40%): full residual bias / drift / disturbances
 
 ### Junk (zero policy)
-- raw: mean=0.0117 sd=0.0039 min=0.0078 max=0.0156 (n=2)
-- peg seat frac: mean=0.0117
-- in-process wall: mean=139.2s [135.8,142.5]
-- per-K: 3=0.000, 4=0.031, 5=0.000, 6=0.016
-- by clearance: loose(>=0.60mm)=0.017, mid(0.40-0.60mm)=0.008, tight(<0.40mm)=0.000
-- by clutter: high=0.013, low=0.010
-- by start mix: all_upright=0.013, has_tray=0.008, mixed_lying=0.012
-- by difficulty tier: easy=0.021, hard=0.012, medium=0.005
+- raw: mean=0.0226 sd=0.0122 min=0.0104 max=0.0348 (n=2)
+- peg seat frac: mean=0.0227
+- in-process wall: mean=158.2s [153.9,162.5]
+- per-K: 3=0.052, 4=0.016, 5=0.012, 6=0.010
+- by clearance: loose(>=0.60mm)=0.022, mid(0.40-0.60mm)=0.016, tight(<0.40mm)=0.048
+- by clutter: high=0.016, low=0.029
+- by start mix: all_upright=0.034, has_tray=0.007, mixed_lying=0.007
+- by difficulty tier: easy=0.032, hard=0.004, medium=0.035
 
 ### baseline (nearest-first, obs)
-- raw: mean=0.1002 sd=0.0069 min=0.0917 max=0.1106 (n=5)
-- peg seat frac: mean=0.1042
-- in-process wall: mean=145.0s [139.7,150.2]
-- per-K: 3=0.124, 4=0.102, 5=0.084, 6=0.091
-- by clearance: loose(>=0.60mm)=0.100, mid(0.40-0.60mm)=0.104, tight(<0.40mm)=0.092
-- by clutter: high=0.097, low=0.103
-- by start mix: all_upright=0.106, has_tray=0.090, mixed_lying=0.097
-- by difficulty tier: easy=0.124, hard=0.077, medium=0.107
+- raw: mean=0.1234 sd=0.0165 min=0.0985 max=0.1455 (n=5)
+- peg seat frac: mean=0.1283
+- in-process wall: mean=185.0s [168.9,194.3]
+- per-K: 3=0.167, 4=0.139, 5=0.113, 6=0.074
+- by clearance: loose(>=0.60mm)=0.125, mid(0.40-0.60mm)=0.132, tight(<0.40mm)=0.090
+- by clutter: high=0.105, low=0.142
+- by start mix: all_upright=0.141, has_tray=0.117, mixed_lying=0.062
+- by difficulty tier: easy=0.162, hard=0.088, medium=0.133
 
 ### obs-only scripted (anti-scripting gate)
-- raw: mean=0.1097 sd=0.0127 min=0.0889 max=0.1243 (n=5)
-- peg seat frac: mean=0.1129
-- in-process wall: mean=142.7s [131.2,152.3]
-- per-K: 3=0.141, 4=0.097, 5=0.095, 6=0.106
-- by clearance: loose(>=0.60mm)=0.113, mid(0.40-0.60mm)=0.111, tight(<0.40mm)=0.099
-- by clutter: high=0.108, low=0.112
-- by start mix: all_upright=0.115, has_tray=0.094, mixed_lying=0.109
-- by difficulty tier: easy=0.157, hard=0.075, medium=0.113
+- raw: mean=0.1238 sd=0.0212 min=0.0947 max=0.1574 (n=5)
+- peg seat frac: mean=0.1274
+- in-process wall: mean=180.1s [168.8,186.6]
+- per-K: 3=0.177, 4=0.137, 5=0.100, 6=0.081
+- by clearance: loose(>=0.60mm)=0.131, mid(0.40-0.60mm)=0.120, tight(<0.40mm)=0.106
+- by clutter: high=0.108, low=0.140
+- by start mix: all_upright=0.143, has_tray=0.117, mixed_lying=0.065
+- by difficulty tier: easy=0.173, hard=0.082, medium=0.133
 
 ### privileged reference (tools/; true state)
-- raw: mean=0.5684 sd=0.0113 min=0.5551 max=0.5893 (n=5)
-- peg seat frac: mean=0.6204
-- in-process wall: mean=153.3s [144.7,165.1]
-- per-K: 3=0.620, 4=0.553, 5=0.528, 6=0.572
-- by clearance: loose(>=0.60mm)=0.658, mid(0.40-0.60mm)=0.493, tight(<0.40mm)=0.479
-- by clutter: high=0.580, low=0.557
-- by start mix: all_upright=0.625, has_tray=0.501, mixed_lying=0.408
-- by difficulty tier: easy=0.691, hard=0.520, medium=0.535
+- raw: mean=0.5660 sd=0.0243 min=0.5317 max=0.6043 (n=5)
+- peg seat frac: mean=0.6167
+- in-process wall: mean=186.9s [175.1,196.3]
+- per-K: 3=0.596, 4=0.574, 5=0.528, 6=0.566
+- by clearance: loose(>=0.60mm)=0.651, mid(0.40-0.60mm)=0.501, tight(<0.40mm)=0.427
+- by clutter: high=0.555, low=0.577
+- by start mix: all_upright=0.643, has_tray=0.541, mixed_lying=0.307
+- by difficulty tier: easy=0.693, hard=0.482, medium=0.565
 
 ## ONNX baseline (2 workers)
 
-- seed 1: raw=0.0196 wall=85.4s (measured before the final env retune; stale)
-- seed 1 on the released v0.2.0 images (podman, 2 CPU / 2 GiB, `fixtures/input.json`):
-  raw=0.0077, 64 episodes, referee wall 113 s. The memoryless ONNX twin in
-  `tools/make_policies.py` is much weaker than the stateful Python `NearestFirstBaseline`
-  (0.100 above); it is a plumbing / floor check, not the score bar.
+- seed 1: raw=0.0773 wall=122.2s (in-process `tools/local_run.py`, dev build)
+- `baselines/baseline.onnx` is now a memoryless rule-based twin of `NearestFirstBaseline`
+  (`tools/make_policies.py`; target = nearest unseated peg, phases read from the obs).
+  The v0.2 linear distillation scored 0.0077 on seed 1; the stateful Python baseline is
+  0.123 above. It is a plumbing / floor check, not the score bar.
 
 ## Held-out (throwaway secret)
 
 - reserved axes: `{'bias_drift': [1.46e-05, 1.84e-05], 'pose_bias_xy': [0.0056421, 0.0065421]}`
-- reference live: 0.5629
-- reference reserved (held-out shapes on hard tier): 0.5003
-- drop: +0.0626
+- reference live: 0.5423
+- reference reserved (held-out shapes on hard tier): 0.4991
+- drop: +0.0431
 
 ## Targets
-- baseline ~0.10–0.15 → **met** (mean=0.100)
-- obs-only scripted ≤ ~0.25 → **met** (mean=0.110)
-- privileged reference ~0.55–0.75 → **met** (mean=0.568)
+- baseline ~0.10–0.15 → **met** (mean=0.123)
+- obs-only scripted ≤ ~0.25 → **met** (mean=0.124)
+- privileged reference ~0.55–0.75 → **met** (mean=0.566)
 - junk ~0 → met
 - eval ≤ ~400 s @ 2 workers → see ONNX wall
 - PPO beats baseline and obs-only on live mix → see Learning evidence
 
-## Learning evidence
+## Learning evidence (measured on v0.2.0; not rerun for v0.3.0)
 - Residual PPO on `ObsOnlyScripted` (zero-init + light privileged residual demos),
   ~100k steps / 2 workers on the tiered live mix.
 - Live curve (3-seed eval): 0.106 → **0.115** best; final 5-seed:

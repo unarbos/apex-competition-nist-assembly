@@ -363,10 +363,11 @@ class Episode:
         self._disturbance_applied = False
         # Pose-estimate biases (never revealed; applied in observe). Slot and peg
         # biases differ so relative features retain a residual of several mm.
-        # Per-slot independent biases (anti-leak). Each active slot/clutter carries
-        # its own estimate bias, so the fixed public slot layout cannot be used to
-        # solve a single global bias and recover true slot poses from the obs.
-        _delta = np.array(cond.peg_bias_delta_xy, dtype=float)
+        # Per-slot / per-clutter / per-peg independent estimate biases (observation hardening).
+        if getattr(cond, 'peg_bias_delta_list', None):
+            _delta = np.array(cond.peg_bias_delta_list, dtype=float)
+        else:
+            _delta = np.array(cond.peg_bias_delta_xy, dtype=float)
         if getattr(cond, 'slot_bias_list', None):
             self._slot_bias_xy = np.array(cond.slot_bias_list, dtype=float)
         else:

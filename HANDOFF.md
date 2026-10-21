@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.2.1
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.3.0
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that sequentially assembles several
@@ -14,8 +14,8 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.2.1` (spec-only; images from `v0.2.0`) | ☑ |
-| `spec.yaml` version `0.2.1`, v0.2.0 digests pinned | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.3.0` | ☑ |
+| `spec.yaml` version `0.3.0`, v0.3.0 digests pinned | `spec.yaml` | ☐ (pinned after the release run) |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:3c5c1d048b8e2d4ff541a14a37a9c777872727f82456ec71865897f24b6b8652` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:ff3fb58c1e5d8e9154545e79c6b98022fecccdbc3e3c07fd9613a5a2360f2943` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -33,11 +33,11 @@ onnxruntime 1.31.0. Image digests from release run 39363449941 (tag `v0.2.0`), b
 | process_type | cpu | MuJoCo on CPU |
 | kind | solo | absolute score |
 | round_length_in_days | 1 | platform norm |
-| submission_reveal_days | 4 | |
+| submission_reveal_days | 1 | |
 | lower_is_better | false | |
 | baseline_raw_score / baseline_score | 0.0 / 0.0 | platform convention |
 | resources | 2 CPU / 2Gi / 0 GPU | 2 sim workers |
-| evaluate / referee timeout_s | 1800 / 1800 | 128-episode live rounds took ~400–660 s on Macrocosmos staging |
+| evaluate / referee timeout_s | 1800 / 1800 (since 0.2.1) | 128-episode live rounds took ~400–660 s on Macrocosmos staging |
 | deadline_ms | 500 per batched step | |
 
 ## 4. Round variation & evaluation sizing
@@ -56,6 +56,19 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 
 ## 6. GPU justification: n/a (CPU)
 
-## 7. Supersedes
+## 7. v0.3.0 changes (observation hardening)
+- Same obs/action contract (`[B,184]` -> `[B,5]`), task, strata and scoring as v0.2.
+- Breaking for tuned policies: the observation noise model changed. Peg, slot and clutter
+  pose-estimate offsets are drawn independently per slot, per clutter block and per peg.
+- Published per-episode records (`nist_lite_record/3`) carry only coarse labels (K, clutter
+  bucket and count, tier, clearance class, disturbance flag, peg slot / start type / shape).
+  No bias values, board pose, true start poses, or exact continuous axis values.
+- The release referee mixes a salt derived from the `NIST_HELDOUT_SEED` build secret into the
+  round and episode RNGs, so a round cannot be reproduced offline from the platform SEED and
+  the public simulator. Dev builds (no secret) are unchanged and still deterministic per seed.
+- `baselines/baseline.onnx` is now a memoryless rule-based twin of the Python baseline
+  (was a linear distillation).
+
+## 8. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The
 efficiency idea is reused inside the per-peg `0.75 + 0.25·time` term.

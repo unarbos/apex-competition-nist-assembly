@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -26,13 +27,13 @@ def reserved(tmp_path, monkeypatch):
 def test_same_seed_same_round():
     _, a = conditions.sample_episodes(5, 2)
     _, b = conditions.sample_episodes(5, 2)
-    assert [c.public() for c in a] == [c.public() for c in b]
+    assert [asdict(c) for c in a] == [asdict(c) for c in b]
 
 
 def test_rounds_differ():
     _, a = conditions.sample_episodes(5, 2)
     _, b = conditions.sample_episodes(6, 2)
-    assert [c.public() for c in a] != [c.public() for c in b]
+    assert [asdict(c) for c in a] != [asdict(c) for c in b]
 
 
 def test_strata_fixed():

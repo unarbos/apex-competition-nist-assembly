@@ -134,7 +134,7 @@ def main() -> int:
     # zero only 2 seeds
     jobs = [j for j in jobs if not (j[0] == "zero" and j[1] >= 2)]
     print(f"running {len(jobs)} jobs…", flush=True)
-    with mp.Pool(3) as pool:
+    with mp.Pool(5) as pool:
         rows = []
         for r in pool.imap_unordered(one, jobs):
             print(
@@ -147,7 +147,7 @@ def main() -> int:
     by_kind = {k: [r for r in rows if r["kind"] == k] for k in ("zero", "baseline", "obs", "reference")}
 
     lines = [
-        "# NIST-Lite v0.2.0 calibration (tiered live mix)",
+        "# NIST-Lite v0.3.0 calibration (tiered live mix)",
         "",
         f"Measured on this box (MuJoCo 3.16). `OBS_DIM={OBS_DIM}`.",
         f"Episodes/round: `{8 * PER}` (8 strata × {PER}). Seeds: {SEEDS[0]}–{SEEDS[-1]}.",
@@ -159,10 +159,11 @@ def main() -> int:
         "v0.1.5 round-4 king was a hand-written ONNX controller (~5.8k elementwise ops,",
         "no matmuls). v0.2 defeats that class:",
         "",
-        "- **Pose-estimate bias**: peg/slot channels carry a fixed per-episode bias of",
+        "- **Pose-estimate bias**: peg/slot/clutter channels carry per-episode estimate offsets of",
         f"  {RANGES['pose_bias_xy'][0]*1e3:.0f}–{RANGES['pose_bias_xy'][1]*1e3:.0f} mm and",
         f"  ~{np.degrees(RANGES['pose_bias_yaw'][0]):.0f}–{np.degrees(RANGES['pose_bias_yaw'][1]):.0f}°,",
-        "  plus an independent peg−slot residual, white noise, dropout, and mild drift.",
+        "  drawn independently per slot, clutter block and peg (v0.3.0 observation
+  hardening), plus a per-peg peg−slot residual, white noise, dropout, and mild drift.",
         "- **Wrist force/torque** for contact-driven search.",
         "- **Hidden dynamics**: friction, mass, gain, mild backlash, chamfer, rare delay,",
         "  mid-episode shove/drop.",
@@ -238,7 +239,7 @@ def main() -> int:
     conditions_mod.RESERVED_PATH = ROOT / "out/cal_reserved.json"
     held_jobs = [("reference", s, "reserved") for s in SEEDS[:3]]
     live_jobs = [("reference", s, "live") for s in SEEDS[:3]]
-    with mp.Pool(3) as pool:
+    with mp.Pool(5) as pool:
         held_rows = list(pool.imap_unordered(one, held_jobs))
         live_rows = list(pool.imap_unordered(one, live_jobs))
     lines += [
