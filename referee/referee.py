@@ -1,4 +1,4 @@
-"""nist_lite REFEREE: multi-peg board simulation and scoring (v0.3.0).
+"""nist_lite REFEREE: multi-peg board simulation and scoring (v0.4.0).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the
@@ -30,7 +30,7 @@ from nist_sim.conditions import SLOT_SPECS, episode_seed_sequence, sample_episod
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
 from nist_sim.scoring import episode_score, raw_score_from_episodes
 
-RECORD_FORMAT = "nist_lite_record/3"
+RECORD_FORMAT = "nist_lite_record/2"
 HISTORY_DIR = Path(os.environ.get("NIST_HISTORY_DIR", "/data/history"))
 DEFAULTS = {
     "episodes_per_stratum": 8,

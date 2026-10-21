@@ -11,7 +11,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-SUPPORTED_MAJOR = 2
+SUPPORTED_MAJOR = 3
 
 
 def _check(rec: dict) -> None:
