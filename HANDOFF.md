@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.3.0
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.4.0
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that sequentially assembles several
@@ -69,6 +69,23 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 - `baselines/baseline.onnx` is now a memoryless rule-based twin of the Python baseline
   (was a linear distillation).
 
-## 8. Supersedes
+## 8. v0.4.0 changes (replay-compatible records)
+- No change to the simulator, task, difficulty, scoring, obs/action contract or images'
+  runtime behaviour; only the published record layout.
+- Records (episode rows in `episodes.jsonl` and `traj_*.json`) use `format: "nist_lite_record/2"`
+  again, the layout the website replay viewer renders.
+- Exact: `conditions.board_xy`, `conditions.board_yaw`, and per clutter block `offset_xy`,
+  `yaw`, `size_xy`, `height` (not held-out axes; re-drawn every round; records publish after
+  the round).
+- Coarse: `conditions.clearance` is the midpoint of the episode's clearance class
+  (tight 0.325 mm, mid 0.5 mm, loose 0.7 mm); `conditions.chamfer` is a fixed nominal 0.5.
+  The simulator still uses the exact per-episode values.
+- Unchanged from v0.3.0: `n_pegs`, `k`, `clutter_bucket`, `n_clutter`, `difficulty_tier`,
+  `clearance_class`, `disturbance`, `max_steps`, pegs (`slot`, `shape`, `start_type`),
+  `pegs_seated`, trajectory steps (`t`, `hand`, `action`, peg `pos`/`quat`, `seated`).
+- Still not published: estimate-bias values, exact values of any continuous condition axis,
+  reserved sub-ranges, the build salt, true peg start poses in episode rows.
+
+## 9. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The
 efficiency idea is reused inside the per-peg `0.75 + 0.25·time` term.

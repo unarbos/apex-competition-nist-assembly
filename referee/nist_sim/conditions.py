@@ -114,8 +114,15 @@ class ClutterStart:
     height: float  # full height (m)
 
     def public(self) -> dict:
-        # Miner-visible record: block size only, no true pose.
-        return {"size_xy": [round(x, 4) for x in self.size_xy], "height": round(self.height, 4)}
+        # Miner-visible record (nist_lite_record/2 shape for the replay viewer): exact
+        # start pose and size. Clutter placement is not a held-out axis, is re-drawn
+        # every episode, and records only publish after the round.
+        return {
+            "offset_xy": [round(float(x), 6) for x in self.offset_xy],
+            "yaw": round(float(self.yaw), 6),
+            "size_xy": [round(float(x), 6) for x in self.size_xy],
+            "height": round(float(self.height), 6),
+        }
 
 
 @dataclass
@@ -164,12 +171,13 @@ class EpisodeConditions:
             self.max_steps = STEPS_PER_PEG * int(self.n_pegs)
 
     def public(self) -> dict:
-        """Miner-visible per-episode record.
+        """Miner-visible per-episode record (``nist_lite_record/2`` shape).
 
-        Deliberately coarse: no estimate-bias values, no board pose, no true peg or
-        clutter start poses, and no exact values of the continuous LHS axes (over many
-        rounds those would expose the held-out sub-ranges as gaps). Only what the
-        dashboard breakdowns need.
+        Exact: board pose and clutter start poses (not held-out axes, re-drawn every
+        round). Coarse: ``clearance`` is the midpoint of the episode's clearance class
+        and ``chamfer`` is a fixed nominal value, so the continuous held-out axes and
+        their reserved sub-ranges stay hidden. No estimate-bias values, no exact values
+        of any continuous LHS axis, no true peg start poses.
         """
         return {
             "n_pegs": self.n_pegs,
@@ -178,11 +186,25 @@ class EpisodeConditions:
             "n_clutter": len(self.clutter),
             "difficulty_tier": self.difficulty_tier,
             "clearance_class": clearance_class(self.clearance),
+            "clearance": coarse_clearance(self.clearance),
+            "chamfer": NOMINAL_CHAMFER,
+            "board_xy": [round(float(self.board_xy[0]), 6), round(float(self.board_xy[1]), 6)],
+            "board_yaw": round(float(self.board_yaw), 6),
             "disturbance": int(self.disturbance),
             "max_steps": int(self.max_steps),
             "pegs": [p.public() for p in self.pegs],
             "clutter": [c.public() for c in self.clutter],
         }
+
+
+# Coarse public stand-ins for the continuous clearance / chamfer axes (records only;
+# the simulator always uses the exact per-episode values).
+CLEARANCE_CLASS_MIDPOINT = {"tight": 0.000325, "mid": 0.0005, "loose": 0.0007}
+NOMINAL_CHAMFER = 0.5
+
+
+def coarse_clearance(c: float) -> float:
+    return CLEARANCE_CLASS_MIDPOINT[clearance_class(c)]
 
 
 def clearance_class(c: float) -> str:

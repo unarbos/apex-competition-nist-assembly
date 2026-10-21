@@ -5,12 +5,12 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.3.0** (multi-peg board). Same task, scoring, and obs/action shapes as v0.2
-> (`[B, 184]` -> `[B, 5]`), with an **observation hardening**: the noise model of the peg,
-> slot and clutter pose estimates changed (estimate offsets are now drawn independently per
-> slot, per clutter block and per peg). Policies tuned to the v0.2 estimate structure should
-> be re-checked locally. Published per-episode records are coarser (no hidden condition
-> values). `timeout_s` stays at 1800 s (from v0.2.1).
+> Version: **v0.4.0** (multi-peg board). Same task, scoring, difficulty, simulator and
+> obs/action shapes as v0.3.0 (`[B, 184]` -> `[B, 5]`). Only the published per-episode
+> records changed: they use the `nist_lite_record/2` layout again (exact board pose and
+> clutter start poses for replays; `clearance` / `chamfer` are coarse stand-ins, not the
+> episode's true values). v0.3.0 introduced the observation hardening (estimate offsets
+> drawn independently per slot, per clutter block and per peg). `timeout_s` stays 1800 s.
 
 ## Relation to AlphaNIST
 
