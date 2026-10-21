@@ -5,8 +5,12 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.2.1** (multi-peg board). v0.2.1 is spec-only: same v0.2.0 player and referee
-> images, with `timeout_s` raised to 1800 s for 128-episode live rounds.
+> Version: **v0.3.0** (multi-peg board). Same task, scoring, and obs/action shapes as v0.2
+> (`[B, 184]` -> `[B, 5]`), with an **observation hardening**: the noise model of the peg,
+> slot and clutter pose estimates changed (estimate offsets are now drawn independently per
+> slot, per clutter block and per peg). Policies tuned to the v0.2 estimate structure should
+> be re-checked locally. Published per-episode records are coarser (no hidden condition
+> values). `timeout_s` stays at 1800 s (from v0.2.1).
 
 ## Relation to AlphaNIST
 
@@ -26,8 +30,8 @@ diverse start states, and free-order multi-part episodes. Neither project is rea
 evidence.
 
 **v0.2 requires learning.** A hand-coded controller that trusts the observation vector
-cannot win: peg/slot channels carry a fixed per-episode pose bias of several mm and
-degrees, plus noise and dropout. Wrist force/torque is provided so contact-driven search
+cannot win: peg/slot channels carry per-episode pose-estimate offsets of several mm and
+degrees (independent per slot, clutter block and peg), plus noise and dropout. Wrist force/torque is provided so contact-driven search
 can adapt. Hex and D-flat keyed shapes are held out of live rounds.
 
 ## The task (v0.2.0)
@@ -88,6 +92,10 @@ python tools/write_calibration.py                   # CALIBRATION.md (tiered liv
 python tools/reference_solver.py --seed 0           # privileged solvability check
 python tools/train_ppo.py --steps 100000 --workers 2  # residual PPO learnability
 ```
+
+Local runs use the public dev build. Live rounds also mix private build entropy into the
+episode draw, so a local `--seed` has the same distribution as a live round but does not
+reproduce it.
 
 Every live round mixes ~25% easy / 35% medium / 40% hard (`difficulty_tier`).
 The reference baseline is a soft-nearest-first insert/release servo on the biased obs.

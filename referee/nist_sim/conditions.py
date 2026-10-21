@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -102,9 +102,8 @@ class PegStart:
         return SLOT_SPECS[self.slot][1]
 
     def public(self) -> dict:
-        d = asdict(self)
-        d["shape"] = self.shape()
-        return {k: (round(v, 6) if isinstance(v, float) else v) for k, v in d.items()}
+        # Miner-visible record: no true start pose (offset / height / yaw error).
+        return {"slot": int(self.slot), "start_type": self.start_type, "shape": self.shape()}
 
 
 @dataclass
@@ -115,16 +114,8 @@ class ClutterStart:
     height: float  # full height (m)
 
     def public(self) -> dict:
-        d = asdict(self)
-        out = {}
-        for k, v in d.items():
-            if isinstance(v, float):
-                out[k] = round(v, 6)
-            elif isinstance(v, tuple):
-                out[k] = [round(x, 6) for x in v]
-            else:
-                out[k] = v
-        return out
+        # Miner-visible record: block size only, no true pose.
+        return {"size_xy": [round(x, 4) for x in self.size_xy], "height": round(self.height, 4)}
 
 
 @dataclass
@@ -147,6 +138,14 @@ class EpisodeConditions:
     pose_bias_xy: tuple[float, float] = (0.0, 0.0)  # slot estimate bias (m)
     pose_bias_yaw: float = 0.0
     peg_bias_delta_xy: tuple[float, float] = (0.0, 0.0)  # peg-only extra bias (m)
+    # Per-slot / per-clutter independent estimate biases (observation hardening).
+    # Empty => fall back to the global pose_bias_xy.
+    slot_bias_list: list[tuple[float, float]] = field(default_factory=list)
+    slot_bias_yaw_list: list[float] = field(default_factory=list)
+    clutter_bias_list: list[tuple[float, float]] = field(default_factory=list)
+    # Per-peg independent peg-vs-slot residual (same magnitude, independent direction),
+    # so the residual learned on one seated peg says nothing about the next one.
+    peg_bias_delta_list: list[tuple[float, float]] = field(default_factory=list)
     bias_drift: float = 0.0  # random-walk step (m) on estimate biases
     backlash: float = 0.0
     chamfer: float = 0.5
@@ -165,38 +164,51 @@ class EpisodeConditions:
             self.max_steps = STEPS_PER_PEG * int(self.n_pegs)
 
     def public(self) -> dict:
+        """Miner-visible per-episode record.
+
+        Deliberately coarse: no estimate-bias values, no board pose, no true peg or
+        clutter start poses, and no exact values of the continuous LHS axes (over many
+        rounds those would expose the held-out sub-ranges as gaps). Only what the
+        dashboard breakdowns need.
+        """
         return {
             "n_pegs": self.n_pegs,
+            "k": int(self.n_pegs),
             "clutter_bucket": self.clutter_bucket,
-            "clearance": round(self.clearance, 7),
-            "friction": round(self.friction, 6),
-            "peg_mass": round(self.peg_mass, 6),
-            "gain_scale": round(self.gain_scale, 6),
-            "obs_noise": round(self.obs_noise, 7),
-            "obs_noise_rad": round(self.obs_noise_rad, 6),
-            "dropout_prob": round(self.dropout_prob, 6),
-            "act_delay": int(self.act_delay),
-            "disturbance": int(self.disturbance),
-            "board_xy": [round(self.board_xy[0], 6), round(self.board_xy[1], 6)],
-            "board_yaw": round(self.board_yaw, 6),
-            "pose_bias_xy": [round(self.pose_bias_xy[0], 6), round(self.pose_bias_xy[1], 6)],
-            "pose_bias_yaw": round(self.pose_bias_yaw, 6),
-            "peg_bias_delta_xy": [
-                round(self.peg_bias_delta_xy[0], 6),
-                round(self.peg_bias_delta_xy[1], 6),
-            ],
-            "bias_drift": round(self.bias_drift, 8),
-            "backlash": round(self.backlash, 7),
-            "chamfer": round(self.chamfer, 4),
-            "search_pitch": round(self.search_pitch, 7),
+            "n_clutter": len(self.clutter),
             "difficulty_tier": self.difficulty_tier,
+            "clearance_class": clearance_class(self.clearance),
+            "disturbance": int(self.disturbance),
+            "max_steps": int(self.max_steps),
             "pegs": [p.public() for p in self.pegs],
             "clutter": [c.public() for c in self.clutter],
-            "disturbance_step": int(self.disturbance_step),
-            "disturbance_target": self.disturbance_target,
-            "max_steps": int(self.max_steps),
-            "k": int(self.n_pegs),
         }
+
+
+def clearance_class(c: float) -> str:
+    if c >= 0.00060:
+        return "loose"
+    if c >= 0.00040:
+        return "mid"
+    return "tight"
+
+
+def build_salt() -> list[int]:
+    """Private per-build entropy (from the referee build secret; absent in dev builds).
+
+    Mixed into every round/episode RNG so the episodes of a round cannot be reproduced
+    offline from the platform SEED and the public simulator alone.
+    """
+    try:
+        v = json.loads(RESERVED_PATH.read_text()).get("salt")
+    except FileNotFoundError:
+        return []
+    return [int(v)] if v is not None else []
+
+
+def episode_seed_sequence(seed: int, episode: int) -> np.random.SeedSequence:
+    """Per-episode RNG root (spawn / noise streams) used by the referee."""
+    return np.random.SeedSequence([seed, 0x5245, episode, *build_salt()])
 
 
 def _u(rng: np.random.Generator, lo: float, hi: float) -> float:
@@ -485,7 +497,7 @@ def sample_episodes(
     inside = split == "reserved"
     if inside and not reserved:
         raise RuntimeError("no reserved ranges in this build")
-    rng = np.random.default_rng(np.random.SeedSequence([seed, 0x4E495354]))
+    rng = np.random.default_rng(np.random.SeedSequence([seed, 0x4E495354, *build_salt()]))
     rc = {k: list(v) for k, v in RANGES.items()}
     eps: list[EpisodeConditions] = []
     for k_pegs, bucket in strata():
@@ -561,6 +573,22 @@ def sample_episodes(
             obs_noise_rad = float(
                 np.clip(float(lhs["obs_noise_rad"][j]) * noise_scale, lo_r * 0.25, hi_r)
             )
+            # Independent per-slot / per-clutter / per-peg estimate offsets: same
+            # magnitudes as the episode draw, independent directions.
+            slot_bias_list = []
+            slot_bias_yaw_list = []
+            for _si in range(len(pegs)):
+                _a = _u(rng, 0, 2 * math.pi)
+                slot_bias_list.append((bias_mag * math.cos(_a), bias_mag * math.sin(_a)))
+                slot_bias_yaw_list.append(abs(bias_yaw) * (1.0 if rng.random() < 0.5 else -1.0))
+            clutter_bias_list = []
+            for _ci in range(len(clutter)):
+                _a = _u(rng, 0, 2 * math.pi)
+                clutter_bias_list.append((bias_mag * math.cos(_a), bias_mag * math.sin(_a)))
+            peg_bias_delta_list = []
+            for _pi in range(len(pegs)):
+                _a = _u(rng, 0, 2 * math.pi)
+                peg_bias_delta_list.append((dmag * math.cos(_a), dmag * math.sin(_a)))
             eps.append(
                 EpisodeConditions(
                     n_pegs=k_pegs,
@@ -579,6 +607,10 @@ def sample_episodes(
                     pose_bias_xy=(float(bias_xy[0]), float(bias_xy[1])),
                     pose_bias_yaw=float(bias_yaw),
                     peg_bias_delta_xy=(float(peg_delta[0]), float(peg_delta[1])),
+                    slot_bias_list=slot_bias_list,
+                    slot_bias_yaw_list=slot_bias_yaw_list,
+                    clutter_bias_list=clutter_bias_list,
+                    peg_bias_delta_list=peg_bias_delta_list,
                     bias_drift=float(lhs["bias_drift"][j]) * drift_scale,
                     backlash=float(lhs["backlash"][j])
                     * (0.15 if tier == "easy" else 0.55 if tier == "medium" else 1.0),

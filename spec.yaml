@@ -1,6 +1,6 @@
 schema: apex.competition.v1
 id: nist_lite_assembly
-version: 0.2.1
+version: 0.3.0
 display_name: "NIST-Lite Robot Assembly (RL)"
 kind: solo
 process_type: cpu
@@ -42,7 +42,7 @@ entrypoints:
     command: ["python", "/app/launch.py", "--port", "8000"]
     network_disabled: false
     allow_internet: false
-    # 0.2.1: 1800 s headroom for the live 128-episode rounds (16/stratum); ~400-660 s observed on Macrocosmos staging.
+    # 1800 s (since 0.2.1): headroom for the live 128-episode rounds (16/stratum); ~400-660 s observed on Macrocosmos staging.
     timeout_s: 1800
     http_api:
       port: 8000

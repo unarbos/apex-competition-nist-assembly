@@ -363,9 +363,25 @@ class Episode:
         self._disturbance_applied = False
         # Pose-estimate biases (never revealed; applied in observe). Slot and peg
         # biases differ so relative features retain a residual of several mm.
-        self._slot_bias_xy = np.array(cond.pose_bias_xy, dtype=float)
-        self._peg_bias_xy = self._slot_bias_xy + np.array(cond.peg_bias_delta_xy, dtype=float)
-        self._pose_bias_yaw = float(cond.pose_bias_yaw)
+        # Per-slot / per-clutter / per-peg independent estimate biases (observation hardening).
+        if getattr(cond, 'peg_bias_delta_list', None):
+            _delta = np.array(cond.peg_bias_delta_list, dtype=float)
+        else:
+            _delta = np.array(cond.peg_bias_delta_xy, dtype=float)
+        if getattr(cond, 'slot_bias_list', None):
+            self._slot_bias_xy = np.array(cond.slot_bias_list, dtype=float)
+        else:
+            self._slot_bias_xy = np.tile(np.array(cond.pose_bias_xy, dtype=float), (max(1, self.n_pegs), 1))
+        self._peg_bias_xy = self._slot_bias_xy + _delta
+        if getattr(cond, 'slot_bias_yaw_list', None):
+            self._slot_bias_yaw = np.array(cond.slot_bias_yaw_list, dtype=float)
+        else:
+            self._slot_bias_yaw = np.full(max(1, self.n_pegs), float(cond.pose_bias_yaw))
+        if getattr(cond, 'clutter_bias_list', None):
+            self._clutter_bias_xy = np.array(cond.clutter_bias_list, dtype=float)
+        else:
+            self._clutter_bias_xy = np.tile(np.array(cond.pose_bias_xy, dtype=float), (max(1, self.n_clutter), 1))
+        self._pose_bias_yaw = float(cond.pose_bias_yaw)  # retained for compatibility
         self._bias_drift = float(cond.bias_drift)
         self._backlash = float(cond.backlash)
         self._cmd_applied = np.zeros(4)  # last Cartesian cmd that passed backlash
@@ -662,14 +678,14 @@ class Episode:
             and self._upright(pquat)
         )
 
-    def _noisy_pose(self, pos, quat, noise_rng, bias_xy: np.ndarray | None = None):
+    def _noisy_pose(self, pos, quat, noise_rng, bias_xy: np.ndarray | None = None, yaw_bias: float = 0.0):
         p = np.asarray(pos, dtype=float).copy()
         if bias_xy is not None:
             p[0] += float(bias_xy[0])
             p[1] += float(bias_xy[1])
         p = p + noise_rng.normal(0, self.c.obs_noise, 3)
         dth = noise_rng.normal(0, self.c.obs_noise_rad, 3)
-        yaw_extra = float(dth[2]) + (self._pose_bias_yaw if bias_xy is not None else 0.0)
+        yaw_extra = float(dth[2]) + (float(yaw_bias) if bias_xy is not None else 0.0)
         dq = _yaw_quat(yaw_extra)
         q = _quat_mul(dq, quat)
         n = float(np.linalg.norm(q))
@@ -681,10 +697,9 @@ class Episode:
         """Non-stationary estimate bias: random-walk so EMA−rel scripts go stale."""
         if self._bias_drift <= 0.0:
             return
-        step = self.rng.normal(0.0, self._bias_drift, 2)
-        self._slot_bias_xy = self._slot_bias_xy + step
+        self._slot_bias_xy = self._slot_bias_xy + self.rng.normal(0.0, self._bias_drift, self._slot_bias_xy.shape)
         # Peg bias walks independently (distractor: residual keeps moving).
-        self._peg_bias_xy = self._peg_bias_xy + self.rng.normal(0.0, self._bias_drift, 2)
+        self._peg_bias_xy = self._peg_bias_xy + self.rng.normal(0.0, self._bias_drift, self._peg_bias_xy.shape)
 
     def _update_wrist_wrench(self) -> None:
         """Estimate wrist force/torque from contacts on hand / pad geoms."""
@@ -745,11 +760,11 @@ class Episode:
         for i, peg in enumerate(self.c.pegs):
             base = i * PEG_FEAT
             ppos, pquat = self.peg_pose(i)
-            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._peg_bias_xy)
+            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._peg_bias_xy[i], yaw_bias=float(self._slot_bias_yaw[i]))
             hx, hy = self.slot_xy[i]
             # Slot estimate uses slot bias (≠ peg bias) — no exact hole coordinates.
-            hx_e = hx + self._slot_bias_xy[0] + float(noise_rng.normal(0, self.c.obs_noise))
-            hy_e = hy + self._slot_bias_xy[1] + float(noise_rng.normal(0, self.c.obs_noise))
+            hx_e = hx + self._slot_bias_xy[i][0] + float(noise_rng.normal(0, self.c.obs_noise))
+            hy_e = hy + self._slot_bias_xy[i][1] + float(noise_rng.normal(0, self.c.obs_noise))
             prel = np.array([ppos_n[0] - hx_e, ppos_n[1] - hy_e, ppos_n[2] - BLOCK_H])
             shape = peg.shape()
             dia = peg.diameter()
@@ -772,7 +787,7 @@ class Episode:
         for i, cl in enumerate(self.c.clutter):
             base = i * CLUTTER_FEAT
             ppos, pquat = self.clutter_pose(i)
-            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._slot_bias_xy)
+            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._clutter_bias_xy[i], yaw_bias=0.0)
             prel = np.array([ppos_n[0] - bx, ppos_n[1] - by, ppos_n[2]])
             size = max(cl.size_xy) * 50
             feat = np.concatenate([[1.0], prel * 10, pquat_n, [size]])
