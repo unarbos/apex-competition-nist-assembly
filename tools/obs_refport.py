@@ -82,9 +82,10 @@ class ObsEpisode:
         self._slot = None
         self._syaw = None
         # Optional hooks (residual RL on top of this controller, tools/train_ppo.py):
-        # act_hook(obs, base_action) -> action; post_hook(next_obs, done).
+        # act_hook(obs, base_action, view) -> action; post_hook(next_obs, done).
         self.act_hook = None
         self.post_hook = None
+        self.phase_flag = None  # "insert" while the phase machine aligns / descends on a hole
         self._update(first=True)
 
     def __getattr__(self, name):
@@ -132,7 +133,7 @@ class ObsEpisode:
 
     def step(self, a) -> None:
         if self.act_hook is not None:
-            a = self.act_hook(self.last_obs, np.clip(np.asarray(a, dtype=float), -1, 1))
+            a = self.act_hook(self.last_obs, np.clip(np.asarray(a, dtype=float), -1, 1), self)
         self._ep.step(a)
         if not self._ep.done:
             self._update()

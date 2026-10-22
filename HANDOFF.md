@@ -86,6 +86,29 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 - Still not published: estimate-bias values, exact values of any continuous condition axis,
   reserved sub-ranges, the build salt, true peg start poses in episode rows.
 
-## 9. Supersedes
+## 9. v0.5.0 changes (generalization hardening)
+- **Breaking for tuned policies.** Same `[B,184] -> [B,5]` contract, strata, tiers,
+  horizon and scoring, but the board is no longer a fixed public table:
+  - every episode draws its own 8-slot layout (non-overlapping positions anywhere on the
+    board, slot yaw in (-pi, pi]) and a cross-section per slot from continuous families
+    (round, rectangle/square, regular 5/6/8-gon, D-flat; inscribed size 4-16 mm);
+  - held-out families (reserved split, hard tier only) are new and never appear in live rounds;
+  - peg-table features 8-11 are now `sin, cos` of a biased slot-yaw estimate, the outer
+    (circumscribed) size and a zero. There is no shape label. The slot-yaw channel carries
+    its own per-peg residual against the peg-yaw channel.
+- The v0.3.0 estimate-offset structure is unchanged (independent per slot, clutter block
+  and peg); `tests/test_obs_leak.py` checks it against each episode's own layout.
+- Records stay `nist_lite_record/2`. Added: `conditions.slots` (shape, size, xy, yaw,
+  params for all 8 slots of the episode) and peg `size`. The layout is re-drawn every
+  episode and only published after the round. Result summary seat keys are now
+  `seat_<family>_<small|medium|large>`.
+- Calibration tools: `tools/eval_policies.py` (fast local eval), `tools/obs_refport.py`
+  (obs-only port of the reference solver, the strong scripted gate),
+  `tests/test_scripted_regression.py` (scripted controllers must stay <= 0.30; extra
+  private ONNX fixtures via `NIST_SCRIPTED_FIXTURES`). The reference solver presses
+  gently on a blocked insertion (target no longer runs away), which lifts the privileged
+  reference to ~0.70.
+
+## 10. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The
 efficiency idea is reused inside the per-peg `0.75 + 0.25·time` term.

@@ -169,6 +169,12 @@ class ScriptedPeg:
         self._sgn: float | None = None
         self.log: list = []
 
+    def _mark(self, phase) -> None:
+        """Expose the current phase to an episode proxy that asks for it (tools/obs_refport.py)."""
+        parent = getattr(self.e, "ep", None)
+        if parent is not None and hasattr(parent, "phase_flag"):
+            parent.phase_flag = phase
+
     def _act(self, goal_xyz=None, goal_yaw=None, grip=1.0, speed=None):
         e = self.e
         s = self.speed if speed is None else speed
@@ -247,6 +253,7 @@ class ScriptedPeg:
         if dz_bottom < 0:
             yield from self.goto([None, None, e.target[2] - dz_bottom], grip=-1.0)
         # Refresh yaw once above the hole, then again just before the lip.
+        self._mark("insert")
         yaw = self.hole_yaw_target()
         for _ in range(140):
             o = part_off()
@@ -289,6 +296,7 @@ class ScriptedPeg:
             idx = getattr(e, "i", None)
             if parent is not None and idx is not None and parent.seated_now[idx]:
                 break
+        self._mark(None)
         yield from self.wait(8, grip=1.0)
         yield from self.goto([None, None, PEG_LEN + 0.03], grip=1.0, max_n=60)
         yield from self.wait(SEATED_HOLD + 8, grip=1.0)

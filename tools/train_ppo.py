@@ -52,6 +52,7 @@ DEVICE = torch.device("cpu")
 RESIDUAL_SCALE = 0.30
 INIT_LOG_STD = -2.5
 PRIV_SHAPING = False
+INSERT_ONLY = False
 STD_MAX = 0.2
 
 
@@ -125,7 +126,9 @@ def _shaped_reward(obs, prev_obs, seated_now, prev_seated) -> float:
 
 
 def _combine(base: np.ndarray, resid: np.ndarray) -> np.ndarray:
-    return np.clip(base + RESIDUAL_SCALE * resid, -1.0, 1.0)
+    import train_ppo as _tp  # noqa: PLC0415  (scale may be set per process)
+
+    return np.clip(base + _tp.RESIDUAL_SCALE * resid, -1.0, 1.0)
 
 
 class ResidualNet(nn.Module):
@@ -239,6 +242,8 @@ def _rollout_worker(args):
 
     _tp.PRIV_SHAPING = os.environ.get("NIST_PPO_PRIV_SHAPING") == "1"
     _tp.STD_MAX = float(os.environ.get("NIST_PPO_STD_MAX", _tp.STD_MAX))
+    _tp.INSERT_ONLY = os.environ.get("NIST_PPO_INSERT_ONLY") == "1"
+    _tp.RESIDUAL_SCALE = float(os.environ.get("NIST_PPO_RESID_SCALE", _tp.RESIDUAL_SCALE))
     net = _Net()
     net.load_state_dict(weights)
     net.eval()
@@ -326,11 +331,16 @@ def _refport_rollout(net, e, c, r2, n_steps, steps, obs_l, act_l, logp_l, rew_l,
     from obs_refport import solve_obs_episode  # noqa: PLC0415
     from nist_sim.scoring import episode_score as _score  # noqa: PLC0415
 
-    st = {"steps": steps, "prev": None, "prev_seated": [False] * e.n_pegs, "o": None, "phi": _insert_potential(e)}
+    st = {"steps": steps, "prev": None, "prev_seated": [False] * e.n_pegs, "o": None,
+          "phi": _insert_potential(e), "rec": False, "ep0": len(obs_l), "resid": np.zeros(ACT_DIM)}
 
-    def act_hook(o, base):
+    def act_hook(o, base, view):
         if st["steps"] >= n_steps:
             raise _StopRollout
+        st["rec"] = (not INSERT_ONLY) or view.phase_flag == "insert"
+        if not st["rec"]:
+            st["resid"] = np.zeros(ACT_DIM)
+            return base
         x = torch.as_tensor(o, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
             mu, log_std, v = net.forward(x)
@@ -344,6 +354,7 @@ def _refport_rollout(net, e, c, r2, n_steps, steps, obs_l, act_l, logp_l, rew_l,
         val_l.append(float(v.item()))
         st["o"] = o
         st["resid"] = resid
+        st["steps"] += 1
         return _combine(base, resid)
 
     def post_hook(nxt, done):
@@ -358,11 +369,18 @@ def _refport_rollout(net, e, c, r2, n_steps, steps, obs_l, act_l, logp_l, rew_l,
             sc = _score(e.peg_seated_at_end(), e.peg_first_seat_steps(), c.max_steps, e.action_l2 / max(1, e.steps))
             r += 18.0 * sc
             ep_scores.append(sc)
-        rew_l.append(r)
-        done_l.append(float(done))
+        if st["rec"]:
+            rew_l.append(r)
+            done_l.append(float(done))
+        elif len(rew_l) > st["ep0"]:
+            # Reward earned while the scripted base acts alone goes to the last learned step.
+            rew_l[-1] += r
+            if done:
+                done_l[-1] = 1.0
         st["prev"] = st["o"]
         st["prev_seated"] = list(e.seated_now)
-        st["steps"] += 1
+        if not INSERT_ONLY:
+            pass
 
     try:
         solve_obs_episode(e, r2, act_hook=act_hook, post_hook=post_hook)
@@ -371,8 +389,8 @@ def _refport_rollout(net, e, c, r2, n_steps, steps, obs_l, act_l, logp_l, rew_l,
     # Drop a dangling transition without a reward (stop inside a step).
     n = min(len(obs_l), len(rew_l))
     del obs_l[n:], act_l[n:], logp_l[n:], val_l[n:]
-    if done_l and len(done_l) == n and st["steps"] >= n_steps:
-        done_l[-1] = 1.0
+    if len(done_l) > st["ep0"]:
+        done_l[-1] = 1.0  # episode boundary (terminal or truncated)
     return st["steps"]
 
 
@@ -503,7 +521,17 @@ def _eval_worker(args):
     if base_kind == "refport":
         from obs_refport import solve_obs_episode  # noqa: PLC0415
 
-        hook = (lambda o, b: _combine(b, net.residual(o, deterministic=True))) if use_resid else None
+        import train_ppo as _tp  # noqa: PLC0415
+
+        _tp.INSERT_ONLY = os.environ.get("NIST_PPO_INSERT_ONLY") == "1"
+        _tp.RESIDUAL_SCALE = float(os.environ.get("NIST_PPO_RESID_SCALE", _tp.RESIDUAL_SCALE))
+
+        def hook(o, b, view):
+            if _tp.INSERT_ONLY and view.phase_flag != "insert":
+                return b
+            return _tp._combine(b, net.residual(o, deterministic=True))
+
+        hook = hook if use_resid else None
         return solve_obs_episode(e, r2, act_hook=hook)["score"], c.difficulty_tier
     pol = _Scripted()
     while not e.done:
@@ -545,9 +573,14 @@ def main() -> int:
     ap.add_argument("--init-log-std", type=float, default=-2.5)
     ap.add_argument("--std-max", type=float, default=0.2)
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--insert-only", action="store_true", help="refport base: residual only in the insertion phase")
+    ap.add_argument("--residual-scale", type=float, default=0.30)
     a = ap.parse_args()
-    global INIT_LOG_STD, STD_MAX, PRIV_SHAPING
+    global INIT_LOG_STD, STD_MAX, PRIV_SHAPING, INSERT_ONLY, RESIDUAL_SCALE
     INIT_LOG_STD, STD_MAX, PRIV_SHAPING = a.init_log_std, a.std_max, a.priv_shaping
+    INSERT_ONLY, RESIDUAL_SCALE = a.insert_only, a.residual_scale
+    os.environ["NIST_PPO_INSERT_ONLY"] = "1" if a.insert_only else "0"
+    os.environ["NIST_PPO_RESID_SCALE"] = str(a.residual_scale)
     os.environ["NIST_PPO_PRIV_SHAPING"] = "1" if a.priv_shaping else "0"
     os.environ["NIST_PPO_STD_MAX"] = str(a.std_max)
     if a.base == "refport" or a.parallel_eval:
