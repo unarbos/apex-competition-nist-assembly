@@ -88,6 +88,8 @@ def test_ranges_extended_for_v020():
 def test_held_out_shapes_only_on_reserved(reserved):
     _, live = conditions.sample_episodes(0, 4, "live")
     assert all(p.shape_override is None for e in live for p in e.pegs)
+    # Held-out families never appear anywhere on a live board (active or empty slots).
+    assert all(s.shape in conditions.LIVE_SHAPES for e in live for s in e.slots)
     _, held = conditions.sample_episodes(0, 4, "reserved")
     overrides = [p.shape_override for e in held for p in e.pegs if p.shape_override]
     assert overrides

@@ -1,8 +1,11 @@
-"""Regression guards for the observation hardening (v0.3.0).
+"""Regression guards for the observation hardening (v0.3.0, kept in v0.5.0).
 
 Slot, clutter and peg-vs-slot estimate offsets are drawn independently per slot /
 per block / per peg. These tests pin that structure and check that the per-peg
 relative residual (what insertion has to resolve) keeps its designed magnitude.
+Since v0.5.0 the slot layout is drawn per episode; the global-fit checks below use
+the episode's own true layout, i.e. even a policy that knew the layout exactly could
+not recover the hole poses from one shared offset.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import math
 
 import numpy as np
 
-from nist_sim.conditions import SLOT_SPECS, sample_episodes, slot_world_xy
+from nist_sim.conditions import sample_episodes, slot_world_xy
 from nist_sim.env import ACT_DIM, PEG_FEAT, PROPRIO_DIM, Episode
 
 PEG0 = PROPRIO_DIM + ACT_DIM
@@ -30,8 +33,7 @@ def _global_fit_slot_error(obs: np.ndarray, cond) -> float:
         if f[0] < 0.5:
             continue
         est.append([f[13] / 10.0, f[14] / 10.0])
-        _, _, lx, ly = SLOT_SPECS[peg.slot]
-        lay.append([lx, ly])
+        lay.append([peg.spec.x, peg.spec.y])
     est = np.array(est)
     lay = np.array(lay)
     em, lm = est.mean(0), lay.mean(0)
@@ -50,7 +52,7 @@ def _global_fit_slot_error(obs: np.ndarray, cond) -> float:
             continue
         rec = est[k] - global_bias
         k += 1
-        tx, ty = slot_world_xy(cond.board_xy, cond.board_yaw, peg.slot)
+        tx, ty = slot_world_xy(cond.board_xy, cond.board_yaw, peg.spec)
         true_rel = np.array([tx - cond.board_xy[0], ty - cond.board_xy[1]])
         worst = max(worst, float(np.hypot(*(rec - true_rel))))
     return worst

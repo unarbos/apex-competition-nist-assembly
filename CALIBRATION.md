@@ -1,112 +1,75 @@
-# NIST-Lite v0.3.0 calibration (tiered live mix)
+# NIST-Lite v0.5.0 calibration (generalization hardening)
 
-Measured on this box (MuJoCo 3.16). `OBS_DIM=184`.
-Episodes/round: `64` (8 strata × 8). Seeds: 0–4.
-Per-stratum difficulty mix ≈ 25% easy / 35% medium / 40% hard.
+Measured on this box (MuJoCo 3.16, CPU) with `tools/eval_policies.py` (same episode draw and
+per-episode RNG streams as the referee, dev build). Live mix, 64 episodes per seed
+(8 strata × 8), seeds 1–5 unless noted. `OBS_DIM=184`.
 
-v0.3.0 vs v0.2.0: the observation noise model changed (independent per-slot / per-clutter /
-per-peg estimate offsets) and the extra draws shift every episode, so these numbers are a
-fresh sample, not a like-for-like rerun. v0.2.0 means (same harness): zero 0.012,
-baseline 0.100, obs-only scripted 0.110, privileged reference 0.568. The privileged/obs-only
-gap is unchanged (0.566 vs 0.124 here).
+## Summary: before (v0.4.0 sim) → after (v0.5.0)
 
-## Why RL is required
+| Policy | v0.4.0 | v0.5.0 mean | by tier (easy / medium / hard) | peg seat rate by family |
+|---|---|---|---|---|
+| zero (no-op) | 0.023 | **0.017** (seeds 0.008–0.032, n=320) | e 0.03 / m 0.01 / h 0.01 | dflat 0.02, ngon 0.01, rect 0.02, round 0.02 |
+| baseline (Python, nearest-first) | 0.123 | **0.090** (seeds 0.070–0.105, n=320) | e 0.12 / m 0.10 / h 0.06 | dflat 0.10, ngon 0.05, rect 0.06, round 0.15 |
+| baseline.onnx (memoryless twin, seeds 1–3) | n/a | **0.043** (seeds 0.038–0.046, n=192) | e 0.05 / m 0.05 / h 0.04 | dflat 0.02, ngon 0.02, rect 0.01, round 0.11 |
+| obs-only scripted (`ObsOnlyScripted`) | 0.124 | **0.083** (seeds 0.066–0.104, n=320) | e 0.12 / m 0.09 / h 0.05 | dflat 0.07, ngon 0.04, rect 0.05, round 0.17 |
+| obs-only reference port (`tools/obs_refport.py`) | n/a (new) | **0.210** (seeds 0.191–0.235, n=320) | e 0.32 / m 0.29 / h 0.06 | dflat 0.16, ngon 0.22, rect 0.23, round 0.32 |
+| privileged reference (true state) | 0.566 | **0.697** (seeds 0.675–0.719, n=320) | e 0.78 / m 0.70 / h 0.64 | dflat 0.71, ngon 0.71, rect 0.70, round 0.85 |
+| top-3 round-5 scripted submissions (private fixtures, seeds 1–3) | 0.79 / 0.39 / 0.22 | **0.019 / 0.014 / 0.010** | | |
 
-v0.1.5 round-4 king was a hand-written ONNX controller (~5.8k elementwise ops,
-no matmuls). v0.2 defeats that class:
+v0.4.0 column: v0.3.0/v0.4.0 calibration (same simulator) and the round-5 audit on the v0.4.0 sim
+(seeds 501–502). The v0.4.0 reference number predates the reference-solver insertion fix in this
+release; the fix alone does not change the task.
 
-- **Pose-estimate bias**: peg/slot/clutter channels carry per-episode estimate offsets of
-  4–10 mm and
-  ~7–16°,
-  drawn independently per slot, clutter block and peg (v0.3.0 observation
-  hardening), plus a per-peg peg−slot residual, white noise, dropout, and mild drift.
-- **Wrist force/torque** for contact-driven search.
-- **Hidden dynamics**: friction, mass, gain, mild backlash, chamfer, rare delay,
-  mid-episode shove/drop.
-- **Held-out shapes**: `('hex', 'dflat')` on the reserved hard tier only.
+Bars for this release (all on the live mix):
 
-## Difficulty (live, tiered)
+| Bar | Target | v0.5.0 | Met |
+|---|---|---|---|
+| obs-only scripted controllers | ≤ ~0.25 | best 0.210 (`obs_refport`), others ≤ 0.09; top round-5 scripted submissions 0.010–0.019 | yes |
+| privileged solver | 0.5–0.75 | 0.697 | yes |
+| quick PPO beats best scripted | significant margin | not demonstrated (see below) | **no (open)** |
+| eval wall time, 64 episodes, 2 CPU | ≪ 1800 s | 154 s (`tools/local_run.py`, baseline.onnx, `taskset -c 0-1`) | yes |
 
-- clearance `0.25–0.80 mm`
-- STEPS_PER_PEG `280`
-- **easy** (~25%): grasped / near-hole starts, reduced noise, residual bias kept
-  large enough that −rel scripts miss; no drift/disturbance
-- **medium** (~35%): mixed upright starts, moderated anti-scripting
-- **hard** (~40%): full residual bias / drift / disturbances
+`obs_refport` is the privileged reference's insertion logic driven only by the
+observation (smoothed slot/peg estimates, no family knowledge, no true state). With
+zero estimate error it scores ~0.46, so the remaining gap to the reference (0.70) is the
+cost of the per-slot/per-peg estimate biases and per-episode layouts, which a policy must
+learn to compensate for from contact and motion rather than from a fixed template.
 
-### Junk (zero policy)
-- raw: mean=0.0226 sd=0.0122 min=0.0104 max=0.0348 (n=2)
-- peg seat frac: mean=0.0227
-- in-process wall: mean=158.2s [153.9,162.5]
-- per-K: 3=0.052, 4=0.016, 5=0.012, 6=0.010
-- by clearance: loose(>=0.60mm)=0.022, mid(0.40-0.60mm)=0.016, tight(<0.40mm)=0.048
-- by clutter: high=0.016, low=0.029
-- by start mix: all_upright=0.034, has_tray=0.007, mixed_lying=0.007
-- by difficulty tier: easy=0.032, hard=0.004, medium=0.035
+## Reserved split
 
-### baseline (nearest-first, obs)
-- raw: mean=0.1234 sd=0.0165 min=0.0985 max=0.1455 (n=5)
-- peg seat frac: mean=0.1283
-- in-process wall: mean=185.0s [168.9,194.3]
-- per-K: 3=0.167, 4=0.139, 5=0.113, 6=0.074
-- by clearance: loose(>=0.60mm)=0.125, mid(0.40-0.60mm)=0.132, tight(<0.40mm)=0.090
-- by clutter: high=0.105, low=0.142
-- by start mix: all_upright=0.141, has_tray=0.117, mixed_lying=0.062
-- by difficulty tier: easy=0.162, hard=0.088, medium=0.133
+Throwaway build secret (the real secret is never used here). Privileged reference on the
+reserved split, seeds 1–2, 128 episodes: **0.727** (easy 0.87 / medium 0.74 / hard 0.62).
+Held-out families are solvable: peg seat rate stadium 0.76, trapezoid 0.74 (live families
+0.72–0.92).
 
-### obs-only scripted (anti-scripting gate)
-- raw: mean=0.1238 sd=0.0212 min=0.0947 max=0.1574 (n=5)
-- peg seat frac: mean=0.1274
-- in-process wall: mean=180.1s [168.8,186.6]
-- per-K: 3=0.177, 4=0.137, 5=0.100, 6=0.081
-- by clearance: loose(>=0.60mm)=0.131, mid(0.40-0.60mm)=0.120, tight(<0.40mm)=0.106
-- by clutter: high=0.108, low=0.140
-- by start mix: all_upright=0.143, has_tray=0.117, mixed_lying=0.065
-- by difficulty tier: easy=0.173, hard=0.082, medium=0.133
+## Quick PPO (paired, same 128 episodes, `tools/train_ppo.py`)
 
-### privileged reference (tools/; true state)
-- raw: mean=0.5660 sd=0.0243 min=0.5317 max=0.6043 (n=5)
-- peg seat frac: mean=0.6167
-- in-process wall: mean=186.9s [175.1,196.3]
-- per-K: 3=0.596, 4=0.574, 5=0.528, 6=0.566
-- by clearance: loose(>=0.60mm)=0.651, mid(0.40-0.60mm)=0.501, tight(<0.40mm)=0.427
-- by clutter: high=0.555, low=0.577
-- by start mix: all_upright=0.643, has_tray=0.541, mixed_lying=0.307
-- by difficulty tier: easy=0.693, hard=0.482, medium=0.565
+| Run | Base | Steps | PPO | Base score | Δ (paired se) |
+|---|---|---|---|---|---|
+| residual on obs-only scripted | `ObsOnlyScripted` | 300k | 0.091 | 0.086 | +0.004 (0.007) |
+| residual on obs-only scripted | `ObsOnlyScripted` | 1M | 0.086 | 0.086 | −0.001 (0.005) |
+| residual on obs reference port, privileged shaping (train only) | `obs_refport` | 300k | 0.197 | 0.199 | −0.003 (0.010) |
+| insert-phase-only residual, scale 0.5 | `obs_refport` | 400k | 0.179 | 0.199 | −0.021 (0.013) |
 
-## ONNX baseline (2 workers)
+None of the quick runs (≤ 1M steps, CPU, a few tens of minutes) produce a significant
+gain over its scripted base. This is reported as an **open trade-off**: v0.5.0 removes
+the advantage of fixed-template scripting (the scripted ceiling drops from ~0.79 to ~0.21
+while the privileged solver stays at ~0.70), but a cheap RL recipe that clears the scripted
+ceiling has not been demonstrated yet. There is 0.49 of headroom between the best
+observation-only controller and the privileged solver; closing it most likely needs longer
+training, longer histories in the policy input, or a learned estimator, not a
+change to the task.
 
-- seed 1: raw=0.0773 wall=122.2s (in-process `tools/local_run.py`, dev build)
-- `baselines/baseline.onnx` is now a memoryless rule-based twin of `NearestFirstBaseline`
-  (`tools/make_policies.py`; target = nearest unseated peg, phases read from the obs).
-  The v0.2 linear distillation scored 0.0077 on seed 1; the stateful Python baseline is
-  0.123 above. It is a plumbing / floor check, not the score bar.
+## Reproduce
 
-## Held-out (throwaway secret)
+```bash
+python3 tools/eval_policies.py --policy reference --seeds 1 2 3 4 5 --per 8 --workers 8
+python3 tools/eval_policies.py --policy refport   --seeds 1 2 3 4 5 --per 8 --workers 8
+python3 tools/train_ppo.py --base refport --parallel-eval --priv-shaping --steps 300000
+NIST_SCRIPTED_FIXTURES=/path/to/private/onnx pytest tests/test_scripted_regression.py
+```
 
-- reserved axes: `{'bias_drift': [1.46e-05, 1.84e-05], 'pose_bias_xy': [0.0056421, 0.0065421]}`
-- reference live: 0.5423
-- reference reserved (held-out shapes on hard tier): 0.4991
-- drop: +0.0431
-
-## Targets
-- baseline ~0.10–0.15 → **met** (mean=0.123)
-- obs-only scripted ≤ ~0.25 → **met** (mean=0.124)
-- privileged reference ~0.55–0.75 → **met** (mean=0.566)
-- junk ~0 → met
-- eval ≤ ~400 s @ 2 workers → see ONNX wall
-- PPO beats baseline and obs-only on live mix → see Learning evidence
-
-## Learning evidence (measured on v0.2.0; not rerun for v0.3.0)
-- Residual PPO on `ObsOnlyScripted` (zero-init + light privileged residual demos),
-  ~100k steps / 2 workers on the tiered live mix.
-- Live curve (3-seed eval): 0.106 → **0.115** best; final 5-seed:
-  **ppo=0.1066** vs obs=0.0959 vs base=0.0903
-  (Δ ppo−obs=+0.011, Δ ppo−base=+0.016).
-- Curve steps/scores: `out/ppo_curve.npz`.
-
-## Solvers
-- `tools/reference_solver.py` — privileged; not in player
-- `ObsOnlyScripted` — strongest obs-only hand-coded controller
-- `tools/train_ppo.py` — residual PPO (scripted base + privileged demos) on tiered live mix
+`tests/test_scripted_regression.py` asserts every scripted ONNX in
+`$NIST_SCRIPTED_FIXTURES` and the in-repo obs-only scripted controller score ≤ 0.30; it is
+skipped when the fixture directory is absent (fixtures are not part of the public repo).
 

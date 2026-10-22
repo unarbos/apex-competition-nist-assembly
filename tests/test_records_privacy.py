@@ -27,9 +27,10 @@ from nist_sim.reserve import reserved_from_secret  # noqa: E402
 ALLOWED_TOP = {
     "n_pegs", "k", "clutter_bucket", "n_clutter", "difficulty_tier", "clearance_class",
     "clearance", "chamfer", "board_xy", "board_yaw",
-    "disturbance", "max_steps", "pegs", "clutter",
+    "disturbance", "max_steps", "pegs", "clutter", "slots",
 }
-ALLOWED_PEG = {"slot", "start_type", "shape"}
+ALLOWED_PEG = {"slot", "start_type", "shape", "size"}
+ALLOWED_SLOT = {"shape", "size", "xy", "yaw", "params"}
 ALLOWED_CLUTTER = {"offset_xy", "yaw", "size_xy", "height"}
 COARSE_CLEARANCE = {"tight": 0.000325, "mid": 0.0005, "loose": 0.0007}
 
@@ -55,6 +56,9 @@ def test_public_conditions_whitelist():
             assert set(p) == ALLOWED_PEG
         for cl in d["clutter"]:
             assert set(cl) == ALLOWED_CLUTTER
+        assert len(d["slots"]) == conditions.N_SLOTS
+        for sl in d["slots"]:
+            assert set(sl) == ALLOWED_SLOT
 
 
 def test_public_conditions_carry_no_hidden_values():
@@ -72,6 +76,7 @@ def test_public_conditions_carry_no_hidden_values():
         hidden += [x for p in c.pegs for x in (*p.offset_xy, p.height, p.yaw_err)]
         hidden += [x for b in c.clutter_bias_list for x in b]
         hidden += list(c.slot_bias_yaw_list)
+        hidden += list(c.peg_yaw_delta_list)
         hidden = [h for h in hidden if abs(h) > 1e-9]
         for v in _all_floats(c.public()):
             assert not any(abs(v - h) < 1e-7 for h in hidden), v

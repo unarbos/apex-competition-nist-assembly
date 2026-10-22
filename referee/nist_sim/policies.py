@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .conditions import SLOT_SPECS, SHAPE_NAMES
 from .env import (
     ACT_DIM,
     BLOCK_H,
@@ -37,11 +36,13 @@ from .env import (
 PEG_TABLE0 = PROPRIO_DIM + ACT_DIM  # 21
 CLUTTER_TABLE0 = PEG_TABLE0 + MAX_PEGS * PEG_FEAT
 # Peg feature layout (PEG_FEAT=17):
-# 0 present | 1:4 rel*10 | 4:8 quat | 8:12 shape_oh | 12 size | 13:16 slot*10 | 16 seated
+# 0 present | 1:4 rel*10 | 4:8 quat | 8:10 est slot yaw sin/cos | 10 outer size*50 | 11 zero
+# | 12 size | 13:16 slot*10 | 16 seated
 FEAT_PRESENT = 0
 FEAT_REL = slice(1, 4)
 FEAT_QUAT = slice(4, 8)
-FEAT_SHAPE = slice(8, 12)
+FEAT_SLOT_YAW = slice(8, 10)
+FEAT_OUTER = 10
 FEAT_SIZE = 12
 FEAT_SLOT = slice(13, 16)
 FEAT_SEATED = 16
@@ -64,6 +65,18 @@ def _hand_z(obs: np.ndarray) -> float:
 
 def _hand_yaw(obs: np.ndarray) -> float:
     return math.atan2(float(obs[3]), float(obs[4]))
+
+
+def _wrap(a: float) -> float:
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def _yaw_cmd(f: np.ndarray, gain: float = 0.6) -> float:
+    """Yaw command that turns the (estimated) peg yaw onto the (estimated) slot yaw."""
+    q = f[FEAT_QUAT]
+    peg_yaw = 2.0 * math.atan2(float(q[3]), float(q[0]))
+    slot_yaw = math.atan2(float(f[8]), float(f[9]))
+    return float(np.clip(gain * _wrap(slot_yaw - peg_yaw) / DYAW, -1, 1))
 
 
 @dataclass
@@ -116,7 +129,7 @@ class NearestFirstBaseline:
             a[0] = float(np.clip((slot_xy[0] - hand[0]) / DXYZ, -1, 1))
             a[1] = float(np.clip((slot_xy[1] - hand[1]) / DXYZ, -1, 1))
             a[2] = float(np.clip((0.07 - hand[2]) / DXYZ, -1, 1))
-            a[3] = float(np.clip(-12.5 * qz, -1, 1))
+            a[3] = _yaw_cmd(f)
             a[4] = -1.0
             if abs(slot_xy[0] - hand[0]) < 0.006 and abs(slot_xy[1] - hand[1]) < 0.006:
                 self.phase = "down"
@@ -129,7 +142,7 @@ class NearestFirstBaseline:
             a[0] = float(np.clip(-rel[0] / DXYZ, -1, 1))
             a[1] = float(np.clip(-rel[1] / DXYZ, -1, 1))
             a[2] = -0.85
-            a[3] = float(np.clip(-12.5 * qz, -1, 1))
+            a[3] = _yaw_cmd(f)
             a[4] = -1.0
             self.timer += 1
             if rel[2] < PEG_LEN / 2 - BLOCK_H + 0.005 or self.timer > 60:
@@ -253,7 +266,7 @@ class ObsOnlyScripted:
             a[0] = float(np.clip((slot_xy[0] - hand[0]) / DXYZ, -1, 1))
             a[1] = float(np.clip((slot_xy[1] - hand[1]) / DXYZ, -1, 1))
             a[2] = float(np.clip((0.07 - hand[2]) / DXYZ, -1, 1))
-            a[3] = float(np.clip(-12.5 * qz, -1, 1))
+            a[3] = _yaw_cmd(f)
             a[4] = -1.0
             if abs(slot_xy[0] - hand[0]) < 0.006 and abs(slot_xy[1] - hand[1]) < 0.006:
                 self.phase = "down"
@@ -285,7 +298,7 @@ class ObsOnlyScripted:
                     a[2] = -0.8
             else:
                 a[2] = -0.85
-            a[3] = float(np.clip(-12.5 * qz + 0.1 * math.sin(0.8 * self.timer), -1, 1))
+            a[3] = float(np.clip(_yaw_cmd(f) + 0.1 * math.sin(0.8 * self.timer), -1, 1))
             a[4] = -1.0
             self.timer += 1
             if (
@@ -486,8 +499,6 @@ class StrongScripted:
 
     def _clean_obs(self, e: Episode) -> np.ndarray:
         """Noise-free, unbiased observation from true state (privileged)."""
-        from .conditions import shape_one_hot
-
         d = e.data
         bx, by = e.c.board_xy
         hand = d.qpos[0:3].copy()
@@ -512,7 +523,7 @@ class StrongScripted:
                 [1.0],
                 prel * 10,
                 pquat,
-                shape_one_hot(peg.shape()),
+                [math.sin(e.slot_yaw[i]), math.cos(e.slot_yaw[i]), 2 * peg.spec.outer_radius() * 50, 0.0],
                 [peg.diameter() * 50],
                 [(hx - bx) * 10, (hy - by) * 10, BLOCK_H * 10],
                 [1.0 if e.seated_now[i] else 0.0],

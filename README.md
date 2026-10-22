@@ -5,12 +5,12 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.4.0** (multi-peg board). Same task, scoring, difficulty, simulator and
-> obs/action shapes as v0.3.0 (`[B, 184]` -> `[B, 5]`). Only the published per-episode
-> records changed: they use the `nist_lite_record/2` layout again (exact board pose and
-> clutter start poses for replays; `clearance` / `chamfer` are coarse stand-ins, not the
-> episode's true values). v0.3.0 introduced the observation hardening (estimate offsets
-> drawn independently per slot, per clutter block and per peg). `timeout_s` stays 1800 s.
+> Version: **v0.5.0** (generalization hardening). **Breaking change for policies:** the
+> board layout and peg shapes are now drawn per episode, and peg-table features 8–11 changed
+> meaning (no shape label; see the layout below). Input/output shapes are unchanged
+> (`[B, 184]` -> `[B, 5]`), scoring is unchanged, records stay `nist_lite_record/2` (with an
+> added per-episode `slots` list and peg `size`). Estimate offsets stay independent per slot,
+> clutter block and peg (v0.3.0). `timeout_s` stays 1800 s.
 
 ## Relation to AlphaNIST
 
@@ -29,20 +29,24 @@ competition). We borrow the board, the 1 mm success criterion, the 25 Hz control
 diverse start states, and free-order multi-part episodes. Neither project is real-robot
 evidence.
 
-**v0.2 requires learning.** A hand-coded controller that trusts the observation vector
+**Designed to require learning.** A hand-coded controller that trusts the observation vector
 cannot win: peg/slot channels carry per-episode pose-estimate offsets of several mm and
-degrees (independent per slot, clutter block and peg), plus noise and dropout. Wrist force/torque is provided so contact-driven search
-can adapt. Hex and D-flat keyed shapes are held out of live rounds.
+degrees (independent per slot, clutter block and peg), plus noise and dropout, and since
+v0.5.0 there is no fixed board layout or shape list to hard-code against. Wrist
+force/torque is provided so contact-driven search can adapt. Some cross-section
+families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.2.0)
+## The task (v0.5.0)
 
-- **Board:** one MuJoCo board per episode with 8 peg slots (round + square × 4/8/12/16 mm
-  live). Board pose `(x, y, yaw)` is jittered per episode. Held-out shape families
-  (hex, D-flat keyed) appear only on the reserved split.
+- **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
+  layout: slot positions (non-overlapping, anywhere on the board), slot yaw, and the peg
+  cross-section of each slot from continuous families (round, rectangle/square, regular
+  5/6/8-gon, D-flat) with inscribed size 4–16 mm. Board pose `(x, y, yaw)` is jittered per
+  episode. Held-out families appear only on the reserved split.
 - **Active pegs:** `K ∈ {3..6}` by stratum (mean 4.5). Pegs start loose upright, lying,
   in a tray/cluster, near-hole, or (at most one) pre-grasped.
 - **Free order:** the policy chooses the sequence. Each peg must go into its **matching**
-  slot (shape + size). Wrong slot = 0. A seated peg later knocked out = 0 at episode end.
+  slot (its own row in the peg table). Wrong slot = 0. A seated peg later knocked out = 0 at episode end.
 - **Clutter:** 0–3 free distractor blocks; sometimes blocking a slot approach.
 - **Fits:** radial clearance **0.25–0.8 mm** with variable entry chamfer (contact
   `solimp` width 0.02 mm). Tight fits need wiggle / spiral search.
@@ -71,8 +75,11 @@ One ONNX file (opset 13–21, standard operators only, a single self-contained f
 2. **Last action (5).**
 3. **Peg table (8 × 17 = 136):** for each of 8 slot rows (inactive rows are zeros):
    presence; **biased/noisy** peg pose relative to **biased** slot estimate ×10 (3) +
-   quaternion (4); shape one-hot (round, square, hex, dflat); size ×50; biased slot
-   position relative to board ×10 (3); seated flag. Exact hole/peg poses are never given.
+   quaternion (4); **biased** slot-yaw estimate as `sin, cos` (2; a peg is aligned when its
+   yaw matches the slot yaw, modulo the unknown symmetry of its cross-section); outer
+   (circumscribed) size ×50 (1); a zero (1); inscribed size ×50 (1); biased slot position
+   relative to board ×10 (3); seated flag. No shape label. Exact hole/peg poses are never
+   given. Before v0.5.0, features 8–11 were a shape one-hot.
 4. **Clutter table (3 × 9 = 27):** presence; biased pose relative to board ×10 (3) +
    quaternion (4); size ×50.
 

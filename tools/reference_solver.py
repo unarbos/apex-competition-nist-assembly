@@ -63,6 +63,8 @@ class _PegCond:
     diameter: float
     hole_xy: tuple[float, float]
     reset_type: str
+    hole_yaw: float = 0.0
+    symmetry: int = 0  # rotational symmetry order of the cross-section (0 = round)
 
 
 class PegView:
@@ -78,6 +80,8 @@ class PegView:
             diameter=peg.diameter(),
             hole_xy=(hx, hy),
             reset_type=peg.start_type,
+            hole_yaw=float(ep.slot_yaw[peg_i]),
+            symmetry=int(peg.spec.symmetry()),
         )
         self.r_hole = ep.r_hole[peg_i]
         self.hole = np.array([hx, hy, BLOCK_H])
@@ -146,7 +150,13 @@ class ScriptedPeg:
         wall_z: float = 0.010,
         straighten_steps: int = 15,
         th_end_deg: float = 90.0,
+        search_amp: float = 0.0025,
+        search_steps: int = 200,
+        press_lead: float = 0.0025,
     ):
+        self.search_amp = search_amp
+        self.press_lead = press_lead
+        self.search_steps = search_steps
         self.th_end = math.radians(th_end_deg)
         self.straighten_steps = straighten_steps
         self.wall_z = wall_z
@@ -158,6 +168,12 @@ class ScriptedPeg:
         self.swing_grip = swing_grip
         self._sgn: float | None = None
         self.log: list = []
+
+    def _mark(self, phase) -> None:
+        """Expose the current phase to an episode proxy that asks for it (tools/obs_refport.py)."""
+        parent = getattr(self.e, "ep", None)
+        if parent is not None and hasattr(parent, "phase_flag"):
+            parent.phase_flag = phase
 
     def _act(self, goal_xyz=None, goal_yaw=None, grip=1.0, speed=None):
         e = self.e
@@ -205,22 +221,17 @@ class ScriptedPeg:
                     return
 
     def hole_yaw_target(self) -> float:
+        """Hand yaw that brings the part yaw onto the nearest symmetric hole yaw."""
         e = self.e
-        shape = e.c.shape
-        if shape == "round":
+        sym = int(getattr(e.c, "symmetry", 0))
+        if sym <= 0:
             return float(e.target[3])
         _, q = e.part_pose()
         py = part_yaw(q)
-        if shape == "hex":
-            # Align to nearest 60°.
-            err = wrap(-py)
-            err = (err + math.pi / 6) % (math.pi / 3) - math.pi / 6
-            return float(e.data.qpos[3] + err)
-        if shape in ("square", "dflat"):
-            err = wrap(-py)
-            err = (err + math.pi / 4) % (math.pi / 2) - math.pi / 4
-            return float(e.data.qpos[3] + err)
-        return float(e.target[3])
+        period = 2 * math.pi / sym
+        err = wrap(float(e.c.hole_yaw) - py)
+        err = (err + period / 2) % period - period / 2
+        return float(e.data.qpos[3] + err)
 
     def insert(self) -> Iterator[np.ndarray]:
         e = self.e
@@ -242,6 +253,7 @@ class ScriptedPeg:
         if dz_bottom < 0:
             yield from self.goto([None, None, e.target[2] - dz_bottom], grip=-1.0)
         # Refresh yaw once above the hole, then again just before the lip.
+        self._mark("insert")
         yaw = self.hole_yaw_target()
         for _ in range(140):
             o = part_off()
@@ -253,7 +265,7 @@ class ScriptedPeg:
             ):
                 break
         stuck = 0
-        for k in range(200):
+        for k in range(self.search_steps):
             p, _ = e.part_pose()
             o = part_off()
             bottom = p[2] - PEG_LEN / 2
@@ -263,7 +275,7 @@ class ScriptedPeg:
             wx = wy = wyaw = 0.0
             if bottom <= BLOCK_H + 0.0015 and bottom > 0.001:
                 stuck += 1
-                amp = min(0.0025, 0.0004 + 0.00008 * stuck)
+                amp = min(self.search_amp, 0.0004 + 0.00008 * stuck)
                 wx = amp * math.sin(stuck * 0.9)
                 wy = amp * math.cos(stuck * 0.7)
                 wyaw = 0.04 * math.sin(stuck * 0.5)
@@ -271,7 +283,9 @@ class ScriptedPeg:
                 stuck = 0
             sp = 0.7 if bottom > BLOCK_H + 0.003 else 0.35
             yield self._act(
-                [hx - o[0] + wx, hy - o[1] + wy, e.target[2] - 0.004],
+                # Cap the downward lead over the measured hand height so a blocked
+                # peg is pressed gently instead of the position target running away.
+                [hx - o[0] + wx, hy - o[1] + wy, max(e.target[2] - 0.004, e.data.qpos[2] - self.press_lead)],
                 yaw + wyaw,
                 -1.0,
                 speed=sp,
@@ -282,6 +296,7 @@ class ScriptedPeg:
             idx = getattr(e, "i", None)
             if parent is not None and idx is not None and parent.seated_now[idx]:
                 break
+        self._mark(None)
         yield from self.wait(8, grip=1.0)
         yield from self.goto([None, None, PEG_LEN + 0.03], grip=1.0, max_n=60)
         yield from self.wait(SEATED_HOLD + 8, grip=1.0)
@@ -290,7 +305,7 @@ class ScriptedPeg:
         e = self.e
         p, q = e.part_pose()
         yaw = float(e.data.qpos[3])
-        if e.c.shape in ("square", "hex", "dflat"):
+        if int(getattr(e.c, "symmetry", 0)) > 0:
             yaw = self.hole_yaw_target()
         top = p[2] + PEG_LEN / 2
         yield from self.goto([p[0], p[1], top + 0.01], yaw, 1.0)
@@ -475,6 +490,7 @@ def solve_episode(
     budget_per_peg: int | None = None,
     record: list | None = None,
     noise_rng: np.random.Generator | None = None,
+    script_kw: dict | None = None,
 ) -> dict:
     """Run the privileged solver on one Episode. Mutates ep in place.
 
@@ -515,7 +531,7 @@ def solve_episode(
             peg_budget = min(budget_per_peg, max(150, remaining // 2))
         else:
             peg_budget = min(budget_per_peg, remaining - 20)
-        script = ScriptedPeg(view, swing_grip=-1.0)
+        script = ScriptedPeg(view, swing_grip=-1.0, **(script_kw or {}))
         n0 = ep.steps
         for a in script.policy():
             if ep.done or ep.seated_now[peg_i]:
