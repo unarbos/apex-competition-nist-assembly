@@ -1,7 +1,8 @@
 """NIST-lite multi-peg board in MuJoCo (CPU).
 
-One episode is a full ATB-1-style peg board (8 slots, round / square live; hex and
-D-flat keyed families appear only on the held-out reserved split) with K in {3..6}
+One episode is a peg board with 8 slots whose positions, yaws, cross-section families
+(round / rect / n-gon / D-flat live; held-out families on the reserved split only) and
+sizes are drawn per episode, with K in {3..6}
 active pegs, 0–3 clutter blocks, and a 2-finger parallel gripper on a 4-DoF
 (x, y, z, yaw) Cartesian stage.
 
@@ -25,11 +26,9 @@ import numpy as np
 from .conditions import (
     MAX_CLUTTER,
     N_SLOTS,
-    SHAPE_NAMES,
-    SLOT_SPECS,
     EpisodeConditions,
     PegStart,
-    shape_one_hot,
+    SlotSpec,
     slot_world_xy,
 )
 
@@ -37,7 +36,9 @@ from .conditions import (
 # proprio (16) + last_action (5) + 8 pegs × 17 + 3 clutter × 9 = 184
 PROPRIO_DIM = 16  # hand xyz*10 (3), sin/cos yaw (2), vel (3), gap (1), force (3), torque (3), pad_f (1)
 ACT_DIM = 5
-PEG_FEAT = 17  # present, est_rel_pos*10 (3), quat (4), shape_oh (4), size*50, est_slot*10 (3), seated
+# present, est_rel_pos*10 (3), quat (4), est_slot_yaw sin/cos (2), outer_size*50, 0,
+# size*50, est_slot*10 (3), seated. v0.5: no shape label; slot yaw is an estimate.
+PEG_FEAT = 17
 CLUTTER_FEAT = 9  # present, pos*10 (3), quat (4), size*50
 MAX_PEGS = N_SLOTS
 OBS_DIM = PROPRIO_DIM + ACT_DIM + MAX_PEGS * PEG_FEAT + MAX_CLUTTER * CLUTTER_FEAT  # 184
@@ -80,6 +81,43 @@ TORQUE_SCALE = 0.5
 
 def _peg_shape(peg: PegStart) -> str:
     return peg.shape()
+
+
+def _poly_walls(poly: list[tuple[float, float]], clearance: float, z0: float, hz: float, prefix: str) -> list[str]:
+    """One box wall per edge of a convex polygon, inner face offset outward by ``clearance``."""
+    out = []
+    n = len(poly)
+    for k in range(n):
+        x0, y0 = poly[k]
+        x1, y1 = poly[(k + 1) % n]
+        ex, ey = x1 - x0, y1 - y0
+        L = math.hypot(ex, ey)
+        if L < 1e-6:
+            continue
+        nx, ny = ey / L, -ex / L  # outward normal for counter-clockwise order
+        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+        if nx * mx + ny * my < 0:
+            nx, ny = -nx, -ny
+        off = clearance + WALL_T / 2
+        cx, cy = mx + nx * off, my + ny * off
+        th = math.atan2(ny, nx)
+        out.append(
+            f'<geom name="{prefix}{k}" type="box" pos="{cx:.6f} {cy:.6f} {z0}" '
+            f'euler="0 0 {th:.6f}" size="{WALL_T / 2} {L / 2 + WALL_T * 0.5:.6f} {hz}" class="fixed"/>'
+        )
+    return out
+
+
+def _slot_walls(spec: SlotSpec, clearance: float, prefix: str, chamfer: float = 0.0) -> str:
+    """Hole walls for one slot (any family); upper lip slightly wider (entry funnel)."""
+    poly = spec.polygon()
+    if poly is None:
+        return _hole_walls("round", spec.r + clearance, prefix, chamfer=chamfer)
+    h2 = BLOCK_H / 2
+    funnel = 0.00015 + 0.0004 * float(np.clip(chamfer, 0.0, 1.0))
+    geoms = _poly_walls(poly, clearance, h2 * 0.7, h2 * 0.7, f"{prefix}_w")
+    geoms += _poly_walls(poly, clearance + funnel, BLOCK_H - h2 * 0.35, h2 * 0.35, f"{prefix}_lip")
+    return "\n".join(geoms)
 
 
 def _hole_walls(shape: str, r_hole: float, prefix: str, chamfer: float = 0.0) -> str:
@@ -152,6 +190,26 @@ def _hole_walls(shape: str, r_hole: float, prefix: str, chamfer: float = 0.0) ->
     return "\n".join(geoms)
 
 
+def _peg_mesh_asset(spec: SlotSpec, name: str) -> str:
+    poly = spec.polygon()
+    if poly is None or spec.shape == "rect":
+        return ""
+    half = PEG_LEN / 2
+    verts = " ".join(f"{x:.6f} {y:.6f} {z}" for z in (-half, half) for x, y in poly)
+    return f'<mesh name="{name}_mesh" vertex="{verts}"/>'
+
+
+def _spec_peg_geoms(spec: SlotSpec, name: str) -> str:
+    half = PEG_LEN / 2
+    r = spec.r
+    if spec.shape == "round":
+        return f'<geom name="{name}" type="cylinder" size="{r} {half}" class="part"/>'
+    if spec.shape == "rect":
+        ax = r * float(spec.params.get("aspect", 1.0))
+        return f'<geom name="{name}" type="box" size="{ax:.6f} {r:.6f} {half}" class="part"/>'
+    return f'<geom name="{name}" type="mesh" mesh="{name}_mesh" class="part"/>'
+
+
 def _peg_geoms(shape: str, r: float, name: str) -> str:
     half = PEG_LEN / 2
     if shape == "square":
@@ -179,15 +237,12 @@ def _peg_geoms(shape: str, r: float, name: str) -> str:
     return f'<geom name="{name}" type="cylinder" size="{r} {half}" class="part"/>'
 
 
-def _board_holes_xml(clearance: float, chamfer: float, overrides: dict[int, str] | None = None) -> str:
+def _board_holes_xml(slots: list[SlotSpec], clearance: float, chamfer: float) -> str:
     parts = []
-    overrides = overrides or {}
-    for i, (shape, dia, lx, ly) in enumerate(SLOT_SPECS):
-        shape = overrides.get(i, shape)
-        r_hole = dia / 2 + clearance
+    for i, sp in enumerate(slots):
         parts.append(
-            f'<body name="hole_{i}" pos="{lx} {ly} 0">\n'
-            f"{_hole_walls(shape, r_hole, f'h{i}', chamfer=chamfer)}\n</body>"
+            f'<body name="hole_{i}" pos="{sp.x:.6f} {sp.y:.6f} 0" euler="0 0 {sp.yaw:.6f}">\n'
+            f"{_slot_walls(sp, clearance, f'h{i}', chamfer=chamfer)}\n</body>"
         )
     return "\n".join(parts)
 
@@ -198,15 +253,12 @@ def build_xml(c: EpisodeConditions) -> str:
     kv = 2 * math.sqrt(kp * 0.6)
     bx, by = c.board_xy
     byaw = c.board_yaw
-    # Per-slot shape overrides for held-out D-flat pegs.
-    hole_overrides = {peg.slot: peg.shape() for peg in c.pegs if peg.shape_override}
-
+    meshes = []
     peg_bodies = []
     for i, peg in enumerate(c.pegs):
-        shape = peg.shape()
-        dia = peg.diameter()
-        r = dia / 2
-        geom = _peg_geoms(shape, r, f"peg{i}")
+        r = peg.spec.outer_radius()
+        geom = _spec_peg_geoms(peg.spec, f"peg{i}")
+        meshes.append(_peg_mesh_asset(peg.spec, f"peg{i}"))
         peg_bodies.append(
             f"""
     <body name="peg{i}" pos="0 0 0.15">
@@ -239,6 +291,7 @@ def build_xml(c: EpisodeConditions) -> str:
 <mujoco model="nist_lite_board">
   <compiler angle="radian" autolimits="true"/>
   <option timestep="{PHYSICS_DT}" cone="elliptic" impratio="10" integrator="implicitfast"/>
+  <asset>{"".join(meshes)}</asset>
   <default>
     <geom friction="{c.friction} 0.01 0.001" solref="0.002 1" solimp="{SOLIMP}"/>
     <default class="fixed"><geom contype="1" conaffinity="2" rgba="0.5 0.5 0.55 1"/></default>
@@ -249,7 +302,7 @@ def build_xml(c: EpisodeConditions) -> str:
   <worldbody>
     <body name="board" pos="{bx} {by} 0" euler="0 0 {byaw}">
       <geom name="board_top" type="box" pos="0 0 -0.005" size="0.22 0.18 0.005" class="fixed"/>
-      {_board_holes_xml(c.clearance, c.chamfer, hole_overrides)}
+      {_board_holes_xml(c.slots, c.clearance, c.chamfer)}
     </body>
     <body name="hand" pos="0 0 0" gravcomp="1">
       <joint name="jx" type="slide" axis="1 0 0" damping="{kv}" range="-0.28 0.28"/>
@@ -336,8 +389,9 @@ class Episode:
             mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, n) for n in ("hand", "fl", "fr")
         }
         self.slot_xy = [
-            slot_world_xy(cond.board_xy, cond.board_yaw, peg.slot) for peg in cond.pegs
+            slot_world_xy(cond.board_xy, cond.board_yaw, peg.spec) for peg in cond.pegs
         ]
+        self.slot_yaw = [float(cond.board_yaw + peg.spec.yaw) for peg in cond.pegs]
         self.r_hole = [
             peg.diameter() / 2 + cond.clearance for peg in cond.pegs
         ]
@@ -381,6 +435,10 @@ class Episode:
             self._clutter_bias_xy = np.array(cond.clutter_bias_list, dtype=float)
         else:
             self._clutter_bias_xy = np.tile(np.array(cond.pose_bias_xy, dtype=float), (max(1, self.n_clutter), 1))
+        if getattr(cond, 'peg_yaw_delta_list', None):
+            self._slot_yaw_delta = np.array(cond.peg_yaw_delta_list, dtype=float)
+        else:
+            self._slot_yaw_delta = np.zeros(max(1, self.n_pegs))
         self._pose_bias_yaw = float(cond.pose_bias_yaw)  # retained for compatibility
         self._bias_drift = float(cond.bias_drift)
         self._backlash = float(cond.backlash)
@@ -419,7 +477,7 @@ class Episode:
 
     # ---- reset ---------------------------------------------------------------
     def _slot_origin(self, peg: PegStart) -> tuple[float, float]:
-        return slot_world_xy(self.c.board_xy, self.c.board_yaw, peg.slot)
+        return slot_world_xy(self.c.board_xy, self.c.board_yaw, peg.spec)
 
     def _place_peg(self, i: int, peg: PegStart) -> None:
         hx, hy = self._slot_origin(peg)
@@ -428,9 +486,8 @@ class Episode:
         c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
         wx = hx + c * ox - s * oy
         wy = hy + s * ox + c * oy
-        dia = peg.diameter()
-        r = dia / 2
-        yaw = peg.yaw_err + self.c.board_yaw
+        r = peg.spec.outer_radius()
+        yaw = peg.yaw_err + self.c.board_yaw + peg.spec.yaw
         if peg.start_type == "lying":
             self._set_free(self.peg_qadr[i], self.peg_vadr[i], [wx, wy, r + 1e-4], _lying_quat(yaw))
         elif peg.start_type == "grasped":
@@ -469,12 +526,12 @@ class Episode:
             i = grasped[0]
             peg = c.pegs[i]
             ppos, _ = self.peg_pose(i)
-            r = peg.diameter() / 2
+            r = peg.spec.half_width_y()
             open_frac = min(1.0, (r + 0.0005) / MAX_OPEN)
             finger_z = PEG_LEN / 2 - 0.008
             self._set_hand(
                 [ppos[0], ppos[1], ppos[2] + finger_z - PAD_CENTRE_Z],
-                peg.yaw_err + c.board_yaw,
+                peg.yaw_err + c.board_yaw + peg.spec.yaw,
                 open_frac,
             )
             settle_grip = 0.0
@@ -593,8 +650,7 @@ class Episode:
         for i, peg in enumerate(self.c.pegs):
             if peg.start_type == "grasped":
                 continue
-            shape, dia, _, _ = SLOT_SPECS[peg.slot]
-            r = dia / 2
+            r = peg.spec.outer_radius()
             row, col = divmod(i, 3)
             wx = bx - 0.06 + 0.06 * col
             wy = by - 0.12 + 0.04 * row
@@ -766,14 +822,19 @@ class Episode:
             hx_e = hx + self._slot_bias_xy[i][0] + float(noise_rng.normal(0, self.c.obs_noise))
             hy_e = hy + self._slot_bias_xy[i][1] + float(noise_rng.normal(0, self.c.obs_noise))
             prel = np.array([ppos_n[0] - hx_e, ppos_n[1] - hy_e, ppos_n[2] - BLOCK_H])
-            shape = peg.shape()
-            dia = peg.diameter()
+            # Slot yaw estimate: slot bias plus a per-peg residual vs the peg yaw channel.
+            syaw = (
+                self.slot_yaw[i]
+                + float(self._slot_bias_yaw[i])
+                + float(self._slot_yaw_delta[i])
+                + float(noise_rng.normal(0, self.c.obs_noise_rad))
+            )
             feat = np.concatenate([
                 [1.0],
                 prel * 10,
                 pquat_n,
-                shape_one_hot(shape),
-                [dia * 50],
+                [math.sin(syaw), math.cos(syaw), 2 * peg.spec.outer_radius() * 50, 0.0],
+                [peg.diameter() * 50],
                 [(hx_e - bx) * 10, (hy_e - by) * 10, BLOCK_H * 10],
                 [1.0 if self.seated_now[i] else 0.0],
             ])

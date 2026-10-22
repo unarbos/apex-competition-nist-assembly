@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -49,6 +50,29 @@ from reference_solver import solve_episode  # noqa: E402
 
 DEVICE = torch.device("cpu")
 RESIDUAL_SCALE = 0.30
+INIT_LOG_STD = -2.5
+PRIV_SHAPING = False
+STD_MAX = 0.2
+
+
+def _insert_potential(e) -> float:
+    """Privileged training-time shaping (simulator state; the policy never sees it):
+    seated pegs count 1, unseated pegs count by how far their tip is down inside their own
+    hole, weighted by how well centred they are."""
+    from nist_sim.env import BLOCK_H, PEG_LEN  # noqa: PLC0415
+
+    phi = 0.0
+    for i in range(e.n_pegs):
+        if e.seated_now[i]:
+            phi += 1.0
+            continue
+        p, _ = e.peg_pose(i)
+        hx, hy = e.slot_xy[i]
+        xy = float(np.hypot(p[0] - hx, p[1] - hy))
+        bottom = float(p[2] - PEG_LEN / 2)
+        depth = float(np.clip((BLOCK_H + 0.004 - bottom) / (BLOCK_H + 0.004), 0.0, 1.0))
+        phi += 0.5 * math.exp(-xy / 0.003) * (0.3 + 0.7 * depth) if bottom < BLOCK_H + 0.02 else 0.0
+    return phi
 
 
 def _clearance_bin(c: float) -> str:
@@ -114,7 +138,7 @@ class ResidualNet(nn.Module):
             nn.Tanh(),
         )
         self.mu = nn.Linear(hidden, act_dim)
-        self.log_std = nn.Parameter(torch.full((act_dim,), -2.5))
+        self.log_std = nn.Parameter(torch.full((act_dim,), float(INIT_LOG_STD)))
         self.v = nn.Linear(hidden, 1)
         # Near-zero residual at init → warm score ≈ scripted.
         nn.init.zeros_(self.mu.weight)
@@ -132,7 +156,7 @@ class ResidualNet(nn.Module):
             if deterministic:
                 a = mu
             else:
-                a = Normal(mu, log_std.exp().clamp(1e-3, 0.2)).sample()
+                a = Normal(mu, log_std.exp().clamp(1e-3, STD_MAX)).sample()
             a = a.squeeze(0).clamp(-1, 1)
         return a.cpu().numpy().astype(np.float64)
 
@@ -195,7 +219,7 @@ def _light_distill(net: ResidualNet, X: np.ndarray, Y: np.ndarray, epochs: int =
 
 def _rollout_worker(args):
     """Spawn worker — late imports required for ProcessPoolExecutor safety."""
-    weights, n_steps, seed, stage_bias, root = args
+    weights, n_steps, seed, stage_bias, root, base_kind = args
     sys.path.insert(0, root)
     sys.path.insert(0, str(Path(root) / "referee"))
     sys.path.insert(0, str(Path(root) / "tools"))
@@ -210,6 +234,11 @@ def _rollout_worker(args):
         _shaped_reward as _rew,
     )
 
+    _torch.set_num_threads(1)
+    import train_ppo as _tp  # noqa: PLC0415
+
+    _tp.PRIV_SHAPING = os.environ.get("NIST_PPO_PRIV_SHAPING") == "1"
+    _tp.STD_MAX = float(os.environ.get("NIST_PPO_STD_MAX", _tp.STD_MAX))
     net = _Net()
     net.load_state_dict(weights)
     net.eval()
@@ -233,6 +262,10 @@ def _rollout_worker(args):
         ss = np.random.SeedSequence([int(seed), 0x5050, int(ep_i)])
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
         e = _Episode(c, r1)
+        if base_kind == "refport":
+            steps = _refport_rollout(net, e, c, r2, n_steps, steps, obs_l, act_l, logp_l, rew_l, val_l, done_l, ep_scores)
+            ep_i += 1
+            continue
         scripted = _Scripted()
         prev = None
         prev_seated = [False] * e.n_pegs
@@ -242,7 +275,7 @@ def _rollout_worker(args):
             x = _torch.as_tensor(o, dtype=_torch.float32).unsqueeze(0)
             with _torch.no_grad():
                 mu, log_std, v = net.forward(x)
-                dist = _torch.distributions.Normal(mu, log_std.exp().clamp(1e-3, 0.2))
+                dist = _torch.distributions.Normal(mu, log_std.exp().clamp(1e-3, STD_MAX))
                 resid_t = dist.sample()
                 logp = dist.log_prob(resid_t).sum(-1)
                 resid = resid_t.squeeze(0).clamp(-1, 1).numpy()
@@ -284,11 +317,70 @@ def _rollout_worker(args):
     }
 
 
-def _parallel_collect(net: ResidualNet, n_steps: int, workers: int, seed: int, stage_bias: float):
+class _StopRollout(Exception):
+    pass
+
+
+def _refport_rollout(net, e, c, r2, n_steps, steps, obs_l, act_l, logp_l, rew_l, val_l, done_l, ep_scores):
+    """One episode of residual PPO on top of the obs-only refport controller."""
+    from obs_refport import solve_obs_episode  # noqa: PLC0415
+    from nist_sim.scoring import episode_score as _score  # noqa: PLC0415
+
+    st = {"steps": steps, "prev": None, "prev_seated": [False] * e.n_pegs, "o": None, "phi": _insert_potential(e)}
+
+    def act_hook(o, base):
+        if st["steps"] >= n_steps:
+            raise _StopRollout
+        x = torch.as_tensor(o, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            mu, log_std, v = net.forward(x)
+            dist = Normal(mu, log_std.exp().clamp(1e-3, STD_MAX))
+            resid_t = dist.sample()
+            logp = dist.log_prob(resid_t).sum(-1)
+        resid = resid_t.squeeze(0).clamp(-1, 1).numpy()
+        obs_l.append(np.asarray(o, np.float64))
+        act_l.append(resid.astype(np.float32))
+        logp_l.append(float(logp.item()))
+        val_l.append(float(v.item()))
+        st["o"] = o
+        st["resid"] = resid
+        return _combine(base, resid)
+
+    def post_hook(nxt, done):
+        if PRIV_SHAPING:
+            phi = _insert_potential(e)
+            r = 6.0 * (phi - st["phi"]) + 8.0 * sum(1 for a, b in zip(st["prev_seated"], e.seated_now) if b and not a)
+            st["phi"] = phi
+        else:
+            r = _shaped_reward(nxt, st["prev"], e.seated_now, st["prev_seated"])
+        r -= 0.02 * float(np.sum(st["resid"] ** 2))
+        if done:
+            sc = _score(e.peg_seated_at_end(), e.peg_first_seat_steps(), c.max_steps, e.action_l2 / max(1, e.steps))
+            r += 18.0 * sc
+            ep_scores.append(sc)
+        rew_l.append(r)
+        done_l.append(float(done))
+        st["prev"] = st["o"]
+        st["prev_seated"] = list(e.seated_now)
+        st["steps"] += 1
+
+    try:
+        solve_obs_episode(e, r2, act_hook=act_hook, post_hook=post_hook)
+    except _StopRollout:
+        pass
+    # Drop a dangling transition without a reward (stop inside a step).
+    n = min(len(obs_l), len(rew_l))
+    del obs_l[n:], act_l[n:], logp_l[n:], val_l[n:]
+    if done_l and len(done_l) == n and st["steps"] >= n_steps:
+        done_l[-1] = 1.0
+    return st["steps"]
+
+
+def _parallel_collect(net: ResidualNet, n_steps: int, workers: int, seed: int, stage_bias: float, base_kind: str = "obs"):
     weights = net.state_dict_cpu()
     per = max(256, n_steps // max(1, workers))
     root = str(ROOT)
-    args = [(weights, per, seed + 17 * w, stage_bias, root) for w in range(workers)]
+    args = [(weights, per, seed + 17 * w, stage_bias, root, base_kind) for w in range(workers)]
     if workers <= 1:
         parts = [_rollout_worker(args[0])]
     else:
@@ -331,7 +423,7 @@ def _ppo_update(net, opt, batch, epochs: int = 4, l2_coef: float = 0.02):
         for s in range(0, n, 512):
             b = idx[s : s + 512]
             mu, log_std, v = net.forward(obs[b])
-            dist = Normal(mu, log_std.exp().clamp(1e-3, 0.2))
+            dist = Normal(mu, log_std.exp().clamp(1e-3, STD_MAX))
             logp = dist.log_prob(acts[b]).sum(-1)
             ratio = (logp - old_logp[b]).exp()
             surr1 = ratio * adv_t[b]
@@ -391,6 +483,48 @@ def _eval_policy(act_fn, seeds, per=2) -> dict:
     }
 
 
+def _eval_worker(args):
+    weights, base_kind, use_resid, seed, per, i, root = args
+    sys.path[:0] = [str(Path(root) / "referee"), str(Path(root) / "tools")]
+    from nist_sim.conditions import sample_episodes as _sample  # noqa: PLC0415
+    from nist_sim.env import Episode as _Episode  # noqa: PLC0415
+    from nist_sim.policies import ObsOnlyScripted as _Scripted  # noqa: PLC0415
+    from nist_sim.scoring import episode_score as _score  # noqa: PLC0415
+
+    torch.set_num_threads(1)
+    net = ResidualNet()
+    net.load_state_dict(weights)
+    net.eval()
+    _, conds = _sample(seed, per)
+    c = conds[i]
+    ss = np.random.SeedSequence([seed, 0x5245, i])
+    r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
+    e = _Episode(c, r1)
+    if base_kind == "refport":
+        from obs_refport import solve_obs_episode  # noqa: PLC0415
+
+        hook = (lambda o, b: _combine(b, net.residual(o, deterministic=True))) if use_resid else None
+        return solve_obs_episode(e, r2, act_hook=hook)["score"], c.difficulty_tier
+    pol = _Scripted()
+    while not e.done:
+        o = e.observe(r2).astype(np.float64)
+        b = np.clip(pol.act(o), -1, 1)
+        e.step(_combine(b, net.residual(o, deterministic=True)) if use_resid else b)
+    return _score(e.peg_seated_at_end(), e.peg_first_seat_steps(), c.max_steps, e.action_l2 / max(1, e.steps)), c.difficulty_tier
+
+
+def eval_parallel(net, base_kind: str, use_resid: bool, seeds, per: int, workers: int) -> dict:
+    w = net.state_dict_cpu()
+    jobs = [(w, base_kind, use_resid, s, per, i, str(ROOT)) for s in seeds for i in range(8 * per)]
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        res = list(pool.map(_eval_worker, jobs))
+    sc = [r[0] for r in res]
+    tiers = defaultdict(list)
+    for v, t in res:
+        tiers[t].append(v)
+    return {"mean": float(np.mean(sc)), "scores": sc, "n": len(sc), "by_tier": {k: round(float(np.mean(v)), 4) for k, v in sorted(tiers.items())}}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--steps", type=int, default=100_000)
@@ -398,11 +532,30 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--eval-every", type=int, default=8_000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--base", choices=("obs", "refport"), default="obs",
+                    help="scripted base controller under the residual")
+    ap.add_argument("--eval-seeds", type=int, nargs="+", default=[0, 1, 2])
+    ap.add_argument("--eval-per", type=int, default=2)
+    ap.add_argument("--final-seeds", type=int, nargs="+", default=[100, 101, 102, 103, 104])
+    ap.add_argument("--final-per", type=int, default=4)
+    ap.add_argument("--demos", type=int, default=12_000, help="0 = no privileged residual demos")
+    ap.add_argument("--out", default=str(ROOT / "out"))
+    ap.add_argument("--parallel-eval", action="store_true", help="paired parallel eval (default for refport)")
+    ap.add_argument("--priv-shaping", action="store_true", help="privileged insertion-potential reward (training only)")
+    ap.add_argument("--init-log-std", type=float, default=-2.5)
+    ap.add_argument("--std-max", type=float, default=0.2)
+    ap.add_argument("--lr", type=float, default=3e-4)
     a = ap.parse_args()
+    global INIT_LOG_STD, STD_MAX, PRIV_SHAPING
+    INIT_LOG_STD, STD_MAX, PRIV_SHAPING = a.init_log_std, a.std_max, a.priv_shaping
+    os.environ["NIST_PPO_PRIV_SHAPING"] = "1" if a.priv_shaping else "0"
+    os.environ["NIST_PPO_STD_MAX"] = str(a.std_max)
+    if a.base == "refport" or a.parallel_eval:
+        return _main_parallel(a)
 
     net = ResidualNet().to(DEVICE)
     print("collecting small privileged residual demos…", flush=True)
-    X, Y = _collect_residual_demos(12_000)
+    X, Y = _collect_residual_demos(a.demos)
     print("light residual distill…", flush=True)
     _light_distill(net, X, Y)
     opt = torch.optim.Adam(net.parameters(), lr=3e-4)
@@ -490,6 +643,50 @@ def main() -> int:
     )
     torch.save(best_state, ROOT / "out" / "ppo_policy.pt")
     print("wrote", out, flush=True)
+    print(f"total wall={time.time()-t0:.0f}s", flush=True)
+    return 0
+
+
+def _main_parallel(a) -> int:
+    """Residual PPO on the refport base with parallel paired evaluation."""
+    torch.manual_seed(a.seed)
+    net = ResidualNet().to(DEVICE)
+    if a.base == "obs" and a.demos > 0:
+        X, Y = _collect_residual_demos(a.demos)
+        _light_distill(net, X, Y)
+    opt = torch.optim.Adam(net.parameters(), lr=a.lr)
+    t0 = time.time()
+    warm = eval_parallel(net, a.base, True, a.eval_seeds, a.eval_per, a.workers)
+    print(f"START live={warm['mean']:.4f} tiers={warm['by_tier']}", flush=True)
+    curve = [{"step": 0, "live": warm["mean"]}]
+    best_live, best_state = warm["mean"], net.state_dict_cpu()
+    total = 0
+    while total < a.steps:
+        frac = total / max(1, a.steps)
+        stage_bias = max(0.25, 0.85 - 0.5 * frac)
+        batch = _parallel_collect(net, a.rollout, a.workers, a.seed + total, stage_bias, a.base)
+        _ppo_update(net, opt, batch, l2_coef=0.03 * (1.0 - 0.5 * frac))
+        total += batch["obs"].shape[0]
+        if total // a.eval_every > (total - batch["obs"].shape[0]) // a.eval_every:
+            live = eval_parallel(net, a.base, True, a.eval_seeds, a.eval_per, a.workers)
+            curve.append({"step": total, "live": live["mean"]})
+            if live["mean"] > best_live:
+                best_live, best_state = live["mean"], net.state_dict_cpu()
+            print(f"step={total} live={live['mean']:.4f} tiers={live['by_tier']} train_ep={batch['ep_mean']:.4f} "
+                  f"best={best_live:.4f} wall={time.time()-t0:.0f}s", flush=True)
+    net.load_state_dict(best_state)
+    fin = eval_parallel(net, a.base, True, a.final_seeds, a.final_per, a.workers)
+    ref = eval_parallel(net, a.base, False, a.final_seeds, a.final_per, a.workers)
+    d = np.array(fin["scores"]) - np.array(ref["scores"])
+    se = float(d.std(ddof=1) / math.sqrt(len(d)))
+    print(f"FINAL ppo={fin['mean']:.4f} {a.base}={ref['mean']:.4f} delta={d.mean():+.4f} (paired se {se:.4f}, n={len(d)}) "
+          f"ppo_tiers={fin['by_tier']} base_tiers={ref['by_tier']}", flush=True)
+    print("curve_live:", [(c["step"], round(c["live"], 4)) for c in curve], flush=True)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    np.savez(out / f"ppo_{a.base}_curve.npz", steps=np.array([c["step"] for c in curve]),
+             live=np.array([c["live"] for c in curve]), final_ppo=fin["mean"], final_base=ref["mean"])
+    torch.save(best_state, out / f"ppo_{a.base}_policy.pt")
     print(f"total wall={time.time()-t0:.0f}s", flush=True)
     return 0
 

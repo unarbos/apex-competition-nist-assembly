@@ -26,7 +26,7 @@ import numpy as np
 from gym_v1.client import PlayerClient, PlayerError
 from gym_v1.referee import GameResult, Referee, RefereeContext
 
-from nist_sim.conditions import SLOT_SPECS, episode_seed_sequence, sample_episodes
+from nist_sim.conditions import episode_seed_sequence, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
 from nist_sim.scoring import episode_score, raw_score_from_episodes
 
@@ -229,8 +229,9 @@ class NistLiteReferee(Referee):
             c = r["conditions"]
             by_k.setdefault(f'k{c["n_pegs"]}', []).append(float(r["score"]))
             for peg, seated in zip(c["pegs"], r["peg_seated_at_end"]):
-                shape, dia, _, _ = SLOT_SPECS[peg["slot"]]
-                key = f"{shape}_{round(dia * 1000)}mm"
+                dia = float(peg["size"])
+                size_class = "small" if dia < 0.008 else "medium" if dia < 0.012 else "large"
+                key = f"{peg['shape']}_{size_class}"
                 by_size.setdefault(key, []).append(int(seated))
 
         summary = [
