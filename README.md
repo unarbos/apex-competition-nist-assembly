@@ -137,3 +137,4 @@ cat out/result.json; docker rm -f nist-player; docker network rm nist-net
 | `tools/` | `local_run.py`, `read_records.py`, `make_policies.py`, `calibrate.py` |
 | `tests/` | Integration tests (`pytest -q tests/`) |
 | `CALIBRATION.md` | Junk / baseline / privileged reference numbers across seeds |
+| `docs/` | Apex competition description (`description.md`) and docs page text (`competition.md`) |
