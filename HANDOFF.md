@@ -14,10 +14,10 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.5.0` | ☑ |
-| `spec.yaml` version `0.5.0`, v0.5.0 digests pinned | `spec.yaml` | ☑ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:96798960c2d3648a65582ab5a405bd49a88d4828200e40e4eb752ca9b2778fcc` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:19ac6a3edfc22a492e5fb2924da05646bc60e95d1f705b33fe682b6be469d0e1` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.5.1` | ☑ |
+| `spec.yaml` version `0.5.1`, v0.5.1 digests pinned | `spec.yaml` | ☑ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:b1724099a7a39c5e6cbf69107e6e30a571a305af017e38d7b7f20126ed561966` | ☑ |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:7d83da82b0bc90d88a163ab6c93da9e637d1ea6967c47d991ea92e1d5fa40064` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
@@ -25,7 +25,7 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 39777234609 (tag `v0.5.0`), both cosign-verified.
+onnxruntime 1.31.0. Image digests from release run 41125321583 (tag `v0.5.1`), both cosign-verified.
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
