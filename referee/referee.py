@@ -1,4 +1,4 @@
-"""nist_lite REFEREE: multi-peg board simulation and scoring (v0.4.0).
+"""nist_lite REFEREE: multi-peg board simulation and scoring (v0.5.1).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the

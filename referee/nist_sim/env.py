@@ -24,6 +24,10 @@ import mujoco
 import numpy as np
 
 from .conditions import (
+    GLITCH_LEN,
+    GLITCH_NOISE_GAIN,
+    GLITCH_OFFSET,
+    LAYOUT_WALL,
     MAX_CLUTTER,
     N_SLOTS,
     EpisodeConditions,
@@ -343,6 +347,16 @@ def build_xml(c: EpisodeConditions) -> str:
 """
 
 
+def grasp_hand_yaw(yaw: float) -> float:
+    """Hand yaw for a pre-grasped peg, wrapped into [-pi/2, pi/2].
+
+    The 2-finger gripper is symmetric under a half turn, so the same grasp is
+    reachable inside the yaw joint range (±3.2 rad) and the ±3.1 command clip
+    even when the slot yaw is near ±pi (v0.5.1).
+    """
+    return float((yaw + math.pi / 2) % math.pi - math.pi / 2)
+
+
 def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     out = np.zeros(4)
     mujoco.mju_mulQuat(out, q1, q2)
@@ -446,6 +460,12 @@ class Episode:
         self._wrist_force = np.zeros(3)
         self._wrist_torque = np.zeros(3)
         self._pad_force = 0.0
+        # Estimate glitch bursts (v0.5.1): remaining steps and per-object offsets.
+        self._glitch_rate = float(getattr(cond, "glitch_rate", 0.0))
+        self._glitch_left = 0
+        self._glitch_peg = np.zeros((max(1, self.n_pegs), 2))
+        self._glitch_slot = np.zeros((max(1, self.n_pegs), 2))
+        self._glitch_clutter = np.zeros((max(1, self.n_clutter), 2))
         self._reset()
 
     # ---- hand / part helpers -------------------------------------------------
@@ -531,7 +551,7 @@ class Episode:
             finger_z = PEG_LEN / 2 - 0.008
             self._set_hand(
                 [ppos[0], ppos[1], ppos[2] + finger_z - PAD_CENTRE_Z],
-                peg.yaw_err + c.board_yaw + peg.spec.yaw,
+                grasp_hand_yaw(peg.yaw_err + c.board_yaw + peg.spec.yaw),
                 open_frac,
             )
             settle_grip = 0.0
@@ -634,7 +654,14 @@ class Episode:
             if peg.start_type == "grasped":
                 continue
             ang = 2 * math.pi * i / max(1, self.n_pegs)
-            # Place in board corners relative to each hole, short radial offset.
+            # Short radial offset from the peg's own hole; v0.5.1 rotates the spot
+            # until it clears every slot (a free peg must not start in another hole).
+            for k in range(24):
+                a = ang + k * (2 * math.pi / 24)
+                off = (0.055 * math.cos(a), 0.055 * math.sin(a))
+                if self._board_spot_clear(peg.spec.x + off[0], peg.spec.y + off[1], peg.spec.outer_radius()):
+                    ang = a
+                    break
             peg.offset_xy = (0.055 * math.cos(ang), 0.055 * math.sin(ang))
             if peg.start_type == "lying":
                 peg.yaw_err = ang + math.pi / 2  # long axis tangential to radial
@@ -647,13 +674,12 @@ class Episode:
     def _teleport_safe_grid(self) -> None:
         """Last-resort: snap free parts onto a clear grid on the board and freeze."""
         bx, by = self.c.board_xy
+        cells = self._clear_grid_cells()
         for i, peg in enumerate(self.c.pegs):
             if peg.start_type == "grasped":
                 continue
             r = peg.spec.outer_radius()
-            row, col = divmod(i, 3)
-            wx = bx - 0.06 + 0.06 * col
-            wy = by - 0.12 + 0.04 * row
+            wx, wy = cells[i % len(cells)]
             if peg.start_type == "lying":
                 self._set_free(
                     self.peg_qadr[i],
@@ -691,6 +717,33 @@ class Episode:
         for i in range(self.n_clutter):
             self.data.qvel[self.clutter_vadr[i] : self.clutter_vadr[i] + 6] = 0
         mujoco.mj_forward(self.model, self.data)
+
+    def _board_spot_clear(self, lx: float, ly: float, peg_outer: float, margin: float = 0.002) -> bool:
+        """Board-local spot clears every slot's outer wall (v0.5.1 spawn check)."""
+        for sp in self.c.slots:
+            need = sp.outer_radius() + 0.0012 + LAYOUT_WALL + peg_outer + margin
+            if math.hypot(lx - sp.x, ly - sp.y) < need:
+                return False
+        return True
+
+    def _clear_grid_cells(self) -> list[tuple[float, float]]:
+        """World-frame teleport cells that clear every slot (fallback: the legacy grid)."""
+        bx, by = self.c.board_xy
+        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+        legacy = [(bx - 0.06 + 0.06 * col, by - 0.12 + 0.04 * row) for row in range(2) for col in range(3)]
+        out = []
+        po = max((p.spec.outer_radius() for p in self.c.pegs), default=0.008)
+        for gy in np.arange(-0.13, 0.131, 0.026):
+            for gx in np.arange(-0.15, 0.151, 0.03):
+                wx, wy = bx + gx, by + gy
+                # world -> board-local
+                lx = c * (wx - bx) + s * (wy - by)
+                ly = -s * (wx - bx) + c * (wy - by)
+                if self._board_spot_clear(lx, ly, po, 0.003) and all(
+                    math.hypot(wx - ox, wy - oy) >= 0.026 for ox, oy in out
+                ):
+                    out.append((float(wx), float(wy)))
+        return out if len(out) >= self.n_pegs else legacy
 
     def _reset(self) -> None:
         for attempt in range(MAX_SPAWN_ATTEMPTS):
@@ -734,13 +787,45 @@ class Episode:
             and self._upright(pquat)
         )
 
-    def _noisy_pose(self, pos, quat, noise_rng, bias_xy: np.ndarray | None = None, yaw_bias: float = 0.0):
+    def _glitch_step(self, noise_rng: np.random.Generator) -> float:
+        """Advance the estimate-glitch burst state; returns the noise gain for this step.
+
+        A burst adds extra pose noise and an independent transient offset to every
+        peg / slot / clutter estimate for a few control steps (v0.5.1).
+        """
+        if self._glitch_rate <= 0.0:
+            return 1.0
+        if self._glitch_left > 0:
+            self._glitch_left -= 1
+            if self._glitch_left == 0:
+                self._glitch_peg[:] = 0.0
+                self._glitch_slot[:] = 0.0
+                self._glitch_clutter[:] = 0.0
+                return 1.0
+            return GLITCH_NOISE_GAIN
+        if noise_rng.random() >= self._glitch_rate:
+            return 1.0
+        self._glitch_left = int(noise_rng.integers(GLITCH_LEN[0], GLITCH_LEN[1] + 1))
+
+        def _offs(n: int) -> np.ndarray:
+            mag = noise_rng.uniform(GLITCH_OFFSET[0], GLITCH_OFFSET[1], n)
+            ang = noise_rng.uniform(0.0, 2 * math.pi, n)
+            return np.stack([mag * np.cos(ang), mag * np.sin(ang)], axis=1)
+
+        self._glitch_peg = _offs(self._glitch_peg.shape[0])
+        self._glitch_slot = _offs(self._glitch_slot.shape[0])
+        self._glitch_clutter = _offs(self._glitch_clutter.shape[0])
+        return GLITCH_NOISE_GAIN
+
+    def _noisy_pose(
+        self, pos, quat, noise_rng, bias_xy: np.ndarray | None = None, yaw_bias: float = 0.0, gain: float = 1.0
+    ):
         p = np.asarray(pos, dtype=float).copy()
         if bias_xy is not None:
             p[0] += float(bias_xy[0])
             p[1] += float(bias_xy[1])
-        p = p + noise_rng.normal(0, self.c.obs_noise, 3)
-        dth = noise_rng.normal(0, self.c.obs_noise_rad, 3)
+        p = p + noise_rng.normal(0, self.c.obs_noise * gain, 3)
+        dth = noise_rng.normal(0, self.c.obs_noise_rad * gain, 3)
         yaw_extra = float(dth[2]) + (float(yaw_bias) if bias_xy is not None else 0.0)
         dq = _yaw_quat(yaw_extra)
         q = _quat_mul(dq, quat)
@@ -796,6 +881,7 @@ class Episode:
         """
         d = self.data
         bx, by = self.c.board_xy
+        glitch_gain = self._glitch_step(noise_rng)
         hand = d.qpos[0:3].copy()
         hand[0] -= bx
         hand[1] -= by
@@ -816,11 +902,15 @@ class Episode:
         for i, peg in enumerate(self.c.pegs):
             base = i * PEG_FEAT
             ppos, pquat = self.peg_pose(i)
-            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._peg_bias_xy[i], yaw_bias=float(self._slot_bias_yaw[i]))
+            ppos_n, pquat_n = self._noisy_pose(
+                ppos, pquat, noise_rng, bias_xy=self._peg_bias_xy[i] + self._glitch_peg[i],
+                yaw_bias=float(self._slot_bias_yaw[i]), gain=glitch_gain,
+            )
             hx, hy = self.slot_xy[i]
             # Slot estimate uses slot bias (≠ peg bias) — no exact hole coordinates.
-            hx_e = hx + self._slot_bias_xy[i][0] + float(noise_rng.normal(0, self.c.obs_noise))
-            hy_e = hy + self._slot_bias_xy[i][1] + float(noise_rng.normal(0, self.c.obs_noise))
+            sn = self.c.obs_noise * glitch_gain
+            hx_e = hx + self._slot_bias_xy[i][0] + self._glitch_slot[i][0] + float(noise_rng.normal(0, sn))
+            hy_e = hy + self._slot_bias_xy[i][1] + self._glitch_slot[i][1] + float(noise_rng.normal(0, sn))
             prel = np.array([ppos_n[0] - hx_e, ppos_n[1] - hy_e, ppos_n[2] - BLOCK_H])
             # Slot yaw estimate: slot bias plus a per-peg residual vs the peg yaw channel.
             syaw = (
@@ -848,7 +938,10 @@ class Episode:
         for i, cl in enumerate(self.c.clutter):
             base = i * CLUTTER_FEAT
             ppos, pquat = self.clutter_pose(i)
-            ppos_n, pquat_n = self._noisy_pose(ppos, pquat, noise_rng, bias_xy=self._clutter_bias_xy[i], yaw_bias=0.0)
+            ppos_n, pquat_n = self._noisy_pose(
+                ppos, pquat, noise_rng, bias_xy=self._clutter_bias_xy[i] + self._glitch_clutter[i], yaw_bias=0.0,
+                gain=glitch_gain,
+            )
             prel = np.array([ppos_n[0] - bx, ppos_n[1] - by, ppos_n[2]])
             size = max(cl.size_xy) * 50
             feat = np.concatenate([[1.0], prel * 10, pquat_n, [size]])

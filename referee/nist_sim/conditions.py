@@ -1,7 +1,8 @@
 """Per-round condition sampling for the multi-peg board. Everything derives from SEED.
 
 Strata are (K, clutter_bucket) with K in {3,4,5,6} and clutter_bucket in {low, high}.
-Eight strata × episodes_per_stratum (default 8) = 64 episodes; mean K = 4.5.
+Eight strata × episodes_per_stratum (default 8) = 64 episodes; live rounds use 16 per
+stratum (128 episodes). Mean K = 4.5.
 
 Within each stratum a Latin hypercube covers the live ranges, then each episode is
 assigned a **difficulty tier** so every round has a learnable gradient:
@@ -10,6 +11,10 @@ assigned a **difficulty tier** so every round has a learnable gradient:
 - ~35% **medium** — mixed upright starts, moderate anti-scripting
 - ~40% **hard** — full residual bias / drift / disturbances; reserved split puts
   held-out shapes here
+
+Observation hardening (v0.5.1): larger per-peg estimate residuals, faster estimate
+drift, short estimate "glitch" bursts (extra noise plus a transient per-object offset)
+and more lying-down starts on the medium / hard tiers.
 
 Board layout (v0.5): every episode draws its own 8-slot layout -- slot positions, slot
 yaw, peg cross-section family and size -- from continuous distributions. There is no
@@ -193,24 +198,43 @@ def draw_layout(rng: np.random.Generator, held_out_slot: int | None = None) -> l
     for fam in fams:
         size, params = _draw_slot_shape(rng, str(fam))
         specs.append(SlotSpec(shape=str(fam), size=float(size), x=0.0, y=0.0, yaw=_u(rng, -math.pi, math.pi), params=params))
-    # Place larger slots first.
+    # Place larger slots first. If any slot can't be placed without overlap, the
+    # whole placement is redrawn (v0.5.1: the old fallback accepted the overlap).
     order = sorted(range(N_SLOTS), key=lambda i: -specs[i].outer_radius())
+    for _layout_try in range(LAYOUT_REDRAWS):
+        if _place_slots(rng, specs, order):
+            return specs
+    raise RuntimeError("draw_layout: could not place 8 non-overlapping slots")
+
+
+LAYOUT_REDRAWS = 50
+
+
+def _slots_clear(specs: list[SlotSpec], i: int, x: float, y: float, placed: list[int], gap: float) -> bool:
+    ro = specs[i].outer_radius() + LAYOUT_WALL + 0.001
+    return all(
+        math.hypot(x - specs[j].x, y - specs[j].y) >= ro + specs[j].outer_radius() + LAYOUT_WALL + 0.001 + gap
+        for j in placed
+    )
+
+
+def _place_slots(rng: np.random.Generator, specs: list[SlotSpec], order: list[int]) -> bool:
+    """One placement pass; True iff every slot found a non-overlapping position."""
     placed: list[int] = []
     for i in order:
-        ro = specs[i].outer_radius() + LAYOUT_WALL + 0.001
+        ok = False
         for attempt in range(400):
             x = _u(rng, LAYOUT_X[0], LAYOUT_X[1])
             y = _u(rng, LAYOUT_Y[0], LAYOUT_Y[1])
             gap = LAYOUT_GAP if attempt < 300 else LAYOUT_GAP * 0.5
-            if all(
-                math.hypot(x - specs[j].x, y - specs[j].y)
-                >= ro + specs[j].outer_radius() + LAYOUT_WALL + 0.001 + gap
-                for j in placed
-            ):
+            if _slots_clear(specs, i, x, y, placed, gap):
+                ok = True
                 break
+        if not ok:
+            return False
         specs[i].x, specs[i].y = x, y
         placed.append(i)
-    return specs
+    return True
 
 
 # Live ranges. Continuous axes are LHS-drawn; discrete axes are mapped from LHS then rounded.
@@ -220,7 +244,7 @@ RANGES = {
     "friction": (0.3, 1.3),
     "peg_mass": (0.005, 0.05),
     "gain_scale": (0.6, 1.4),
-    "obs_noise": (0.0004, 0.0020),  # 0.4–2.0 mm white noise on pose estimates
+    "obs_noise": (0.0008, 0.0035),  # 0.8–3.5 mm white noise on pose estimates (v0.5.1)
     "obs_noise_rad": (0.015, 0.06),
     "dropout_prob": (0.03, 0.18),
     # Delay/backlash stay mild so the privileged solver can prove solvability;
@@ -232,14 +256,21 @@ RANGES = {
     # a script that servos on −rel still misses by several mm and must search.
     "pose_bias_xy": (0.004, 0.010),  # 4–10 mm slot-bias magnitude; direction drawn separately
     "pose_bias_yaw": (0.12, 0.28),  # ~7–16 deg
-    "peg_bias_delta": (0.0015, 0.0050),  # 1.5–5 mm peg-vs-slot residual (defeats pure −rel)
-    "bias_drift": (0.0, 0.000025),  # m/step random-walk on estimate bias (non-stationary)
+    "peg_bias_delta": (0.0050, 0.0115),  # 5–11.5 mm peg-vs-slot residual (v0.5.1; was 1.5–5)
+    "bias_drift": (0.000010, 0.000060),  # m/step random-walk on estimate bias (v0.5.1; was 0–0.025 mm)
     "backlash": (0.00005, 0.0004),  # Cartesian command deadzone (m)
     "chamfer": (0.35, 1.0),  # entry funnel; still contact-rich at the low end
 }
 
 # Slot-yaw vs peg-yaw estimate residual (rad), scaled by tier. Not an LHS axis.
-PEG_YAW_DELTA = (0.03, 0.09)
+PEG_YAW_DELTA = (0.05, 0.14)
+
+# Estimate "glitch" bursts (v0.5.1): per control step, chance to start a burst of
+# extra pose noise plus a transient per-object offset, scaled by tier.
+GLITCH_RATE = 0.04  # hard tier; easy / medium scale it down
+GLITCH_LEN = (8, 30)  # control steps
+GLITCH_NOISE_GAIN = 4.0
+GLITCH_OFFSET = (0.002, 0.006)  # m, independent direction per object
 
 STEPS_PER_PEG = 280  # 11.2 s @ 25 Hz — room for contact search + sequencing
 DEFAULT_EPISODES_PER_STRATUM = 8
@@ -261,6 +292,13 @@ class PegStart:
     spec: SlotSpec | None = None  # this peg's slot (shape / size / pose)
     # Held-out family on the reserved split (also set on ``spec``); None on live.
     shape_override: str | None = None
+    # Start type as drawn. ``start_type`` is the effective one: a spawn fallback
+    # (``Episode._force_safe_start`` / teleport grid) may change it.
+    drawn_start_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.drawn_start_type is None:
+            self.drawn_start_type = self.start_type
 
     def shape(self) -> str:
         return self.spec.shape
@@ -273,6 +311,7 @@ class PegStart:
         return {
             "slot": int(self.slot),
             "start_type": self.start_type,
+            "drawn_start_type": self.drawn_start_type,
             "shape": self.shape(),
             "size": round(float(self.diameter()), 6),
         }
@@ -330,6 +369,7 @@ class EpisodeConditions:
     peg_yaw_delta_list: list[float] = field(default_factory=list)
     slots: list[SlotSpec] = field(default_factory=list)  # per-episode board layout
     bias_drift: float = 0.0  # random-walk step (m) on estimate biases
+    glitch_rate: float = 0.0  # per-step chance of an estimate glitch burst (v0.5.1)
     backlash: float = 0.0
     chamfer: float = 0.5
     # Hidden search-scale cue (not in obs): spiral pitch that fits this episode's
@@ -472,14 +512,34 @@ def _start_clear(lx: float, ly: float, peg_outer: float, layout: list[SlotSpec],
 def _free_offset(rng, spec: SlotSpec, layout: list[SlotSpec], r_lo: float, r_hi: float, margin: float):
     """Random offset (board frame) at r in [r_lo, r_hi] from the slot, clear of all walls."""
     po = spec.outer_radius()
-    off = (0.0, 0.0)
     for _ in range(30):
         r = _u(rng, r_lo, r_hi)
         th = _u(rng, 0, 2 * math.pi)
         off = (r * math.cos(th), r * math.sin(th))
         if _start_clear(spec.x + off[0], spec.y + off[1], po, layout, margin):
-            break
-    return off
+            return off
+    # v0.5.1: never fall back to a spot inside another slot. Widen the ring, then
+    # relax the margin, then take the candidate farthest from every slot wall.
+    best, best_c = (r_hi, 0.0), -1e9
+    for r_hi2, m2 in ((r_hi + 0.03, margin), (r_hi + 0.06, 0.0)):
+        for _ in range(60):
+            r = _u(rng, r_lo, r_hi2)
+            th = _u(rng, 0, 2 * math.pi)
+            off = (r * math.cos(th), r * math.sin(th))
+            if _start_clear(spec.x + off[0], spec.y + off[1], po, layout, m2):
+                return off
+            c = _slot_clearance(spec.x + off[0], spec.y + off[1], po, layout)
+            if c > best_c and abs(spec.x + off[0]) <= 0.17 and abs(spec.y + off[1]) <= 0.14:
+                best, best_c = off, c
+    return best
+
+
+def _slot_clearance(lx: float, ly: float, peg_outer: float, layout: list[SlotSpec]) -> float:
+    """Min distance (m) between a free peg at board-local (lx, ly) and any slot's outer wall."""
+    return min(
+        math.hypot(lx - sp.x, ly - sp.y) - (sp.outer_radius() + 0.0012 + LAYOUT_WALL + peg_outer)
+        for sp in layout
+    )
 
 
 def _draw_peg_starts_with_weights(
@@ -524,6 +584,9 @@ def _draw_peg_starts_with_weights(
             ang = tray_i * (2 * math.pi / n_tray)
             rad = 0.016 + 1.2 * spec.outer_radius()
             off = (tray_centre[0] + rad * math.cos(ang), tray_centre[1] + rad * math.sin(ang))
+            if not _start_clear(spec.x + off[0], spec.y + off[1], spec.outer_radius(), layout, 0.002):
+                # v0.5.1: a tray spot over another slot's hole is moved clear.
+                off = _free_offset(rng, spec, layout, 0.04, 0.07, 0.004)
             h = _u(rng, 0.005, 0.02)
             yaw = _u(rng, -math.pi / 2, math.pi / 2)
             tray_i += 1
@@ -634,8 +697,9 @@ def _easy_peg_starts(rng: np.random.Generator, slot_ids: list[int], layout: list
     return pegs
 
 
-HARD_START_WEIGHTS = np.array([0.28, 0.08, 0.10, 0.34, 0.20])  # loose/lying/tray/near/grasped
-MEDIUM_START_WEIGHTS = np.array([0.28, 0.02, 0.06, 0.42, 0.22])
+# v0.5.1: more lying-down starts (hard 8% -> 22%, medium 2% -> 12%).
+HARD_START_WEIGHTS = np.array([0.24, 0.22, 0.10, 0.26, 0.18])  # loose/lying/tray/near/grasped
+MEDIUM_START_WEIGHTS = np.array([0.26, 0.12, 0.06, 0.36, 0.20])
 
 
 def sample_episodes(
@@ -663,7 +727,8 @@ def sample_episodes(
                 n_clutter = 0 if bucket == "low" else int(rng.integers(0, 2))
                 # Residual peg−slot bias stays material so −rel scripts miss; roomy
                 # chamfer + one grasped start let the privileged solver score.
-                noise_scale, delta_scale, drift_scale = 0.35, 0.70, 0.0
+                noise_scale, delta_scale, drift_scale = 0.50, 0.90, 0.50
+                glitch_scale = 0.50
                 drop_scale, disturb_gate = 0.22, 1.01  # never disturbance
                 clear_boost, chamfer_floor = 0.00018, 0.75
                 act_delay_force0 = True
@@ -672,7 +737,8 @@ def sample_episodes(
                 n_clutter = _draw_clutter_count(rng, bucket)
                 if n_clutter > 2:
                     n_clutter = 2
-                noise_scale, delta_scale, drift_scale = 0.60, 0.50, 0.30
+                noise_scale, delta_scale, drift_scale = 0.75, 1.00, 0.80
+                glitch_scale = 0.80
                 drop_scale, disturb_gate = 0.55, 0.85
                 clear_boost, chamfer_floor = 0.00008, 0.55
                 act_delay_force0 = False
@@ -684,6 +750,7 @@ def sample_episodes(
                             p_.shape_override = layout[held_slot].shape
                 n_clutter = _draw_clutter_count(rng, bucket)
                 noise_scale, delta_scale, drift_scale = 1.0, 1.0, 1.0
+                glitch_scale = 1.0
                 drop_scale, disturb_gate = 1.0, 0.65
                 clear_boost, chamfer_floor = 0.0, 0.35
                 act_delay_force0 = False
@@ -771,6 +838,7 @@ def sample_episodes(
                     peg_yaw_delta_list=peg_yaw_delta_list,
                     slots=layout,
                     bias_drift=float(lhs["bias_drift"][j]) * drift_scale,
+                    glitch_rate=GLITCH_RATE * glitch_scale,
                     backlash=float(lhs["backlash"][j])
                     * (0.15 if tier == "easy" else 0.55 if tier == "medium" else 1.0),
                     chamfer=ch,

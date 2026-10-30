@@ -29,7 +29,7 @@ ALLOWED_TOP = {
     "clearance", "chamfer", "board_xy", "board_yaw",
     "disturbance", "max_steps", "pegs", "clutter", "slots",
 }
-ALLOWED_PEG = {"slot", "start_type", "shape", "size"}
+ALLOWED_PEG = {"slot", "start_type", "drawn_start_type", "shape", "size"}
 ALLOWED_SLOT = {"shape", "size", "xy", "yaw", "params"}
 ALLOWED_CLUTTER = {"offset_xy", "yaw", "size_xy", "height"}
 COARSE_CLEARANCE = {"tight": 0.000325, "mid": 0.0005, "loose": 0.0007}
