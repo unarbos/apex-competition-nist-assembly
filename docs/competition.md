@@ -16,7 +16,7 @@ The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper
 * **Fixes** from the v0.5.0 validation: overlapping layouts are redrawn, free pegs never start inside another hole, a pre-grasped hand yaw stays inside the joint range, and records carry both the effective and the drawn start type.
 * Same task, interface (`[B, 184]` in, `[B, 5]` out) and scoring. Scores are not directly comparable with v0.5.0.
 
-On v0.5.0 the leading hand-coded controllers scored about 0.92, above our privileged solver. On v0.5.1 the same controllers score about {{KING}}, while the privileged solver scores about {{REF}}.
+On v0.5.0 the leading hand-coded controllers scored about 0.92, above our privileged solver. On v0.5.1 the same controllers score about 0.15 to 0.27, while the privileged solver scores about 0.66.
 
 **What changed in v0.5.0**
 
@@ -132,8 +132,8 @@ Measured on the public dev build, live mix, 64 episodes per seed, 5 seeds (see `
 | zero (no-op) | 0.019 |
 | shipped `baselines/baseline.onnx` | 0.021 |
 | our hand-coded observation-only controllers | 0.01 – 0.03 |
-| strongest hand-coded controllers from v0.5.0 rounds | {{KINGRANGE}} |
-| privileged solver (reads the true state; not available to policies) | {{REF}} |
+| strongest hand-coded controllers from v0.5.0 rounds | 0.15 – 0.27 |
+| privileged solver (reads the true state; not available to policies) | 0.66 |
 
 **Miner Submissions**
 
@@ -148,8 +148,8 @@ Measured on the public dev build, live mix, 64 episodes per seed, 5 seeds (see `
 
 **Tips for Miners**
 
-* **Scripting against the observation is meant to be hard.** Hole and peg estimates are off by 5 to 11.5 mm relative to each other against sub-millimetre clearances, they drift and glitch, and there is no fixed layout. The strongest hand-coded controllers from v0.5.0 rounds score about {{KING}} on v0.5.1. CI checks that our scripted controllers stay at or below 0.30.
-* **The headroom is real but not cheap.** The privileged solver scores about 0.70 on the same episodes. Our own quick residual-PPO runs (up to 1M steps on CPU) did not beat the scripted controllers they started from. Plan for longer training, many parallel environments, and ways to use the force/torque signal; a privileged teacher distilled into an observation-only student is a reasonable route.
+* **Scripting against the observation is meant to be hard.** Hole and peg estimates are off by 5 to 11.5 mm relative to each other against sub-millimetre clearances, they drift and glitch, and there is no fixed layout. The strongest hand-coded controllers from v0.5.0 rounds score about 0.15 to 0.27 on v0.5.1. CI checks that our scripted controllers stay at or below 0.30.
+* **The headroom is real but not cheap.** The privileged solver scores about 0.66 on the same episodes. Our own quick residual-PPO runs (up to 1M steps on CPU) did not beat the scripted controllers they started from. Plan for longer training, many parallel environments, and ways to use the force/torque signal; a privileged teacher distilled into an observation-only student is a reasonable route.
 * **Train against the real simulator.** `referee/nist_sim` imports directly: `nist_sim.conditions.sample_episodes(seed, per_stratum)` draws a round's episodes and `Episode(cond, rng).step(action)` is the exact simulator used for scoring.
 * **Use the repo tools.** `tools/local_run.py` scores a policy on any seed, `tools/read_records.py` breaks results down by K, family and size, `tools/train_ppo.py` is a residual-PPO starting point, and the README has the exact two-container Docker loop the platform runs.
 * **Release and keep clear.** Credit needs the gripper off the peg at the end, and a seated peg that is knocked out later scores 0. Leave seated pegs alone.
