@@ -56,6 +56,34 @@ INSERT_ONLY = False
 STD_MAX = 0.2
 
 
+class OnnxBase:
+    """Stateless ONNX policy (e.g. a strong scripted export) as the residual base."""
+
+    _sessions: dict = {}
+
+    def __init__(self, path: str):
+        import onnxruntime as ort  # noqa: PLC0415
+
+        if path not in OnnxBase._sessions:
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 1
+            so.inter_op_num_threads = 1
+            sess = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
+            OnnxBase._sessions[path] = (sess, sess.get_inputs()[0].name)
+        self.sess, self.name = OnnxBase._sessions[path]
+
+    def act(self, o: np.ndarray) -> np.ndarray:
+        x = np.round(np.asarray(o, np.float64), 6).astype(np.float32)[None]
+        a = np.asarray(self.sess.run(None, {self.name: x})[0], dtype=np.float64).reshape(-1)[:ACT_DIM]
+        return a if np.all(np.isfinite(a)) else np.zeros(ACT_DIM)
+
+
+def make_base():
+    """Residual base: ObsOnlyScripted, or an ONNX policy when NIST_PPO_BASE_ONNX is set."""
+    path = os.environ.get("NIST_PPO_BASE_ONNX")
+    return OnnxBase(path) if path else ObsOnlyScripted()
+
+
 def _insert_potential(e) -> float:
     """Privileged training-time shaping (simulator state; the policy never sees it):
     seated pegs count 1, unseated pegs count by how far their tip is down inside their own
@@ -271,7 +299,7 @@ def _rollout_worker(args):
             steps = _refport_rollout(net, e, c, r2, n_steps, steps, obs_l, act_l, logp_l, rew_l, val_l, done_l, ep_scores)
             ep_i += 1
             continue
-        scripted = _Scripted()
+        scripted = _tp.make_base()
         prev = None
         prev_seated = [False] * e.n_pegs
         while not e.done and steps < n_steps:
@@ -533,7 +561,9 @@ def _eval_worker(args):
 
         hook = hook if use_resid else None
         return solve_obs_episode(e, r2, act_hook=hook)["score"], c.difficulty_tier
-    pol = _Scripted()
+    import train_ppo as _tpe  # noqa: PLC0415
+
+    pol = _tpe.make_base()
     while not e.done:
         o = e.observe(r2).astype(np.float64)
         b = np.clip(pol.act(o), -1, 1)
@@ -575,6 +605,7 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--insert-only", action="store_true", help="refport base: residual only in the insertion phase")
     ap.add_argument("--residual-scale", type=float, default=0.30)
+    ap.add_argument("--base-onnx", default="", help="obs base: use this ONNX policy instead of ObsOnlyScripted")
     a = ap.parse_args()
     global INIT_LOG_STD, STD_MAX, PRIV_SHAPING, INSERT_ONLY, RESIDUAL_SCALE
     INIT_LOG_STD, STD_MAX, PRIV_SHAPING = a.init_log_std, a.std_max, a.priv_shaping
@@ -583,6 +614,8 @@ def main() -> int:
     os.environ["NIST_PPO_RESID_SCALE"] = str(a.residual_scale)
     os.environ["NIST_PPO_PRIV_SHAPING"] = "1" if a.priv_shaping else "0"
     os.environ["NIST_PPO_STD_MAX"] = str(a.std_max)
+    if a.base_onnx:
+        os.environ["NIST_PPO_BASE_ONNX"] = os.path.abspath(a.base_onnx)
     if a.base == "refport" or a.parallel_eval:
         return _main_parallel(a)
 

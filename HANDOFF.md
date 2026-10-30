@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.5.0
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.5.1
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that sequentially assembles several
@@ -109,6 +109,23 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   gently on a blocked insertion (target no longer runs away), which lifts the privileged
   reference to ~0.70.
 
-## 10. Supersedes
+## 10. v0.5.1 changes (observation hardening)
+- Same `[B,184] -> [B,5]` contract, task, strata, tiers, horizon, scoring and record format
+  (`nist_lite_record/2`). Scores are not directly comparable with v0.5.0.
+- Harder observations: peg-vs-slot estimate residual 5–11.5 mm (was 1.5–5; tier scale easy 0.9,
+  medium 1.0), pose noise 0.8–3.5 mm (was 0.4–2.0), estimate drift 0.01–0.06 mm/step on every
+  tier, estimate glitch bursts (8–30 steps, 4× noise plus a 2–6 mm transient offset per object;
+  4% per step on hard, scaled 0.8 medium / 0.5 easy), slot-yaw residual 0.05–0.14 rad.
+- More lying-down starts: hard 22% (was 8%), medium 12% (was 2%).
+- Fixes from the v0.5.0 validation (issue #13): layout redraw instead of an overlap fallback;
+  free-peg spawns, tray spots, `_force_safe_start` and the teleport grid clear every slot;
+  pre-grasped hand yaw wrapped into [-pi/2, pi/2]; records add peg `drawn_start_type` next to
+  the effective `start_type`; docstrings.
+- Tools: `tools/fingerprint.py` (action fingerprints on a probe set, for near-duplicate
+  detection), `tools/train_ppo.py --base-onnx`.
+- Calibration: see `CALIBRATION.md`. Revealed v0.5.0 scripted top submissions drop from
+  ~0.9 to ≤ ~0.27; privileged reference 0.66.
+
+## 11. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The
 efficiency idea is reused inside the per-peg `0.75 + 0.25·time` term.

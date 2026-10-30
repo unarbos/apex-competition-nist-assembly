@@ -105,8 +105,8 @@ def test_relative_residual_preserved():
     hard = [c for c in conds if c.difficulty_tier == "hard"]
     mags = [math.hypot(*d) for c in hard for d in c.peg_bias_delta_list]
     assert mags
-    # Design residual band ~1.5-5 mm (scaled by tier); hard tier keeps full scale.
-    assert 0.0012 < float(np.mean(mags)) < 0.0060
+    # Design residual band 5-11.5 mm since v0.5.1 (scaled by tier); hard tier keeps full scale.
+    assert 0.0045 < float(np.mean(mags)) < 0.0115
 
 
 def test_shared_offset_premise_regression():
@@ -123,8 +123,11 @@ def test_shared_offset_premise_regression():
     shared = e._slot_bias_xy[0].copy()
     e._slot_bias_xy = np.tile(shared, (e.n_pegs, 1))
     e._peg_bias_xy = e._slot_bias_xy + np.array(c.peg_bias_delta_list)
+    e._glitch_rate = 0.0  # v0.5.1 glitch bursts are transient; test the static premise
     errs = [_global_fit_slot_error(e.observe(r2), c) for _ in range(8)]
-    assert min(errs) < 0.0010, f"shared-offset premise not reproduced (min {min(errs)*1e3:.2f} mm)"
+    # Only white noise remains (0.8-3.5 mm per estimate since v0.5.1, averaged by the fit).
+    tol = 0.0010 + 0.5 * c.obs_noise
+    assert min(errs) < tol, f"shared-offset premise not reproduced (min {min(errs)*1e3:.2f} mm)"
 
 
 def test_peg_residuals_are_independent_per_peg():

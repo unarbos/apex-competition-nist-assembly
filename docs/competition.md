@@ -1,6 +1,6 @@
 # NIST Assembly Competition
 
-Docs page text for v0.5.0 (replaces the v0.1 page). Platform-wide items that Macrocosmos
+Docs page text for v0.5.1 (replaces the v0.5.0 page). Platform-wide items that Macrocosmos
 sets (submission fee, rate limits) are not repeated here.
 
 ### NIST Assembly Competition
@@ -8,6 +8,15 @@ sets (submission fee, rate limits) are not repeated here.
 **Getting a peg to the hole is not the same as seating it.** The last millimetre is the hard part: with 0.25 to 0.8 mm of radial clearance, the contact that completes an insertion is the same contact that jams it. A peg still held in the gripper has not been assembled, and on a full board each seated peg is one more thing the gripper can knock out on the way to the next.
 
 The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper on a Cartesian stage** (x, y, z, yaw) through **multi-peg sequential assembly** on a board modelled on the **NIST Assembly Task Board #1**, simulated in MuJoCo on CPU. Miners submit an ONNX policy that outputs incremental stage and gripper commands at 25 Hz. The setup borrows from AlphaNIST (Zhang et al., arXiv 2610.13354): the ATB-1 board, the 1 mm success criterion, 25 Hz control, diverse start states and free-order multi-part episodes. It is much smaller: pegs only, primitive geometry, a 4-DoF stage instead of a 7-DoF arm, and noisy state estimates instead of point clouds. Scoring gives partial credit per peg so that a ranked competition has a gradient.
+
+**What changed in v0.5.1**
+
+* **Harder observations.** The extra peg-vs-hole estimate offset is now 5 to 11.5 mm (was 1.5 to 5 mm), pose noise is 0.8 to 3.5 mm (was 0.4 to 2.0 mm), estimates drift faster and on every tier, and short "glitch" bursts (8 to 30 steps) add extra noise and a transient offset to every pose estimate.
+* **More lying-down starts:** about 22% of pegs on the hard tier and 12% on the medium tier (was 8% and 2%).
+* **Fixes** from the v0.5.0 validation: overlapping layouts are redrawn, free pegs never start inside another hole, a pre-grasped hand yaw stays inside the joint range, and records carry both the effective and the drawn start type.
+* Same task, interface (`[B, 184]` in, `[B, 5]` out) and scoring. Scores are not directly comparable with v0.5.0.
+
+On v0.5.0 the leading hand-coded controllers scored about 0.92, above our privileged solver. On v0.5.1 the same controllers score about 0.15 to 0.27, while the privileged solver scores about 0.66.
 
 **What changed in v0.5.0**
 
@@ -32,11 +41,12 @@ Each live evaluation runs **128 episodes**: 8 strata (number of pegs K ∈ {3, 4
 | Friction | 0.3 – 1.3 |
 | Peg mass | 5 – 50 g |
 | Controller gain | × 0.6 – 1.4 |
-| Pose-estimate noise | 0.4 – 2.0 mm, 0.015 – 0.06 rad |
+| Pose-estimate noise | 0.8 – 3.5 mm, 0.015 – 0.06 rad (smaller on easy and medium tiers) |
 | Observation dropout | 3 – 18% per row per step (the row repeats its last value) |
 | Hole-estimate bias | 4 – 10 mm and roughly 7 – 16° per episode, independent per hole (smaller on easy and medium tiers) |
-| Extra peg-vs-hole bias | 1.5 – 5 mm, independent per peg, so the reported peg-minus-hole offset does not cancel |
-| Other | slow bias drift, Cartesian backlash, a rare one-step action delay, and on some episodes one mid-episode disturbance (a peg shove, a gripper slip, or a hand shift) |
+| Extra peg-vs-hole bias | 5 – 11.5 mm, independent per peg, so the reported peg-minus-hole offset does not cancel |
+| Estimate glitches | bursts of 8 – 30 steps with 4× noise and a 2 – 6 mm transient offset per object; up to 4% chance per step on the hard tier |
+| Other | bias drift (0.01 – 0.06 mm per step random walk), Cartesian backlash, a rare one-step action delay, and on some episodes one mid-episode disturbance (a peg shove, a gripper slip, or a hand shift) |
 | Control / physics | 25 Hz control, 1 kHz physics (40 substeps per action). **Fixed.** |
 | Horizon | 280 control steps (11.2 s) per active peg: 840 – 1680 steps. **Fixed.** |
 
@@ -53,7 +63,7 @@ Each peg gets its own start type. Easy-tier episodes use grasped and near-hole s
 | `grasped` | already in the gripper, 10 – 40 mm above and within 10 mm of its hole (at most one per episode) |
 | `near_hole` | standing on the board just beside its hole |
 | `loose` | standing upright on the board, 40 – 70 mm from its hole |
-| `lying` | toppled on its side, 50 – 70 mm away |
+| `lying` | toppled on its side, 50 – 70 mm away (about 22% of hard-tier and 12% of medium-tier pegs) |
 | `tray` | standing in a ring with the other tray pegs, in a tray area near one edge of the board |
 
 **Step by Step**
@@ -113,16 +123,17 @@ raw_score = mean of S_e over all episodes      -> [0.0, 1.0]
 * The denominator is fixed: every episode counts, including ones ended by a fault.
 * To take the lead, a challenger must beat the current top raw score by more than 1%. The incumbent is re-scored at the start of each round on the same episodes, so the comparison is like-for-like. `baseline_raw_score` is 0.0.
 
-**Reference numbers (v0.5.0)**
+**Reference numbers (v0.5.1)**
 
 Measured on the public dev build, live mix, 64 episodes per seed, 5 seeds (see `CALIBRATION.md` in the repo):
 
 | Policy | Score |
 | --- | --- |
-| zero (no-op) | 0.017 |
-| shipped `baselines/baseline.onnx` | 0.043 |
-| hand-coded observation-only controllers | 0.08 – 0.21 |
-| privileged solver (reads the true state; not available to policies) | 0.697 |
+| zero (no-op) | 0.019 |
+| shipped `baselines/baseline.onnx` | 0.021 |
+| our hand-coded observation-only controllers | 0.01 – 0.03 |
+| strongest hand-coded controllers from v0.5.0 rounds | 0.15 – 0.27 |
+| privileged solver (reads the true state; not available to policies) | 0.66 |
 
 **Miner Submissions**
 
@@ -137,8 +148,8 @@ Measured on the public dev build, live mix, 64 episodes per seed, 5 seeds (see `
 
 **Tips for Miners**
 
-* **Expect to need RL.** The task is built so that scripting against the observation does not work: hole and peg estimates are biased by several millimetres against sub-millimetre clearances, and v0.5.0 removed the fixed layout that scripts used to hard-code. Our best hand-coded controller, which is the privileged solver's insertion logic run on the observation, scores about 0.21. CI also checks that our scripted controllers stay at or below 0.30.
-* **The headroom is real but not cheap.** The privileged solver scores about 0.70 on the same episodes. Our own quick residual-PPO runs (up to 1M steps on CPU) did not beat the scripted controllers they started from. Plan for longer training, many parallel environments, and ways to use the force/torque signal; a privileged teacher distilled into an observation-only student is a reasonable route.
+* **Scripting against the observation is meant to be hard.** Hole and peg estimates are off by 5 to 11.5 mm relative to each other against sub-millimetre clearances, they drift and glitch, and there is no fixed layout. The strongest hand-coded controllers from v0.5.0 rounds score about 0.15 to 0.27 on v0.5.1. CI checks that our scripted controllers stay at or below 0.30.
+* **The headroom is real but not cheap.** The privileged solver scores about 0.66 on the same episodes. Our own quick residual-PPO runs (up to 1M steps on CPU) did not beat the scripted controllers they started from. Plan for longer training, many parallel environments, and ways to use the force/torque signal; a privileged teacher distilled into an observation-only student is a reasonable route.
 * **Train against the real simulator.** `referee/nist_sim` imports directly: `nist_sim.conditions.sample_episodes(seed, per_stratum)` draws a round's episodes and `Episode(cond, rng).step(action)` is the exact simulator used for scoring.
 * **Use the repo tools.** `tools/local_run.py` scores a policy on any seed, `tools/read_records.py` breaks results down by K, family and size, `tools/train_ppo.py` is a residual-PPO starting point, and the README has the exact two-container Docker loop the platform runs.
 * **Release and keep clear.** Credit needs the gripper off the peg at the end, and a seated peg that is knocked out later scores 0. Leave seated pegs alone.

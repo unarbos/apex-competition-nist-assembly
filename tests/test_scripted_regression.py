@@ -1,4 +1,4 @@
-"""v0.5.0 generalization hardening: hand-coded controllers must stay well below the
+"""v0.5.0/v0.5.1 hardening: hand-coded controllers must stay well below the
 learned / privileged range.
 
 - ``ObsOnlyScripted`` (referee/nist_sim/policies.py) and the obs-only reference port

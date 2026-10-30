@@ -5,12 +5,18 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.5.0** (generalization hardening). **Breaking change for policies:** the
-> board layout and peg shapes are now drawn per episode, and peg-table features 8–11 changed
-> meaning (no shape label; see the layout below). Input/output shapes are unchanged
-> (`[B, 184]` -> `[B, 5]`), scoring is unchanged, records stay `nist_lite_record/2` (with an
-> added per-episode `slots` list and peg `size`). Estimate offsets stay independent per slot,
-> clutter block and peg (v0.3.0). `timeout_s` stays 1800 s.
+> Version: **v0.5.1** (observation hardening). Same task, observation layout and scoring
+> as v0.5.0, but harder observations: the extra peg-vs-hole estimate offset is now 5–11.5 mm
+> (was 1.5–5 mm), pose noise 0.8–3.5 mm (was 0.4–2.0 mm), estimate drift is faster and
+> present on every tier, short estimate "glitch" bursts add extra noise and a transient
+> offset to every pose estimate, and lying-down starts are more common (hard 22%, medium 12%).
+> Also fixes from the v0.5.0 validation notes (layout and spawn edge cases, pre-grasped hand
+> yaw near ±π, records carry both the effective and the drawn start type). Scores are not
+> directly comparable with v0.5.0. Input/output shapes (`[B, 184]` -> `[B, 5]`), records
+> (`nist_lite_record/2`, peg entries add `drawn_start_type`) and `timeout_s` (1800 s) are unchanged.
+>
+> v0.5.0: board layout and peg shapes are drawn per episode; peg-table features 8–11 have no
+> shape label.
 
 ## Relation to AlphaNIST
 
@@ -29,14 +35,15 @@ competition). We borrow the board, the 1 mm success criterion, the 25 Hz control
 diverse start states, and free-order multi-part episodes. Neither project is real-robot
 evidence.
 
-**Designed to require learning.** A hand-coded controller that trusts the observation vector
-cannot win: peg/slot channels carry per-episode pose-estimate offsets of several mm and
-degrees (independent per slot, clutter block and peg), plus noise and dropout, and since
-v0.5.0 there is no fixed board layout or shape list to hard-code against. Wrist
+**Meant to reward learning.** On v0.5.0, well-tuned hand-coded controllers reached about
+0.92, above our privileged solver. v0.5.1 makes the observation harder to trust:
+peg/slot channels carry per-episode pose-estimate offsets of 5–11.5 mm and several degrees
+(independent per slot, clutter block and peg), plus drift, noise, glitch bursts and dropout,
+and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.5.0)
+## The task (v0.5.1)
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions (non-overlapping, anywhere on the board), slot yaw, and the peg
@@ -52,8 +59,8 @@ families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
   `solimp` width 0.02 mm). Tight fits need wiggle / spiral search.
 - **Horizon:** 11.2 s (280 control steps @ 25 Hz) **per active peg**. Early end when all
   pegs are seated and the gripper is clear.
-- **Hidden dynamics (LHS):** friction, mass, gain, mild backlash, pose-estimate bias,
-  noise/dropout, rare act-delay, mid-episode shove or gripper drop.
+- **Hidden dynamics (LHS):** friction, mass, gain, mild backlash, pose-estimate bias and
+  drift, noise/dropout, estimate glitch bursts, rare act-delay, mid-episode shove or gripper drop.
 - **Score:** for episode `e` with `K` pegs,
   `S_e = (1/K) Σ_k s_k`, where `s_k = 0` if peg `k` is not seated at end, else
   `0.75 + 0.25 · time/effort term`. Partial credit rewards even one or two seated pegs.

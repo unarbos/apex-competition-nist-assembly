@@ -121,7 +121,8 @@ def test_difficulty_tiers_baked_into_live():
             continue
         assert all(p.start_type in ("grasped", "near_hole") for p in e.pegs)
         assert e.disturbance == 0
-        assert e.bias_drift == 0.0
+        # v0.5.1: easy keeps a reduced (half-scale, not zero) estimate drift.
+        assert e.bias_drift <= 0.5 * conditions.RANGES["bias_drift"][1] + 1e-12
     # Small-n sampling still exposes hard (PPO eval uses per=2).
     _, tiny = conditions.sample_episodes(0, 2)
     assert "easy" in {e.difficulty_tier for e in tiny}

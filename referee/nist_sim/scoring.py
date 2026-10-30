@@ -1,4 +1,4 @@
-"""Per-peg and per-episode scores for NIST-lite multi-peg board (v0.2.0).
+"""Per-peg and per-episode scores for NIST-lite multi-peg board (rules unchanged since v0.2.0).
 
 For an episode with K active pegs, each peg k scores independently:
 
@@ -43,7 +43,7 @@ def peg_score(
         Control step when the peg first became stably seated (1 .. horizon).
         Ignored when seated_at_end is False.
     horizon:
-        Episode time limit in control steps (``8 s × K × 25 Hz``).
+        Episode time limit in control steps (``STEPS_PER_PEG × K``: 280 steps = 11.2 s per peg at 25 Hz).
     mean_sq_action:
         Mean of ``sum(a_i^2)`` over control steps for this episode. Used only
         for a small effort discount inside the 0.25 budget.
