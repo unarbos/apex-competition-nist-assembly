@@ -49,7 +49,10 @@ Per-episode score SD is larger on v0.5.1 because more episodes land mid-range: a
 the strongest scripted fixture (0.14 on v0.5.0), so the 128-episode round mean has a sampling SE of
 about 0.028 across rounds. Within a round every submission faces the same episodes, but a near-identical
 policy still re-rolls most trajectories (contact-rich sim), so a flat 1% takeover margin is well inside
-evaluation noise at these score levels. See the platform discussion on paired, significance-based
+evaluation noise at these score levels. Measured: the strongest fixture and a copy of it that differs
+only by a negligible input offset, on the same 128 episodes, differ on 77 of 128 episodes; the mean
+difference is +0.015 (paired SE 0.014, per 64-episode seed +0.042 and −0.013), against a 1% margin of
+about 0.003. See the platform discussion on paired, significance-based
 takeover; more episodes per stratum (a round input) cut the noise roughly as 1/sqrt(n).
 
 ## Quick PPO (paired, same 128 episodes, `tools/train_ppo.py`)
