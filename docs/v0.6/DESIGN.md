@@ -27,7 +27,9 @@ raised with Macrocosmos.
 - [x] Referee action quantization (v06 profile only)
 - [x] Calibration harness `tools/calib_v06.py`: paired deltas with SE, epsilon-copy reroll test,
       per-episode wall time, projected live eval time, release bars
-- [ ] Depth patch + coarse prior observation
+- [~] Depth patch: `referee/nist_sim/perception.py` (16x16 `mj_multiRay` wrist camera + noise/dropout/quantization);
+      cost probe `tools/probe_v06_cost.py`: ~0.22 ms/step, ~9% on top of physics+observe on the current board.
+      Not yet wired into the observation; coarse prior TODO
 - [ ] Stateful ONNX protocol
 - [ ] 12-slot board, collars, precedence, per-step scoring
 - [ ] Tighter clearance, per-round held-out families
