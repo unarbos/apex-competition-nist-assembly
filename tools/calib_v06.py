@@ -6,7 +6,8 @@
 
 Policy specs: ``zero``, ``baseline``, ``obs_scripted``, ``refport`` (obs-only reference port),
 ``reference`` (privileged), or an ONNX path. Append ``+eps=X`` to run an *epsilon copy*: the same
-policy with a constant ``X`` added to every observation entry. A copy that behaves the same should
+policy with a constant ``X`` added to every observation entry, or ``+aeps=X`` to add a fixed
+pseudo-random +-X to every action component (closest to a re-exported copy). A copy that behaves the same should
 score the same; the fraction of episodes whose score changes measures how much of a round is
 sampling noise rather than skill (the "reroll" share).
 
@@ -46,11 +47,19 @@ SCRIPTED = {"baseline", "obs_scripted", "refport"}
 
 
 def parse_spec(spec: str) -> tuple[str, float]:
+    """``base``, obs offset (``+eps=X``) or action perturbation (``+aeps=X``, returned negative)."""
     base, eps = spec, 0.0
-    if "+eps=" in spec:
+    if "+aeps=" in spec:
+        base, e = spec.split("+aeps=", 1)
+        eps = -abs(float(e))
+    elif "+eps=" in spec:
         base, e = spec.split("+eps=", 1)
         eps = float(e)
     return base, eps
+
+
+def _base(spec: str) -> str:
+    return spec.split("+aeps=")[0].split("+eps=")[0]
 
 
 def _worker_init(root: str, profile: str) -> None:
@@ -101,9 +110,13 @@ def run_one(job: tuple) -> dict:
         sc = float(solve_obs_episode(e, r2)["score"])
     else:
         act = _make_act(base)
+        obs_eps = eps if eps > 0 else 0.0
+        a_rng = np.random.default_rng([seed, i, 0xAE])
         while not e.done:
-            o = np.round(e.observe(r2), 6) + eps
+            o = np.round(e.observe(r2), 6) + obs_eps
             a = np.asarray(act(o), dtype=float)
+            if eps < 0:
+                a = a + (-eps) * a_rng.choice([-1.0, 1.0], size=5)
             if not np.all(np.isfinite(a)):
                 a = np.zeros(5)
             e.step(np.clip(a, -1, 1))
@@ -112,7 +125,8 @@ def run_one(job: tuple) -> dict:
     wall = time.perf_counter() - t0
     return dict(policy=spec, seed=seed, i=i, score=sc, wall_s=round(wall, 3), steps=int(e.steps),
                 max_steps=int(c.max_steps), k=int(c.n_pegs), tier=c.difficulty_tier,
-                term=e.terminal_reason, profile=profile.ACTIVE.name)
+                term=e.terminal_reason, profile=profile.ACTIVE.name,
+                action_quant=profile.ACTIVE.action_quant)
 
 
 def paired(a: list[float], b: list[float]) -> dict:
@@ -156,7 +170,7 @@ def summarize(rows: list[dict], specs: list[str], ref: str | None, live_eps: int
                 out["paired"][s] = paired([by[s][k]["score"] for k in keys], [by[ref][k]["score"] for k in keys])
     for s in specs:
         base, eps = parse_spec(s)
-        if eps and base in by:
+        if eps and base in by:  # obs (+eps) or action (+aeps) copy vs its original
             out["reroll"][s] = paired([by[s][k]["score"] for k in keys], [by[base][k]["score"] for k in keys])
     return out
 
@@ -167,7 +181,7 @@ def bars_table(summ: dict) -> list[tuple[str, str, str, str]]:
     if "reference" in P:
         v = P["reference"]["mean"]
         rows.append(("privileged reference", f">= {BARS['privileged_min']}", f"{v:.3f}", "yes" if v >= BARS["privileged_min"] else "NO"))
-    scr = [(s, P[s]["mean"]) for s in P if parse_spec(s)[0] in SCRIPTED or "scripted" in s]
+    scr = [(s, P[s]["mean"]) for s in P if (parse_spec(s)[0] in SCRIPTED or "scripted" in s) and not parse_spec(s)[1]]
     if scr:
         s, v = max(scr, key=lambda t: t[1])
         rows.append((f"best scripted ({s})", f"<= {BARS['scripted_max']}", f"{v:.3f}", "yes" if v <= BARS["scripted_max"] else "NO"))
@@ -182,7 +196,7 @@ def bars_table(summ: dict) -> list[tuple[str, str, str, str]]:
 
 
 def write_md(path: Path, summ: dict, args) -> None:
-    L = [f"# v0.6 calibration run (profile `{args.profile}`)", "",
+    L = [f"# v0.6 calibration run (profile `{args.profile}`, action quant {os.environ.get('NIST_ACTION_QUANT') or 'profile default'})", "",
          f"Seeds {args.seeds}, {args.per}/stratum, split `{args.split}`, {summ['episodes']} paired episodes. "
          f"Projection: {args.live_eps} live episodes on {args.cpus} CPU x prod factor {args.prod_factor}.", "",
          "| Policy | mean | by tier | mean s/episode | projected live s |", "|---|---|---|---|---|"]
@@ -213,14 +227,22 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--live-eps", type=int, default=128)
     ap.add_argument("--cpus", type=int, default=2)
-    ap.add_argument("--prod-factor", type=float, default=2.5,
-                    help="prod/box slowdown (v0.5.1: 233 s podman smoke vs ~400-660 s MC staging)")
+    ap.add_argument("--prod-factor", type=float, default=0.55,
+                    help="live seconds per box second. Box s/episode is measured with all workers busy and B=1 ONNX "
+                         "calls; v0.5.x king-class policies: ~17 s/episode here vs ~400-660 s per 128-episode live "
+                         "round on 2 CPU -> ~0.55. Recalibrate after each smoke run.")
+    ap.add_argument("--action-quant", type=float, default=None, help="dev override of the profile's action quantization")
     ap.add_argument("--out", default="calib_v06_out")
     a = ap.parse_args()
-    specs = [os.path.abspath(s.split("+eps=")[0]) + (s[len(s.split("+eps=")[0]):]) if s.split("+eps=")[0].endswith(".onnx") else s
-             for s in a.policies]
-    if a.ref and a.ref.split("+eps=")[0].endswith(".onnx"):
-        a.ref = os.path.abspath(a.ref)
+    def _abs(s: str) -> str:
+        b = _base(s)
+        return os.path.abspath(b) + s[len(b):] if b.endswith(".onnx") else s
+
+    specs = [_abs(s) for s in a.policies]
+    if a.ref:
+        a.ref = _abs(a.ref)
+    if a.action_quant is not None:
+        os.environ["NIST_ACTION_QUANT"] = str(a.action_quant)
     jobs = [(s, seed, a.per, i, a.split) for s in specs for seed in a.seeds for i in range(8 * a.per)]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)

@@ -11,7 +11,7 @@ v0.6 targets so calibration tooling can report them (see docs/v0.6/DESIGN.md).
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,7 @@ PROFILES: dict[str, Profile] = {
     "v05": Profile(name="v05"),
     "v06": Profile(
         name="v06",
-        action_quant=1.0 / 32.0,
+        action_quant=1.0 / 256.0,  # 1/32 zeroed fine moves (scripted king 0.30 -> 0.005); see calib
         n_slots=12,
         k_values=(4, 6, 8),
         clearance=(0.00010, 0.00050),
@@ -59,7 +59,12 @@ def get(name: str | None = None) -> Profile:
     key = (name or os.environ.get("NIST_PROFILE") or "v05").strip().lower()
     if key not in PROFILES:
         raise ValueError(f"unknown NIST_PROFILE {key!r}; expected one of {sorted(PROFILES)}")
-    return PROFILES[key]
+    p = PROFILES[key]
+    # Dev-only override for calibration sweeps (never set in released images).
+    q = os.environ.get("NIST_ACTION_QUANT")
+    if name is None and q:
+        p = replace(p, action_quant=float(q))
+    return p
 
 
 ACTIVE: Profile = get()
