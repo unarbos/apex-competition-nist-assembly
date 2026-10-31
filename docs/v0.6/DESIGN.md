@@ -30,7 +30,9 @@ raised with Macrocosmos.
 - [~] Depth patch: `referee/nist_sim/perception.py` (16x16 `mj_multiRay` wrist camera + noise/dropout/quantization);
       cost probe `tools/probe_v06_cost.py`: ~0.22 ms/step, ~9% on top of physics+observe on the current board.
       Not yet wired into the observation; coarse prior TODO
-- [ ] Stateful ONNX protocol
+- [ ] Stateful ONNX protocol. Prerequisite for action quantization: current memoryless policies can only carry
+      state through the exact `last_action` values echoed in the observation, so quantizing actions without an
+      explicit state channel would break them. Ship both together.
 - [ ] 12-slot board, collars, precedence, per-step scoring
 - [ ] Tighter clearance, per-round held-out families
 - [ ] v0.6 privileged solver, scripted adversary, PPO/BC baseline, calibration vs bars
