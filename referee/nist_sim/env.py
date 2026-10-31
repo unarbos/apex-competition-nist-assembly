@@ -23,6 +23,7 @@ from typing import Deque
 import mujoco
 import numpy as np
 
+from . import profile as _profile
 from .conditions import (
     GLITCH_LEN,
     GLITCH_NOISE_GAIN,
@@ -378,6 +379,8 @@ class Episode:
     def __init__(self, cond: EpisodeConditions, rng: np.random.Generator):
         self.c = cond
         self.rng = rng
+        # v0.6-dev: referee-side action quantization (0 under the live v05 profile).
+        self.action_quant = float(_profile.ACTIVE.action_quant)
         self.model = mujoco.MjModel.from_xml_string(build_xml(cond))
         self.data = mujoco.MjData(self.model)
         m = self.model
@@ -990,6 +993,8 @@ class Episode:
         if self.done:
             return
         a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
+        if self.action_quant > 0.0:
+            a = _profile.quantize_action(a, self.action_quant)
         self.action_l2 += float(np.sum(a * a))
         self.last_action = a.copy()
 
