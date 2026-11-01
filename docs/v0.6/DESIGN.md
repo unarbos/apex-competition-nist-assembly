@@ -1,38 +1,53 @@
-# NIST-Lite v0.6 "Assembly II" — design draft (work in progress, branch `v0.6-dev`)
+# NIST-Lite v0.6 "Assembly II": design draft (work in progress, branch `v0.6-dev`)
 
-Not released. The live task stays v0.5.x until a v0.6 release is reviewed with Macrocosmos.
+Not released. `main`, the spec, and the digests are unchanged.
 
 ## Goal
-Make the task much harder and bigger so that winning needs learned perception and control, not a
-hand-written controller compiled into ONNX, while keeping a high privileged ceiling and a clear gap a
-learned policy can close.
 
-## Planned changes (profile `v06`, `referee/nist_sim/profile.py`)
-1. **Rawer perception.** Coarse part/hole regions instead of per-object pose estimates, plus a noisy
-   16x16 wrist depth patch and the existing wrist force/torque.
-2. **Stateful policies.** ONNX `(obs, state) -> (action, state')`, state zeroed at reset by the referee.
-3. **Bigger assemblies.** 12-slot board, K in {4, 6, 8}, collars that fit only over a seated peg.
-4. **Tighter tolerances.** Clearance 0.10–0.50 mm, some holes without chamfer.
-5. **Held-out families per round.** The round seed holds out shape families from the live mix.
-6. **Robust scoring.** Action quantization in the referee (policies that behave the same score the
-   same), held-out subscores weighted in the round score.
+Make tasks compound and randomized, with a very high ceiling. The hardest tier should be
+close to unsolvable, and partial progress is scored so there is no cliff. Perception noise
+is a minor knob, not the main axis.
 
-## Eval budget
-Target: projected live eval time at or under ~400 s on 2 CPU. `tools/calib_v06.py` measures per-episode
-cost and projects live wall time; anything over budget is cut (episodes, horizon, depth-patch rate) or
-raised with Macrocosmos.
+## Task: random compound assembly (`referee/nist_sim/compound.py`)
+
+- **Steps:** `insert` (peg into hole), `collar` (a ring that fits only over a peg that is
+  already seated), and `twist` (rotate a seated round peg past a random lock angle).
+- **Precedence graph:** mandatory edges (insert before collar/twist on the same peg) plus
+  random cross-part edges. Steps done out of order still count, at reduced credit.
+- **Waves:** parts are parked off-board and arrive in random waves, either when the
+  previous wave is done or on a timer.
+- **Between-step dynamics:** after a step completes, a random event may fire (friction,
+  actuator gain, part mass, action latency, sensor re-bias, a lateral shove).
+- **Tiers c1 to c4** (15/30/30/25% of episodes): part count, collar and twist fractions,
+  wave count, edge density, event rate, and time slack all scale with the tier. Every
+  episode has at least one collar or twist.
+- **Lost parts** do not end the episode. The part is removed and its steps score zero.
+
+## Scoring
+
+Each step is weighted: insert 0.3, collar 1.5, twist 1.0. A done step earns
+0.70 + 0.30 × (time remaining fraction). A done step whose prerequisites were not met
+earns 0.15× that. An unfinished step earns up to 0.30× for partial progress. The episode
+score is the weighted mean.
+
+## Observation and physics (profile `v06`)
+
+- Observation: 288-d, the v0.5 184-d prefix plus collar, twist, step-status, and wave
+  features.
+- Physics: 500 Hz (`physics_dt` 0.002), 8-segment collars, 25 Hz control.
+- A stateful-policy protocol and action rounding ship only together. Rounding stays off
+  until then.
+
+## Release bars (`tools/calib_v06.py`)
+
+- Privileged solver ≥ 0.30 overall and ≤ 0.70 on c4. The ceiling stays open.
+- Fixed obs-only scripted controller ≤ 0.5× privileged.
+- A learned policy beats scripted at z ≥ 3.
+- Reroll determinism ≥ 0.95.
+- The projected live round fits the agreed eval budget.
 
 ## Status
-- [x] Profile switch (`NIST_PROFILE=v05|v06`, default v05 = live task unchanged)
-- [x] Referee action quantization (v06 profile only)
-- [x] Calibration harness `tools/calib_v06.py`: paired deltas with SE, epsilon-copy reroll test,
-      per-episode wall time, projected live eval time, release bars
-- [~] Depth patch: `referee/nist_sim/perception.py` (16x16 `mj_multiRay` wrist camera + noise/dropout/quantization);
-      cost probe `tools/probe_v06_cost.py`: ~0.22 ms/step, ~9% on top of physics+observe on the current board.
-      Not yet wired into the observation; coarse prior TODO
-- [ ] Stateful ONNX protocol. Prerequisite for action quantization: current memoryless policies can only carry
-      state through the exact `last_action` values echoed in the observation, so quantizing actions without an
-      explicit state channel would break them. Ship both together.
-- [ ] 12-slot board, collars, precedence, per-step scoring
-- [ ] Tighter clearance, per-round held-out families
-- [ ] v0.6 privileged solver, scripted adversary, PPO/BC baseline, calibration vs bars
+
+Generator, rubric, privileged solver (`tools/compound_solver.py`), calibration harness,
+and a BC learnability probe (`tools/bc_v06.py`) are on this branch. Calibration and
+eval-budget sizing are in progress.

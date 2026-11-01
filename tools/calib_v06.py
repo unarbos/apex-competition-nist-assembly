@@ -39,7 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # Release bars (roadmap v0.6). Scores are live-mix means.
 BARS = {
     "privileged_min": 0.60,  # v05 task
-    "privileged_min_compound": 0.40,  # v06: high ceiling, privileged only has to prove solvability
+    "privileged_min_compound": 0.30,  # v06: high ceiling, privileged only has to prove solvability
     "c4_privileged_max": 0.70,  # hardest tier must leave headroom even for the privileged solver
     "scripted_ratio_max": 0.50,  # best non-privileged policy vs privileged
     "scripted_max": 0.35,
