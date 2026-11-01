@@ -11,7 +11,7 @@ One episode is a randomized task graph on the v0.5 board:
   observed) and arrive when the earlier waves are finished or at a random time, at a random free spot.
 - **Randomness between subtasks.** After each completed step a pre-drawn event may fire: friction,
   controller gain, part mass, actuation delay, estimate re-bias, or a shove to a loose part.
-- **Complexity tiers** ``c1``..``c4`` set part counts, collar / twist share, waves, edge density,
+- **Complexity tiers** ``c1``..``c4`` (every episode has at least one collar or twist) set part counts, collar / twist share, waves, edge density,
   event rate and time slack. ``c4`` is meant to sit well below 1.0 even for the privileged solver.
 
 Scoring (``compound_score``) is per step with partial-progress milestones, so the gradient survives
@@ -53,7 +53,7 @@ WAVE_EXTRA = 40
 MAX_COLLARS = 4
 COLLAR_T = 0.0025  # ring wall thickness
 COLLAR_H = 0.008  # ring height
-COLLAR_NSEG = 12
+COLLAR_NSEG = 8  # 12 -> 8 segments: ~20% fewer contacts, same fit (inner faces at r_in)
 COLLAR_MAX_PEG_OUTER = 0.0072  # ring outer radius <= ~10.9 mm: the 24 mm gripper must straddle it
 COLLAR_SEAT_XY = 0.003
 COLLAR_SEAT_Z = 0.0015
@@ -66,7 +66,7 @@ EVENT_WEIGHTS = np.array([0.18, 0.18, 0.14, 0.12, 0.22, 0.16])
 TIERS = ("c1", "c2", "c3", "c4")
 TIER_FRACTIONS = (0.15, 0.30, 0.30, 0.25)
 TIER_CFG = {
-    "c1": dict(extra_pegs=0, collar_frac=0.0, twist_frac=0.0, waves=(1, 1), edge_p=0.00, event_p=0.00, slack=1.20),
+    "c1": dict(extra_pegs=0, collar_frac=0.25, twist_frac=0.30, waves=(1, 1), edge_p=0.00, event_p=0.00, slack=1.20),
     "c2": dict(extra_pegs=0, collar_frac=0.50, twist_frac=0.60, waves=(1, 2), edge_p=0.10, event_p=0.25, slack=1.00),
     "c3": dict(extra_pegs=1, collar_frac=0.70, twist_frac=0.80, waves=(2, 3), edge_p=0.20, event_p=0.45, slack=0.85),
     "c4": dict(extra_pegs=2, collar_frac=0.90, twist_frac=1.00, waves=(3, 4), edge_p=0.30, event_p=0.65, slack=0.70),
@@ -235,6 +235,13 @@ def make_compound(rng: np.random.Generator, cond: EpisodeConditions, tier: str) 
     # Collars on a random subset of narrow pegs.
     cands = [i for i, p in enumerate(cond.pegs) if p.spec.outer_radius() <= COLLAR_MAX_PEG_OUTER]
     n_col = min(MAX_COLLARS, len(cands), int(round(cfg["collar_frac"] * K)))
+    rounds = [i for i, p in enumerate(cond.pegs) if p.spec.shape == "round"]
+    n_tw = int(round(cfg["twist_frac"] * len(rounds)))
+    if n_col == 0 and n_tw == 0:  # every episode is compound: at least one collar or twist
+        if cands:
+            n_col = 1
+        elif rounds:
+            n_tw = 1
     collars: list[CollarSpec] = []
     taken: list[tuple[float, float]] = []
     for i in (rng.choice(cands, size=n_col, replace=False).tolist() if n_col else []):
@@ -244,8 +251,6 @@ def make_compound(rng: np.random.Generator, cond: EpisodeConditions, tier: str) 
         w = int(rng.integers(peg_wave[i], W))
         collars.append(CollarSpec(peg=int(i), r_in=r_in, offset_xy=spot, wave=w))
     # Twists on round pegs.
-    rounds = [i for i, p in enumerate(cond.pegs) if p.spec.shape == "round"]
-    n_tw = int(round(cfg["twist_frac"] * len(rounds)))
     twist_pegs = rng.choice(rounds, size=n_tw, replace=False).tolist() if n_tw else []
     # Steps + mandatory edges.
     steps: list[TaskStep] = [TaskStep("insert", i, i) for i in range(K)]

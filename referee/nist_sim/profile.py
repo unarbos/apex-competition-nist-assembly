@@ -43,6 +43,7 @@ PROFILES: dict[str, Profile] = {
     "v05": Profile(name="v05"),
     "v06": Profile(
         name="v06",
+        physics_dt=0.002,  # 500 Hz: ~-40% cost per step, privileged score within noise (calib r3)
         action_quant=0.0,  # off until the stateful-policy protocol lands (rounding alone breaks memoryless policies)
         n_slots=12,
         k_values=(4, 6, 8),
