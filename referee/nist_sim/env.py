@@ -381,7 +381,7 @@ class Episode:
         self.rng = rng
         # v0.6-dev: referee-side action quantization (0 under the live v05 profile).
         self.action_quant = float(_profile.ACTIVE.action_quant)
-        self.model = mujoco.MjModel.from_xml_string(build_xml(cond))
+        self.model = mujoco.MjModel.from_xml_string(self._model_xml(cond))
         self.data = mujoco.MjData(self.model)
         m = self.model
         self.n_pegs = len(cond.pegs)
@@ -470,6 +470,13 @@ class Episode:
         self._glitch_slot = np.zeros((max(1, self.n_pegs), 2))
         self._glitch_clutter = np.zeros((max(1, self.n_clutter), 2))
         self._reset()
+
+    # ---- subclass hooks (v0.6 compound episodes) --------------------------------
+    def _model_xml(self, cond: EpisodeConditions) -> str:
+        return build_xml(cond)
+
+    def _all_seated_ends_episode(self) -> bool:
+        return True
 
     # ---- hand / part helpers -------------------------------------------------
     def _set_hand(self, xyz, yaw, open_frac):
@@ -1052,7 +1059,7 @@ class Episode:
                 # Knocked out after a prior seat → no longer seated at end.
                 self.seated_now[i] = False
 
-        if all(self.seated_now) and self.n_pegs > 0:
+        if all(self.seated_now) and self.n_pegs > 0 and self._all_seated_ends_episode():
             # Gripper already clear by seated predicate; end early.
             self.done = True
             self.success = True
