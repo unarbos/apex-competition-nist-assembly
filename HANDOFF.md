@@ -38,13 +38,13 @@ onnxruntime 1.31.0. Image digests from release run 41305550083 (tag `v0.6.0`), b
 | lower_is_better | false | |
 | baseline_raw_score / baseline_score | 0.0 / 0.0 | platform convention |
 | resources | 2 CPU / 2Gi / 0 GPU | 2 sim workers |
-| evaluate / referee timeout_s | 1800 / 1800 (since 0.2.1) | v0.5 128-episode live rounds took ~400–660 s on Macrocosmos staging; v0.6 at 96 episodes is projected at ~420–700 s (§4) |
-| episodes_per_stratum (round input) | **12** on 2 CPU (96 episodes); 16 (128) only with 4 referee CPUs and `workers` 4 | §4 |
+| evaluate / referee timeout_s | 1800 / 1800 (since 0.2.1) | v0.5 128-episode live rounds took ~400–660 s on Macrocosmos staging; v0.6 at 64 episodes is projected at ~500–1150 s (§4) |
+| episodes_per_stratum (round input) | **8** on 2 CPU (64 episodes); 12 (96) only with 4 referee CPUs and `workers` 4 | §4 |
 | deadline_ms | 500 per batched step | |
 
 ## 4. Round variation & evaluation sizing
 - **Strata:** `(K ∈ {3,4,5,6}) × (clutter low|high)` = 8 strata. The fixture uses 8 per stratum (64
-  episodes). Live rounds ran at 16 (128) on v0.5; **v0.6 live: 12 per stratum = 96 episodes** on
+  episodes). Live rounds ran at 16 (128) on v0.5; **v0.6 live: 8 per stratum = 64 episodes** on
   2 CPU (see Budget). Mean K = 4.5 before the c3/c4 extra pegs.
 - **Tiers:** sensing difficulty 25% easy / 35% medium / 40% hard (unchanged). Complexity tiers
   c1–c4 are assigned 15/30/30/25% within each stratum.
@@ -64,11 +64,15 @@ onnxruntime 1.31.0. Image digests from release run 41305550083 (tag `v0.6.0`), b
 - **Lying pegs:** reachable and graspable, but the privileged solver seats 0/64. They are ~13% of
   inserts and are stated as unproven headroom in `CALIBRATION.md`.
 - **Reserved region:** `reserve.py` draws from extended `RANGES` at referee build time.
-- **Budget:** a v0.6 episode costs ~1.4× a v0.5.1 episode: 1.44× the control steps, and per-step
-  cost at 500 Hz with 8-segment collars ≈ v0.5.1 at 1 kHz. Scaling the observed v0.5 live
-  400–660 s for 128 episodes gives ~560–930 s for 128 v0.6 episodes on 2 CPU, or **~420–700 s for
-  96**. With 4 referee CPUs and `workers` 4, 128 episodes would take ~300–500 s. The 1800 s timeout
-  holds either way. Local podman smoke on the released digests: see the release notes.
+- **Budget (measured on the v0.6.0 images, podman, 2 CPU / 2 GiB each, seed 1):** baseline policy,
+  96 episodes: 426 s. Revealed v0.5 scripted king, 64 episodes: 410 s. The same setup ran v0.5.1 at
+  233 s for 128 episodes (baseline), and Macrocosmos staging took ~10 min for that round, a ~2.6× factor
+  (1.7–2.8× over the v0.5 live range). A v0.6 episode costs ~2.4× a v0.5.1 episode here, not the 1.4× the
+  idle-physics estimate gave: there are ~1.7× more lockstep player calls (the longest horizon is ~2,850
+  steps), plus the compound bookkeeping. Projected staging time: 64 episodes ≈ 500–800 s (baseline)
+  and up to ~700–1150 s (heavy policy); 96 episodes ≈ 720–1200 s (baseline) and up to ~1700 s (heavy
+  policy), which is too close to the 1800 s timeout. **Live: 8 per stratum (64) on 2 CPU.** With 4
+  referee CPUs and `workers` 4, 12 per stratum (96) should fit.
 
 ## 5. Threat-model questionnaire
 Unchanged process: answers withheld from the public repo; available to Macrocosmos privately.
@@ -164,7 +168,7 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   n_collars), `tier`, `steps_done`, `steps_in_order`, `n_steps`, `credit_by_kind`, `events_fired`
   and `parts_lost`. Result summary keys add `step_done_fraction` and `score_c1..c4`; the per-K
   `score_k*` keys are gone.
-- Round input: `episodes_per_stratum` 12 recommended on 2 CPU (§4).
+- Round input: `episodes_per_stratum` 8 (64 episodes) on 2 CPU (§4).
 - Folded in from the v0.5.2 notes: lying-peg ceiling stated (0/64 privileged, unproven
   headroom), glitch-burst step share documented, §4 numbers corrected (horizon, strata, tiers).
 - Calibration: `CALIBRATION.md` (privileged 0.41 overall / 0.24 c4, revealed v0.5 scripted ~0.20,

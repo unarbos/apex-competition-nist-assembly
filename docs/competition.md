@@ -40,7 +40,7 @@ The point of these changes is to reward policies that generalise. A controller t
 
 **Evaluation Overview**
 
-Each live evaluation runs **96 episodes**: 8 strata (number of pegs K ∈ {3, 4, 5, 6} × clutter low/high) with 12 episodes each. (It was 128 on v0.5; compound episodes are about 1.4× longer, so the count was cut to fit the time limit on 2 CPUs.) Inside each stratum, the physical conditions are drawn by Latin hypercube. Each episode gets a sensing difficulty tier (about **25% easy, 35% medium, 40% hard**) and a complexity tier (**15% c1, 30% c2, 30% c3, 25% c4**).
+Each live evaluation runs **64 episodes**: 8 strata (number of pegs K ∈ {3, 4, 5, 6} × clutter low/high) with 8 episodes each. (It was 128 on v0.5. Compound episodes cost about 2.4× more to simulate, so the count was cut to fit the time limit on 2 CPUs.) Inside each stratum, the physical conditions are drawn by Latin hypercube. Each episode gets a sensing difficulty tier (about **25% easy, 35% medium, 40% hard**) and a complexity tier (**15% c1, 30% c2, 30% c3, 25% c4**).
 
 | Condition | Live range |
 | --- | --- |
@@ -113,7 +113,7 @@ The policy returns **5 floats in [−1, 1]**: `dx, dy, dz` (±4 mm per step), `d
   * `player_fault`: the `/act` call errored, missed its deadline, or returned a batch of the wrong shape. Ends every episode still running.
 * In every case, steps that are done when the episode stops keep their credit; unfinished steps keep their partial-progress credit.
 * One batched `/act` call per control step covers every episode still running, with a **500 ms deadline per call**.
-* Timeouts: **1800 s** for the referee and for the player. A full v0.6 live evaluation is projected at about **420 – 700 s** (v0.5.1 took about 585 s for 128 episodes).
+* Timeouts: **1800 s** for the referee and for the player. A full v0.6 live evaluation (64 episodes) is projected at about **500 – 1150 s**, depending on the policy (v0.5.1 took about 585 s for 128 episodes).
 * Player and referee each run on **2 CPU / 2 GiB / no GPU**.
 
 **Scoring**

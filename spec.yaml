@@ -43,7 +43,7 @@ entrypoints:
     network_disabled: false
     allow_internet: false
     # 1800 s (since 0.2.1). v0.5 128-episode rounds took ~400-660 s on Macrocosmos staging; v0.6 compound
-    # episodes cost ~1.4x, so live rounds use 12/stratum (96 episodes, ~420-700 s projected) on 2 CPU.
+    # episodes cost ~2.4x (measured), so live rounds use 8/stratum (64 episodes, ~500-1150 s projected) on 2 CPU.
     timeout_s: 1800
     http_api:
       port: 8000
