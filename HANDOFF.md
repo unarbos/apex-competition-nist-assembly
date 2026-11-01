@@ -1,12 +1,13 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.5.1
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.0
 
 ## 1. Goal statement & alignment plan
-**What success looks like:** a single learned policy that sequentially assembles several
-NIST ATB-1 pegs on a full board under free order, clutter, tight fits, and sensor/actuation
-perturbations. It generalises across sizes and start states. Partial-credit scoring keeps
+**What success looks like:** a single learned policy that completes random compound
+assembly graphs (peg inserts, collars, twist-locks, precedence, parts in waves, hidden physics
+changes between subtasks) on a full NIST ATB-1-style board under clutter, tight fits, and
+sensor/actuation perturbations. It generalises across sizes and start states. Partial-credit scoring keeps
 headroom above plain success so the platform 1% takeover rule stays usable.
 
-- Check 1: success is not concentrated in one K or size. Per-K and per-size seat rates are reported.
+- Check 1: success is not concentrated in one tier, step kind or size. Per-tier scores, step-done fraction and per-size seat rates are reported.
 - Check 2: performance holds on reserved conditions (held-out LHS sub-ranges).
 - Check 3: actions stay physically sensible (mean squared action recorded; not ranked).
 - Review cadence: each round, replay top trajectories (`tools/read_records.py --episode`).
@@ -14,8 +15,8 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.5.1` | ☑ |
-| `spec.yaml` version `0.5.1`, v0.5.1 digests pinned | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.0` | ☑ |
+| `spec.yaml` version `0.6.0`, v0.6.0 digests pinned | `spec.yaml` | ☐ after the release run |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:b1724099a7a39c5e6cbf69107e6e30a571a305af017e38d7b7f20126ed561966` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:7d83da82b0bc90d88a163ab6c93da9e637d1ea6967c47d991ea92e1d5fa40064` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -25,7 +26,8 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 41125321583 (tag `v0.5.1`), both cosign-verified.
+onnxruntime 1.31.0. The digests above are the v0.5.1 ones (release run 41125321583) until the v0.6.0
+release run pins new ones.
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
@@ -37,19 +39,37 @@ onnxruntime 1.31.0. Image digests from release run 41125321583 (tag `v0.5.1`), b
 | lower_is_better | false | |
 | baseline_raw_score / baseline_score | 0.0 / 0.0 | platform convention |
 | resources | 2 CPU / 2Gi / 0 GPU | 2 sim workers |
-| evaluate / referee timeout_s | 1800 / 1800 (since 0.2.1) | 128-episode live rounds took ~400–660 s on Macrocosmos staging |
+| evaluate / referee timeout_s | 1800 / 1800 (since 0.2.1) | v0.5 128-episode live rounds took ~400–660 s on Macrocosmos staging; v0.6 at 96 episodes is projected at ~420–700 s (§4) |
+| episodes_per_stratum (round input) | **12** on 2 CPU (96 episodes); 16 (128) only with 4 referee CPUs and `workers` 4 | §4 |
 | deadline_ms | 500 per batched step | |
 
 ## 4. Round variation & evaluation sizing
-- **Strata:** `(K ∈ {3,4,5,6}) × (clutter low|high)` = 8 strata × 8 episodes = **64**/round. Mean K = 4.5.
-- **Axes (LHS inside strata):** clearance 0.05–0.6 mm, friction 0.3–1.2, mass 5–50 g, gain 0.6–1.4,
-  obs noise 0–1 mm, angular noise 0–0.03 rad, dropout, act delay 0–3, disturbance 0/1, plus board pose,
-  peg subset, start types, clutter poses.
-- **Horizon:** `200 × K` control steps (8 s/peg @ 25 Hz).
-- **Scoring:** per-peg `0.75 + 0.25·(time/effort)`; episode mean; round mean. Wrong slot / knocked out = 0.
+- **Strata:** `(K ∈ {3,4,5,6}) × (clutter low|high)` = 8 strata. The fixture uses 8 per stratum (64
+  episodes). Live rounds ran at 16 (128) on v0.5; **v0.6 live: 12 per stratum = 96 episodes** on
+  2 CPU (see Budget). Mean K = 4.5 before the c3/c4 extra pegs.
+- **Tiers:** sensing difficulty 25% easy / 35% medium / 40% hard (unchanged). Complexity tiers
+  c1–c4 are assigned 15/30/30/25% within each stratum.
+- **Axes (LHS inside strata, v0.5.1 ranges):** clearance 0.25–0.8 mm with variable chamfer,
+  friction 0.3–1.3, mass 5–50 g, gain ×0.6–1.4, pose noise 0.8–3.5 mm and 0.015–0.06 rad,
+  dropout 3–18%, hole-estimate bias 4–10 mm, peg-vs-hole residual 5–11.5 mm, drift 0.01–0.06 mm/step,
+  backlash, rare act delay, disturbance, plus board pose, layout, families, start types, clutter.
+- **Compound layer (v0.6):** steps (insert / collar / twist), precedence edges, 1–4 waves, and
+  between-step events (friction, gain, mass, delay, re-bias, shove). Glitch bursts run at half the
+  v0.5.1 rate and cover ~25% of control steps (easy 16 / medium 25 / hard 29%).
+- **Horizon:** Σ step budgets (insert 260, +140 lying, collar 200, twist 130) × tier slack
+  (1.2 / 1.0 / 0.85 / 0.70) + 40 per extra wave; mean ~1,810 control steps. (v0.5.x: 280 × K, mean
+  ~1,260; the "200 × K" previously listed here was stale.)
+- **Scoring:** weighted per-step credit (insert 0.3 / collar 1.5 / twist 1.0). A done step earns
+  0.70 + 0.30·time, or ×0.15 if done out of order; an unfinished step earns ≤ 0.30 partial progress;
+  episode = weighted mean, round = mean.
+- **Lying pegs:** reachable and graspable, but the privileged solver seats 0/64. They are ~13% of
+  inserts and are stated as unproven headroom in `CALIBRATION.md`.
 - **Reserved region:** `reserve.py` draws from extended `RANGES` at referee build time.
-- **Budget:** full board ~15k physics steps/s on the box; 64 × 1200 × 40 ≈ 3.1M substeps → ~100–120 s
-  with 2 workers locally; prod ~3–4× slower; live 128-episode rounds ~400–660 s, inside the 1800 s timeout. See `CALIBRATION.md`.
+- **Budget:** a v0.6 episode costs ~1.4× a v0.5.1 episode: 1.44× the control steps, and per-step
+  cost at 500 Hz with 8-segment collars ≈ v0.5.1 at 1 kHz. Scaling the observed v0.5 live
+  400–660 s for 128 episodes gives ~560–930 s for 128 v0.6 episodes on 2 CPU, or **~420–700 s for
+  96**. With 4 referee CPUs and `workers` 4, 128 episodes would take ~300–500 s. The 1800 s timeout
+  holds either way. Local podman smoke on the released digests: see the release notes.
 
 ## 5. Threat-model questionnaire
 Unchanged process: answers withheld from the public repo; available to Macrocosmos privately.
@@ -126,6 +146,31 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 - Calibration: see `CALIBRATION.md`. Revealed v0.5.0 scripted top submissions drop from
   ~0.9 to ≤ ~0.27; privileged reference 0.66.
 
-## 11. Supersedes
+## 11. v0.6.0 changes (compound tasks, breaking)
+- Every episode is a random compound assembly graph (`referee/nist_sim/compound.py`):
+  - steps: peg `insert`, `collar` (a ring that fits only over a seated peg) and `twist` (turn a
+    seated round peg 1.2–2.0 rad);
+  - mandatory and random precedence edges; parts in 1–4 waves;
+  - hidden events between subtasks;
+  - complexity tiers c1–c4;
+  - at least one collar or twist per episode;
+  - lost parts are removed rather than ending the episode.
+- Scoring: weighted per-step partial credit (`compound_score`), replacing the per-peg score.
+- Observation `[B, 288]`: the v0.5 184-d prefix plus a task table (8×6), a collar table (4×13) and
+  globals (4). The player passes a statically 184-wide policy the prefix, so v0.5 submissions
+  still load (and score ~0.2).
+- Physics at 500 Hz (20 substeps), 8-segment collars. Action rounding stays **off**: it ships only
+  together with a stateful-policy protocol.
+- Records `nist_lite_record/3`. Episode rows add `task` (tier, n_steps, kinds, n_edges, n_waves,
+  n_collars), `tier`, `steps_done`, `steps_in_order`, `n_steps`, `credit_by_kind`, `events_fired`
+  and `parts_lost`. Result summary keys add `step_done_fraction` and `score_c1..c4`; the per-K
+  `score_k*` keys are gone.
+- Round input: `episodes_per_stratum` 12 recommended on 2 CPU (§4).
+- Folded in from the v0.5.2 notes: lying-peg ceiling stated (0/64 privileged, unproven
+  headroom), glitch-burst step share documented, §4 numbers corrected (horizon, strata, tiers).
+- Calibration: `CALIBRATION.md` (privileged 0.41 overall / 0.24 c4, revealed v0.5 scripted ~0.20,
+  zero 0.008). Learned-beats-scripted is open; work continues after launch.
+
+## 12. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The
 efficiency idea is reused inside the per-peg `0.75 + 0.25·time` term.

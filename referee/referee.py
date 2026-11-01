@@ -1,14 +1,16 @@
-"""nist_lite REFEREE: multi-peg board simulation and scoring (v0.5.1).
+"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.0).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the
 player gets one batched observation for the episodes still running and returns one
 action per episode.
 
-raw_score = mean of per-episode scores (fixed denominator). Each episode score is
-the mean per-peg partial credit (see nist_sim.scoring). A fault (NaN / wrong shape /
-late) ends that episode: remaining unseated pegs score 0; already-seated pegs keep
-their credit if still seated when the episode stops.
+raw_score = mean of per-episode scores (fixed denominator). Since v0.6 every episode is a
+random compound task graph (inserts, collars, twist-locks, precedence, waves, hidden physics
+changes between subtasks; nist_sim.compound) and its score is the weighted per-step partial
+credit (compound_score). A fault (NaN / wrong shape / late) ends that episode; steps already
+done keep their credit if still done when it stops. The observation is 288-d; its first 184
+dims are the v0.5 layout, so 184-input policies keep running on the prefix (player/launch.py).
 """
 
 from __future__ import annotations
@@ -23,17 +25,24 @@ from typing import Any
 
 import numpy as np
 
+# The live task is the v0.6 compound profile; set before nist_sim is imported (env.py reads it).
+os.environ.setdefault("NIST_PROFILE", "v06")
+
 from gym_v1.client import PlayerClient, PlayerError
 from gym_v1.referee import GameResult, Referee, RefereeContext
 
+from nist_sim import profile as _profile
+from nist_sim.compound import OBS_DIM_V06, CompoundEpisode, compound_score, sample_compound
 from nist_sim.conditions import episode_seed_sequence, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
 from nist_sim.scoring import episode_score, raw_score_from_episodes
 
-RECORD_FORMAT = "nist_lite_record/2"
+COMPOUND = _profile.ACTIVE.name == "v06"
+OBS_W = OBS_DIM_V06 if COMPOUND else OBS_DIM
+RECORD_FORMAT = "nist_lite_record/3" if COMPOUND else "nist_lite_record/2"
 HISTORY_DIR = Path(os.environ.get("NIST_HISTORY_DIR", "/data/history"))
 DEFAULTS = {
-    "episodes_per_stratum": 8,
+    "episodes_per_stratum": 12,
     "deadline_ms": 500,
     "workers": 2,
     "record_stride": 8,
@@ -41,15 +50,19 @@ DEFAULTS = {
 }
 
 
+def _sample(seed: int, per_stratum: int, split: str):
+    return sample_compound(seed, per_stratum, split) if COMPOUND else sample_episodes(seed, per_stratum, split)
+
+
 def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, split: str):
-    _, conds = sample_episodes(seed, per_stratum, split)
+    _, conds = _sample(seed, per_stratum, split)
     eps = {}
     noise = {}
     traj = {}
     for i in indices:
         ss = episode_seed_sequence(seed, i)
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
-        eps[i] = Episode(conds[i], r1)
+        eps[i] = CompoundEpisode(conds[i], r1) if COMPOUND else Episode(conds[i], r1)
         noise[i] = r2
         if stride and i % stride == 0:
             traj[i] = []
@@ -60,7 +73,7 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
             obs = (
                 np.stack([eps[i].observe(noise[i]) for i in ids])
                 if ids
-                else np.zeros((0, OBS_DIM), np.float32)
+                else np.zeros((0, OBS_W), np.float32)
             )
             conn.send((ids, obs))
         elif msg[0] == "act":
@@ -96,8 +109,9 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                 seated = e.peg_seated_at_end()
                 first = e.peg_first_seat_steps()
                 msa = e.action_l2 / max(1, e.steps)
-                score = episode_score(seated, first, e.c.max_steps, msa)
-                rows.append({
+                cinfo = compound_score(e) if COMPOUND else None
+                score = cinfo["score"] if COMPOUND else episode_score(seated, first, e.c.max_steps, msa)
+                row = {
                     "format": RECORD_FORMAT,
                     "episode": i,
                     "conditions": conds[i].public(),
@@ -111,7 +125,17 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                     "pegs_seated": int(sum(seated)),
                     "n_pegs": e.n_pegs,
                     "score": score,
-                })
+                }
+                if COMPOUND:
+                    row["task"] = conds[i].compound.public()
+                    row["tier"] = conds[i].compound.tier
+                    row["steps_done"] = cinfo["n_done"]
+                    row["steps_in_order"] = cinfo["n_in_order"]
+                    row["n_steps"] = cinfo["n_steps"]
+                    row["credit_by_kind"] = cinfo["per_kind"]
+                    row["events_fired"] = cinfo["events"]
+                    row["parts_lost"] = int(e.parts_lost)
+                rows.append(row)
             conn.send((rows, traj))
             return
 
@@ -141,7 +165,7 @@ class NistLiteReferee(Referee):
         deadline_ms = int(cfg["deadline_ms"])
         stride = int(cfg["record_stride"]) if cfg["records_enabled"] else 0
         split = os.environ.get("NIST_SPLIT", "live")
-        round_ranges, conds = sample_episodes(ctx.seed, per, split)
+        round_ranges, conds = _sample(ctx.seed, per, split)
         n = len(conds)
         max_steps = max(c.max_steps for c in conds)
         workers = max(1, int(cfg["workers"]))
@@ -165,7 +189,7 @@ class NistLiteReferee(Referee):
                 match_id=ctx.match_id,
                 player_index=0,
                 seed=0,
-                config={"obs_dim": OBS_DIM, "act_dim": ACT_DIM, "control_hz": CONTROL_HZ},
+                config={"obs_dim": OBS_W, "obs_dim_v05_prefix": OBS_DIM, "act_dim": ACT_DIM, "control_hz": CONTROL_HZ},
             )
         except (PlayerError, OSError, http.client.HTTPException) as e:
             player_fault = f"reset failed: {type(e).__name__}"
@@ -227,7 +251,7 @@ class NistLiteReferee(Referee):
         by_size: dict[str, list[int]] = {}
         for r in rows:
             c = r["conditions"]
-            by_k.setdefault(f'k{c["n_pegs"]}', []).append(float(r["score"]))
+            by_k.setdefault(r["tier"] if COMPOUND else f'k{c["n_pegs"]}', []).append(float(r["score"]))
             for peg, seated in zip(c["pegs"], r["peg_seated_at_end"]):
                 dia = float(peg["size"])
                 size_class = "small" if dia < 0.008 else "medium" if dia < 0.012 else "large"
@@ -239,7 +263,11 @@ class NistLiteReferee(Referee):
             {"key": "success_rate", "label": "Full-board success rate", "value": success_rate, "format": "percent"},
             {"key": "peg_seat_fraction", "label": "Fraction of pegs seated", "value": peg_fraction, "format": "percent"},
             {"key": "episodes", "label": "Episodes", "value": n, "format": "count"},
-        ] + [
+        ] + ([
+            {"key": "step_done_fraction", "label": "Fraction of task steps done",
+             "value": sum(r["steps_done"] for r in rows) / max(1, sum(r["n_steps"] for r in rows)),
+             "format": "percent"},
+        ] if COMPOUND else []) + [
             {
                 "key": f"score_{k}",
                 "label": f"Score: {k}",
@@ -265,8 +293,9 @@ class NistLiteReferee(Referee):
                     "id": f"ep-{r['episode']}",
                     "type": "instance",
                     "index": r["episode"],
-                    "label": f'K={r["conditions"]["n_pegs"]} / {r["conditions"]["clutter_bucket"]} clutter',
-                    "category": f'k{r["conditions"]["n_pegs"]}',
+                    "label": (f'{r["tier"]} / {r["n_steps"]} steps / K={r["conditions"]["n_pegs"]}' if COMPOUND
+                              else f'K={r["conditions"]["n_pegs"]} / {r["conditions"]["clutter_bucket"]} clutter'),
+                    "category": r["tier"] if COMPOUND else f'k{r["conditions"]["n_pegs"]}',
                     "steps": r["steps"],
                     "outcome": "assembled" if r["success"] else r["terminal_reason"],
                 }

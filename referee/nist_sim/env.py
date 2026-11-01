@@ -23,6 +23,7 @@ from typing import Deque
 import mujoco
 import numpy as np
 
+from . import profile as _profile
 from .conditions import (
     GLITCH_LEN,
     GLITCH_NOISE_GAIN,
@@ -48,7 +49,7 @@ MAX_PEGS = N_SLOTS
 OBS_DIM = PROPRIO_DIM + ACT_DIM + MAX_PEGS * PEG_FEAT + MAX_CLUTTER * CLUTTER_FEAT  # 184
 
 CONTROL_HZ = 25
-PHYSICS_DT = 0.001
+PHYSICS_DT = float(_profile.ACTIVE.physics_dt)  # 0.001 under the live v05 profile
 SUBSTEPS = int(round(1.0 / (CONTROL_HZ * PHYSICS_DT)))  # 40
 # Contact width must stay below the minimum radial clearance so soft contacts
 # cannot cheat the fit. 0.02 mm << 0.2 mm live lower bound.
@@ -378,7 +379,9 @@ class Episode:
     def __init__(self, cond: EpisodeConditions, rng: np.random.Generator):
         self.c = cond
         self.rng = rng
-        self.model = mujoco.MjModel.from_xml_string(build_xml(cond))
+        # v0.6-dev: referee-side action quantization (0 under the live v05 profile).
+        self.action_quant = float(_profile.ACTIVE.action_quant)
+        self.model = mujoco.MjModel.from_xml_string(self._model_xml(cond))
         self.data = mujoco.MjData(self.model)
         m = self.model
         self.n_pegs = len(cond.pegs)
@@ -467,6 +470,13 @@ class Episode:
         self._glitch_slot = np.zeros((max(1, self.n_pegs), 2))
         self._glitch_clutter = np.zeros((max(1, self.n_clutter), 2))
         self._reset()
+
+    # ---- subclass hooks (v0.6 compound episodes) --------------------------------
+    def _model_xml(self, cond: EpisodeConditions) -> str:
+        return build_xml(cond)
+
+    def _all_seated_ends_episode(self) -> bool:
+        return True
 
     # ---- hand / part helpers -------------------------------------------------
     def _set_hand(self, xyz, yaw, open_frac):
@@ -990,6 +1000,8 @@ class Episode:
         if self.done:
             return
         a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
+        if self.action_quant > 0.0:
+            a = _profile.quantize_action(a, self.action_quant)
         self.action_l2 += float(np.sum(a * a))
         self.last_action = a.copy()
 
@@ -1047,7 +1059,7 @@ class Episode:
                 # Knocked out after a prior seat → no longer seated at end.
                 self.seated_now[i] = False
 
-        if all(self.seated_now) and self.n_pegs > 0:
+        if all(self.seated_now) and self.n_pegs > 0 and self._all_seated_ends_episode():
             # Gripper already clear by seated predicate; end early.
             self.done = True
             self.success = True
