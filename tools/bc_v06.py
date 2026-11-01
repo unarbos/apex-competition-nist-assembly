@@ -90,7 +90,7 @@ def main() -> None:
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tot += float(loss) * len(idx)
+            tot += float(loss.detach()) * len(idx)
         if ep % 5 == 0 or ep == a.epochs - 1:
             print(f"epoch {ep} mse {tot / n:.4f}", flush=True)
 
@@ -105,6 +105,7 @@ def main() -> None:
             return self.net((x - self.mu) / self.sd)
 
     m = Wrapped().eval()
+    torch.save(m.state_dict(), a.out + ".pt")  # keep the weights if the ONNX export fails
     torch.onnx.export(m, torch.zeros(1, X.shape[1]), a.out, input_names=["obs"], output_names=["action"],
                       dynamic_axes={"obs": {0: "B"}, "action": {0: "B"}}, opset_version=17, dynamo=False)
     print("wrote", a.out, f"{time.time() - t:.0f} s total")
