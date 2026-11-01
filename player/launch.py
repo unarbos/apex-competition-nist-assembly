@@ -1,7 +1,8 @@
 """nist_lite PLAYER server: serves the miner's ONNX policy over gym_v1.
 
 The platform writes the miner's policy to /app/policy.onnx. The referee calls /act once per
-control step with a batch of observations (shape [B, OBS_DIM]); the policy returns [B, 5] actions.
+control step with a batch of observations (shape [B, 288] since v0.6); the policy returns [B, 5]
+actions. A policy whose input is 184 wide (the v0.5 layout) gets the first 184 dims of each row.
 """
 
 from __future__ import annotations
@@ -18,14 +19,20 @@ import onnxruntime as ort
 from gym_v1.player import Player, serve
 
 POLICY_PATH = os.environ.get("NIST_POLICY_PATH", "/app/policy.onnx")
-# Must match referee/nist_sim/env.py OBS_DIM / ACT_DIM (v0.2.0 multi-peg board).
-OBS_DIM, ACT_DIM = 184, 5
+# Must match referee/nist_sim/compound.py OBS_DIM_V06 and env.py OBS_DIM / ACT_DIM.
+OBS_DIM, OBS_DIM_V05, ACT_DIM = 288, 184, 5
 ALLOWED_DOMAINS = {"", "ai.onnx"}
 MIN_OPSET, MAX_OPSET = 13, 21
 
 
 class PolicyRejected(RuntimeError):
     pass
+
+
+def input_width(sess: ort.InferenceSession) -> int:
+    """288 (full v0.6 obs) unless the policy input is statically 184 wide (v0.5 layout)."""
+    shp = sess.get_inputs()[0].shape
+    return OBS_DIM_V05 if (len(shp) == 2 and shp[1] == OBS_DIM_V05) else OBS_DIM
 
 
 def load_policy(path: str) -> ort.InferenceSession:
@@ -50,7 +57,7 @@ def load_policy(path: str) -> ort.InferenceSession:
     ins, outs = sess.get_inputs(), sess.get_outputs()
     if len(ins) != 1 or len(outs) < 1:
         raise PolicyRejected("policy must have exactly one input and at least one output")
-    probe = sess.run(None, {ins[0].name: np.zeros((2, OBS_DIM), np.float32)})[0]
+    probe = sess.run(None, {ins[0].name: np.zeros((2, input_width(sess)), np.float32)})[0]
     if probe.shape != (2, ACT_DIM):
         raise PolicyRejected(f"policy output shape {probe.shape} != (batch, {ACT_DIM})")
     return sess
@@ -60,13 +67,14 @@ class OnnxPolicyPlayer(Player):
     def __init__(self) -> None:
         self.sess = load_policy(POLICY_PATH)  # failure here = not ready = submission fault
         self.inp = self.sess.get_inputs()[0].name
+        self.width = input_width(self.sess)
 
     def reset(self, match_id: str, player_index: int, seed: int, config: dict[str, Any]) -> None:
         pass
 
     def act(self, observation: Any, deadline_ms: int) -> Any:  # noqa: ARG002
         obs = np.asarray(observation, dtype=np.float32).reshape(-1, OBS_DIM)
-        out = self.sess.run(None, {self.inp: obs})[0]
+        out = self.sess.run(None, {self.inp: obs[:, : self.width]})[0]
         return np.asarray(out, dtype=np.float64).reshape(obs.shape[0], ACT_DIM).tolist()
 
 
