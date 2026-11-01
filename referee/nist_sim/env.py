@@ -49,7 +49,7 @@ MAX_PEGS = N_SLOTS
 OBS_DIM = PROPRIO_DIM + ACT_DIM + MAX_PEGS * PEG_FEAT + MAX_CLUTTER * CLUTTER_FEAT  # 184
 
 CONTROL_HZ = 25
-PHYSICS_DT = 0.001
+PHYSICS_DT = float(_profile.ACTIVE.physics_dt)  # 0.001 under the live v05 profile
 SUBSTEPS = int(round(1.0 / (CONTROL_HZ * PHYSICS_DT)))  # 40
 # Contact width must stay below the minimum radial clearance so soft contacts
 # cannot cheat the fit. 0.02 mm << 0.2 mm live lower bound.

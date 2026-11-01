@@ -268,7 +268,7 @@ def bars_table(summ: dict) -> list[tuple[str, str, str, str]]:
 
 
 def write_md(path: Path, summ: dict, args) -> None:
-    L = [f"# v0.6 calibration run (profile `{args.profile}`, action quant {os.environ.get('NIST_ACTION_QUANT') or 'profile default'})", "",
+    L = [f"# v0.6 calibration run (profile `{args.profile}`, action quant {os.environ.get('NIST_ACTION_QUANT') or 'profile default'}, physics dt {os.environ.get('NIST_PHYSICS_DT') or 'profile default'})", "",
          f"Seeds {args.seeds}, {args.per}/stratum, split `{args.split}`, {summ['episodes']} paired episodes. "
          f"Projection: {args.live_eps} live episodes on {args.cpus} CPU x prod factor {args.prod_factor}.", "",
          "| Policy | mean | by tier | mean s/episode | projected live s |", "|---|---|---|---|---|"]
@@ -312,6 +312,7 @@ def main() -> None:
                          "calls; v0.5.x king-class policies: ~17 s/episode here vs ~400-660 s per 128-episode live "
                          "round on 2 CPU -> ~0.55. Recalibrate after each smoke run.")
     ap.add_argument("--action-quant", type=float, default=None, help="dev override of the profile's action quantization")
+    ap.add_argument("--physics-dt", type=float, default=None, help="dev override of the profile's physics timestep")
     ap.add_argument("--out", default="calib_v06_out")
     a = ap.parse_args()
     def _abs(s: str) -> str:
@@ -323,6 +324,8 @@ def main() -> None:
         a.ref = _abs(a.ref)
     if a.action_quant is not None:
         os.environ["NIST_ACTION_QUANT"] = str(a.action_quant)
+    if a.physics_dt is not None:
+        os.environ["NIST_PHYSICS_DT"] = str(a.physics_dt)
     task = a.task or ("compound" if a.profile == "v06" else "v05")
     jobs = [(s, seed, a.per, i, a.split, task) for s in specs for seed in a.seeds for i in range(8 * a.per)]
     if a.episodes:

@@ -22,6 +22,8 @@ class Profile:
     # multiple of ``action_quant`` after clipping, so policies that behave the same up to tiny
     # numeric differences produce identical commands, trajectories and scores.
     action_quant: float = 0.0
+    # Physics timestep (s); control stays 25 Hz. 0.001 = v0.5 (40 substeps). 0.002 halves the cost.
+    physics_dt: float = 0.001
     # --- v0.6 targets (not wired yet) ---
     n_slots: int = 8
     k_values: tuple[int, ...] = (3, 4, 5, 6)
@@ -61,6 +63,9 @@ def get(name: str | None = None) -> Profile:
         raise ValueError(f"unknown NIST_PROFILE {key!r}; expected one of {sorted(PROFILES)}")
     p = PROFILES[key]
     # Dev-only override for calibration sweeps (never set in released images).
+    dt = os.environ.get("NIST_PHYSICS_DT")
+    if name is None and dt:
+        p = replace(p, physics_dt=float(dt))
     q = os.environ.get("NIST_ACTION_QUANT")
     if name is None and q:
         p = replace(p, action_quant=float(q))

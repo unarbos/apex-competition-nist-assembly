@@ -59,6 +59,7 @@ COLLAR_SEAT_XY = 0.003
 COLLAR_SEAT_Z = 0.0015
 TWIST_TARGET = (1.2, 2.0)  # rad
 PARK_Z = 0.6
+MASS_MIN, MASS_MAX = 0.008, 0.08  # kg, after a mass event
 EVENT_KINDS = ("friction", "gain", "mass", "delay", "rebias", "shove")
 EVENT_WEIGHTS = np.array([0.18, 0.18, 0.14, 0.12, 0.22, 0.16])
 
@@ -204,7 +205,7 @@ def _draw_event(rng: np.random.Generator) -> dict:
     if kind == "gain":
         return dict(kind=kind, scale=float(rng.uniform(0.6, 1.4)))
     if kind == "mass":
-        return dict(kind=kind, scale=float(rng.uniform(0.5, 2.0)))
+        return dict(kind=kind, scale=float(rng.uniform(0.7, 2.0)))
     if kind == "delay":
         return dict(kind=kind, steps=int(rng.integers(0, 3)))
     if kind == "rebias":
@@ -506,8 +507,11 @@ class CompoundEpisode(Episode):
                 m.actuator_biasprm[a, 1] = self._base_bias[a] * ev["scale"]
         elif kind == "mass":
             for b in self.peg_body:
-                m.body_mass[b] = self._base_mass[b] * ev["scale"]
-                m.body_inertia[b] = self._base_inertia[b] * ev["scale"]
+                # Very light pegs (< 8 g) with tiny inertia blow up in contact; clamp the result.
+                new = float(np.clip(self._base_mass[b] * ev["scale"], MASS_MIN, MASS_MAX))
+                ratio = new / max(1e-9, float(self._base_mass[b]))
+                m.body_mass[b] = new
+                m.body_inertia[b] = self._base_inertia[b] * ratio
         elif kind == "delay":
             self._act_delay = int(ev["steps"])
             self.c.act_delay = self._act_delay  # privileged tooling reads the cond
