@@ -42,7 +42,7 @@ OBS_W = OBS_DIM_V06 if COMPOUND else OBS_DIM
 RECORD_FORMAT = "nist_lite_record/3" if COMPOUND else "nist_lite_record/2"
 HISTORY_DIR = Path(os.environ.get("NIST_HISTORY_DIR", "/data/history"))
 DEFAULTS = {
-    "episodes_per_stratum": 8,
+    "episodes_per_stratum": 12,
     "deadline_ms": 500,
     "workers": 2,
     "record_stride": 8,

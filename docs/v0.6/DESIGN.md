@@ -1,6 +1,4 @@
-# NIST-Lite v0.6 "Assembly II": design draft (work in progress, branch `v0.6-dev`)
-
-Not released. `main`, the spec, and the digests are unchanged.
+# NIST-Lite v0.6 "Assembly II": design (released as v0.6.0)
 
 ## Goal
 
@@ -48,6 +46,7 @@ score is the weighted mean.
 
 ## Status
 
-Generator, rubric, privileged solver (`tools/compound_solver.py`), calibration harness,
-and a BC learnability probe (`tools/bc_v06.py`) are on this branch. Calibration and
-eval-budget sizing are in progress.
+Released in v0.6.0. The referee runs this task, and the live round size is 12 episodes per stratum
+(96) on 2 CPU. Open after launch: a learned policy beating scripted (naive BC 0.006; DAgger with a
+stateful policy and PPO are next), a stateful-policy protocol with action rounding, and more
+step kinds (gear/key, screw, rework, stack).

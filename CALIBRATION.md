@@ -1,4 +1,59 @@
-# NIST-Lite v0.5.1 calibration (observation hardening)
+# NIST-Lite calibration
+
+## v0.6.0 (compound tasks)
+
+Measured with `tools/calib_v06.py --profile v06` (same episode draw, per-episode RNG streams,
+`CompoundEpisode` and `compound_score` as the referee; dev build), live mix, seeds 1–2,
+4 episodes per stratum: 64 paired episodes. Physics at 500 Hz, action rounding off.
+
+| Policy | Overall | c1 / c2 / c3 / c4 | steps done | credit by kind (collar / insert / twist) |
+|---|---|---|---|---|
+| zero (no-op) | **0.008** | 0.01 / 0.01 / 0.01 / 0.01 | 0.01 | 0 / 0.03 / 0 |
+| obs-only scripted (`ObsOnlyScripted`, 184-d prefix) | **0.018** | 0.03 / 0.01 / 0.01 / 0.01 | 0.03 | 0 / 0.06 / 0 |
+| revealed v0.5.0 scripted submission: round-15 king (private fixture, 184-d prefix) | **0.202** | 0.30 / 0.26 / 0.12 / 0.13 | 0.49 | 0 / 0.66 / 0 |
+| revealed v0.5.0 scripted submission: round-14 entry (private fixture, 184-d prefix) | **0.190** | 0.29 / 0.24 / 0.12 / 0.11 | 0.47 | 0 / 0.62 / 0 |
+| naive BC of the privileged solver (128 demos, 3×256 MLP, memoryless, 288-d) | **0.006** | 0.01 / 0.01 / 0.00 / 0.00 | 0.00 | 0 / 0.02 / 0 |
+| privileged compound solver (`tools/compound_solver.py`, true state) | **0.406** | 0.60 / 0.52 / 0.26 / 0.24 | 0.49 | 0.34 / 0.55 / 0.34 |
+
+The revealed submissions vs the privileged solver: paired Δ −0.20 to −0.22 (SE 0.03, z ≈ −7). No
+simulation blow-ups in 320 episodes. Revealed v0.5 controllers still insert pegs well. They earn
+nothing on collars and twists, which carry most of the weight.
+
+Bars for this release:
+
+| Bar | Target | v0.6.0 | Met |
+|---|---|---|---|
+| privileged solver overall (solvability) | ≥ 0.30 | 0.406 | yes |
+| privileged solver on c4 (ceiling headroom) | ≤ 0.70 | 0.24 | yes |
+| best fixed scripted controller | ≤ 0.5 × privileged (0.203) | 0.202 | yes (just) |
+| zero / obs-only scripted | low | 0.008 / 0.018 | yes |
+| learned policy beats best scripted (paired z ≥ 3) | | naive BC 0.006; DAgger / PPO not yet run | **no (open)** |
+| eval wall time | fits 1800 s with margin on 2 CPU | see HANDOFF §4 | |
+
+**Lying-peg ceiling.** Over 96 episodes (seeds 11–13), the privileged solver completed these
+inserts by start type: grasped 61/69 (0.88), tray 11/16 (0.69), near-hole 147/231 (0.64), loose
+77/124 (0.62), lying **0/64**. Lying pegs can be reached and grasped
+(`tests/test_lying_grasp.py`), but no controller of ours re-orients and seats one on the
+multi-peg board. Lying pegs are about 13% of insert steps. Their inserts, and the collar/twist
+steps on the same pegs, should be read as unproven headroom. They are not a demonstrated part of
+the ceiling.
+
+**Glitch-burst share.** Estimate glitch bursts (8–30 steps, 4× noise plus a 2–6 mm offset) run at
+half the v0.5.1 rate on v0.6. On the live mix they cover **25%** of control steps: easy 16%,
+medium 25%, hard 29% (seeds 1–3, 12 per stratum, burst process only).
+
+**Cost.** A v0.6 episode averages ~1,810 control steps (v0.5.1 ~1,260). Per step, 500 Hz physics
+with 8-segment collars costs about the same as v0.5.1 at 1 kHz (1.66 vs 1.76 ms idle on this box).
+So a v0.6 episode costs about 1.4× a v0.5.1 episode. See HANDOFF §4 for the round size.
+
+Reproduce:
+
+```bash
+NIST_PROFILE=v06 python tools/calib_v06.py --profile v06 --seeds 1 2 --per 4 --workers 8 \
+  --policies reference zero obs_scripted --ref reference --out out/calib_v06
+```
+
+## v0.5.1 calibration (observation hardening, kept for history)
 
 Measured on this box (MuJoCo 3.16, CPU) with `tools/eval_policies.py` (same episode draw and
 per-episode RNG streams as the referee, dev build). Live mix, 64 episodes per seed

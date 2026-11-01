@@ -1,11 +1,12 @@
-"""Task profile switch for v0.6 development (``NIST_PROFILE``).
+"""Task profile switch (``NIST_PROFILE``).
 
-``v05`` (default) is the live v0.5.x task, bit-for-bit. ``v06`` is the v0.6 "Assembly II"
-development profile; it is built up step by step on the ``v0.6-dev`` branch and is not used
-by any released image. Code reads the active profile through :data:`ACTIVE`.
+``v06`` is the live v0.6 compound task: the referee (``referee.py``) selects it unless
+``NIST_PROFILE`` is set. ``v05`` is the library default and reproduces the v0.5.x
+single-stage task bit for bit; tests and tools that exercise v0.5 behaviour use it. Code reads
+the active profile through :data:`ACTIVE`.
 
-Only fields that are already wired into the simulator have an effect; the rest document the
-v0.6 targets so calibration tooling can report them (see docs/v0.6/DESIGN.md).
+Only the ``wired`` fields change the simulator. The rest are design targets kept for the
+calibration tooling (see docs/v0.6/DESIGN.md).
 """
 
 from __future__ import annotations
