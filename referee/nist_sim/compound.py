@@ -682,8 +682,12 @@ class CompoundEpisode(Episode):
             self.success = True
             self.success_step = self.steps
             self.terminal_reason = "assembled"
-        elif self.done and self.terminal_reason == "time_limit":
-            self.success = all(self.step_done)
+        elif self.done and self.terminal_reason in ("time_limit", "assembled"):
+            # The base class labels "all pegs seated" as assembled; a compound episode is assembled
+            # only when every step is done.
+            self.success = all(self.step_done) and all(self.wave_arrived)
+            self.terminal_reason = "assembled" if self.success else "time_limit"
+            self.success_step = self.steps if self.success else None
 
     def _step_wave(self, s: TaskStep) -> int:
         if s.kind == "collar":
