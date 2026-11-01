@@ -41,7 +41,7 @@ PROFILES: dict[str, Profile] = {
     "v05": Profile(name="v05"),
     "v06": Profile(
         name="v06",
-        action_quant=1.0 / 256.0,  # wire only together with stateful policies (step 3); see DESIGN.md
+        action_quant=0.0,  # off until the stateful-policy protocol lands (rounding alone breaks memoryless policies)
         n_slots=12,
         k_values=(4, 6, 8),
         clearance=(0.00010, 0.00050),
