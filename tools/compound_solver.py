@@ -179,6 +179,14 @@ def _priority(ep: CompoundEpisode, k: int) -> float:
     return d - 0.03 * n_dep
 
 
+def _is_lying_insert(ep: CompoundEpisode, k: int) -> bool:
+    s = ep.cs.steps[k]
+    if s.kind != "insert":
+        return False
+    _, q = ep.peg_pose(s.peg)
+    return abs(part_axis(q)[2]) < 0.5
+
+
 def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts: int = 2) -> dict:
     budget = budget or {"insert": 300, "collar": 260, "twist": 260}
     attempts = [0] * len(ep.cs.steps)
@@ -194,13 +202,18 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
         remaining = ep.c.max_steps - ep.steps
         todo = [k for k in range(len(ep.cs.steps)) if not ep.step_done[k] and _available(ep, k)
                 and attempts[k] < max_attempts]
-        ready = [k for k in todo if not ep.step_blocked(k)]
+        lying = {k for k in todo if _is_lying_insert(ep, k)}
+        in_order = [k for k in todo if not ep.step_blocked(k)]
+        # In-order steps first, then wait for the next wave, then out-of-order steps (partial
+        # credit, and they unlock dependants), and a lying-peg regrasp only as a last resort.
+        ready = [k for k in in_order if k not in lying]
+        if not ready and not all(ep.wave_arrived) and remaining > 150:
+            ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
+            continue
         if not ready:
-            waiting = not all(ep.wave_arrived)
-            if waiting and remaining > 150:
-                ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
-                continue
-            ready = todo  # out-of-order attempts for partial credit
+            ready = [k for k in todo if k not in lying]
+        if not ready and remaining > 350:
+            ready = [k for k in todo if k in lying and attempts[k] == 0]
         if not ready or remaining < 40:
             ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
             continue
@@ -210,8 +223,6 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
         if s.kind == "insert":
             _, q = ep.peg_pose(s.peg)
             lying = abs(part_axis(q)[2]) < 0.5
-            if lying and remaining < 350:
-                continue
             _push_clutter(ep, s.peg)
             run(insert_routine(ep, s.peg), min(budget["insert"] + (150 if lying else 0), remaining - 20))
         elif s.kind == "collar":

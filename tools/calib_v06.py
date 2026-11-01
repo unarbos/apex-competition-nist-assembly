@@ -38,7 +38,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Release bars (roadmap v0.6). Scores are live-mix means.
 BARS = {
-    "privileged_min": 0.60,
+    "privileged_min": 0.60,  # v05 task
+    "privileged_min_compound": 0.40,  # v06: high ceiling, privileged only has to prove solvability
+    "c4_privileged_max": 0.70,  # hardest tier must leave headroom even for the privileged solver
+    "scripted_ratio_max": 0.50,  # best non-privileged policy vs privileged
     "scripted_max": 0.35,
     "reroll_identical_min": 0.95,
     "projected_live_s_max": 400.0,
@@ -86,8 +89,55 @@ def _make_act(base: str):
     return lambda o: pol.act(o.astype(np.float32))
 
 
+def run_compound(job: tuple) -> dict:
+    """One v0.6 compound episode. 184-input policies see the v0.5-compatible obs prefix."""
+    spec, seed, per, i, split = job[:5]
+    import nist_sim.conditions as C
+    from nist_sim import profile
+    from nist_sim.compound import OBS_DIM_V06, CompoundEpisode, compound_score, sample_compound
+    from nist_sim.env import OBS_DIM
+
+    base, eps = parse_spec(spec)
+    _, conds = sample_compound(seed, per, split)
+    c = conds[i]
+    r1, r2 = (np.random.default_rng(s) for s in C.episode_seed_sequence(seed, i).spawn(2))
+    t0 = time.perf_counter()
+    e = CompoundEpisode(c, r1)
+    if base == "reference":
+        from compound_solver import solve_compound
+
+        r = solve_compound(e)
+    else:
+        act = _make_act(base)
+        width = OBS_DIM
+        if base.endswith(".onnx"):
+            import onnxruntime as ort
+
+            shp = ort.InferenceSession(base, providers=["CPUExecutionProvider"]).get_inputs()[0].shape
+            width = OBS_DIM_V06 if (len(shp) > 1 and shp[-1] == OBS_DIM_V06) else OBS_DIM
+        obs_eps = eps if eps > 0 else 0.0
+        a_rng = np.random.default_rng([seed, i, 0xAE])
+        while not e.done:
+            o = np.round(e.observe(r2), 6)[:width] + obs_eps
+            a = np.asarray(act(o), dtype=float)
+            if eps < 0:
+                a = a + (-eps) * a_rng.choice([-1.0, 1.0], size=5)
+            if not np.all(np.isfinite(a)):
+                a = np.zeros(5)
+            e.step(np.clip(a, -1, 1))
+        r = compound_score(e)
+    wall = time.perf_counter() - t0
+    return dict(policy=spec, seed=seed, i=i, score=float(r["score"]), wall_s=round(wall, 3), steps=int(e.steps),
+                max_steps=int(c.max_steps), k=int(c.n_pegs), tier=c.compound.tier, n_steps=r["n_steps"],
+                n_done=r["n_done"], n_in_order=r["n_in_order"], per_kind=r["per_kind"], events=r["events"],
+                lost=int(e.parts_lost), term=e.terminal_reason, profile=profile.ACTIVE.name,
+                action_quant=profile.ACTIVE.action_quant)
+
+
 def run_one(job: tuple) -> dict:
-    spec, seed, per, i, split = job
+    if len(job) > 5 and job[5] == "compound":
+        return run_compound(job)
+    spec, seed, per, i, split = job[:5]
     import nist_sim.conditions as C
     from nist_sim import profile
     from nist_sim.conditions import sample_episodes
@@ -164,6 +214,16 @@ def summarize(rows: list[dict], specs: list[str], ref: str | None, live_eps: int
             mean_wall_s=round(statistics.fmean(r["wall_s"] for r in rs), 3) if rs else float("nan"),
             projected_live_s=round(project_live_s(rs, live_eps, cpus, prod_factor), 1),
         )
+        if rs and "n_steps" in rs[0]:
+            kinds = defaultdict(list)
+            for r in rs:
+                for kd, v in (r.get("per_kind") or {}).items():
+                    if v is not None:
+                        kinds[kd].append(v)
+            out["policies"][s]["steps_done_frac"] = round(sum(r["n_done"] for r in rs) / max(1, sum(r["n_steps"] for r in rs)), 3)
+            out["policies"][s]["in_order_frac"] = round(sum(r["n_in_order"] for r in rs) / max(1, sum(r["n_steps"] for r in rs)), 3)
+            out["policies"][s]["kind_credit"] = {kd: round(statistics.fmean(v), 3) for kd, v in sorted(kinds.items())}
+            out["policies"][s]["mean_steps"] = round(statistics.fmean(r["steps"] for r in rs), 1)
     if ref and ref in by:
         for s in specs:
             if s != ref:
@@ -178,13 +238,25 @@ def summarize(rows: list[dict], specs: list[str], ref: str | None, live_eps: int
 def bars_table(summ: dict) -> list[tuple[str, str, str, str]]:
     P = summ["policies"]
     rows = []
+    compound = any("steps_done_frac" in p for p in P.values())
     if "reference" in P:
         v = P["reference"]["mean"]
-        rows.append(("privileged reference", f">= {BARS['privileged_min']}", f"{v:.3f}", "yes" if v >= BARS["privileged_min"] else "NO"))
-    scr = [(s, P[s]["mean"]) for s in P if (parse_spec(s)[0] in SCRIPTED or "scripted" in s) and not parse_spec(s)[1]]
+        lo = BARS["privileged_min_compound"] if compound else BARS["privileged_min"]
+        rows.append(("privileged reference", f">= {lo}", f"{v:.3f}", "yes" if v >= lo else "NO"))
+        if compound:
+            top = P["reference"]["tier"].get("c4")
+            if top is not None:
+                rows.append(("privileged on hardest tier c4 (ceiling headroom)", f"<= {BARS['c4_privileged_max']}", f"{top:.3f}",
+                             "yes" if top <= BARS["c4_privileged_max"] else "NO"))
+    scr = [(s, P[s]["mean"]) for s in P if s != "reference" and s != "zero" and not parse_spec(s)[1]]
     if scr:
         s, v = max(scr, key=lambda t: t[1])
-        rows.append((f"best scripted ({s})", f"<= {BARS['scripted_max']}", f"{v:.3f}", "yes" if v <= BARS["scripted_max"] else "NO"))
+        if compound and "reference" in P:
+            lim = BARS["scripted_ratio_max"] * P["reference"]["mean"]
+            rows.append((f"best non-privileged ({os.path.basename(s)})", f"<= {BARS['scripted_ratio_max']} x privileged = {lim:.3f}",
+                         f"{v:.3f}", "yes" if v <= lim else "NO"))
+        else:
+            rows.append((f"best scripted ({os.path.basename(s)})", f"<= {BARS['scripted_max']}", f"{v:.3f}", "yes" if v <= BARS["scripted_max"] else "NO"))
     for s, r in summ["reroll"].items():
         f = r["identical_frac"]
         rows.append((f"epsilon copy {s}: identical episodes", f">= {BARS['reroll_identical_min']}", f"{f:.2f}",
@@ -201,8 +273,14 @@ def write_md(path: Path, summ: dict, args) -> None:
          f"Projection: {args.live_eps} live episodes on {args.cpus} CPU x prod factor {args.prod_factor}.", "",
          "| Policy | mean | by tier | mean s/episode | projected live s |", "|---|---|---|---|---|"]
     for s, p in summ["policies"].items():
-        tiers = " / ".join(f"{k[0]} {v:.2f}" for k, v in p["tier"].items())
+        tiers = " / ".join(f"{k if k.startswith('c') else k[0]} {v:.2f}" for k, v in p["tier"].items())
         L.append(f"| {s} | **{p['mean']:.3f}** | {tiers} | {p['mean_wall_s']:.2f} | {p['projected_live_s']:.0f} |")
+    comp = [(s, p) for s, p in summ["policies"].items() if "steps_done_frac" in p]
+    if comp:
+        L += ["", "Compound detail:", "", "| Policy | steps done | in order | credit by kind | mean control steps |", "|---|---|---|---|---|"]
+        for s, p in comp:
+            kc = ", ".join(f"{k} {v:.2f}" for k, v in p["kind_credit"].items())
+            L.append(f"| {s} | {p['steps_done_frac']:.2f} | {p['in_order_frac']:.2f} | {kc} | {p['mean_steps']:.0f} |")
     if summ["paired"]:
         L += ["", f"Paired vs `{args.ref}` (same episodes):", "", "| Policy | delta | paired SE | z | identical episodes |", "|---|---|---|---|---|"]
         for s, r in summ["paired"].items():
@@ -220,6 +298,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--profile", default="v05", choices=["v05", "v06"])
     ap.add_argument("--policies", nargs="+", required=True)
+    ap.add_argument("--task", choices=["v05", "compound"], default=None, help="default: compound for v06, else v05")
+    ap.add_argument("--episodes", type=int, default=0, help="only the first N episodes of each seed (0 = all)")
     ap.add_argument("--ref", default=None, help="policy spec for paired deltas")
     ap.add_argument("--seeds", type=int, nargs="+", default=[1])
     ap.add_argument("--per", type=int, default=4)
@@ -243,7 +323,10 @@ def main() -> None:
         a.ref = _abs(a.ref)
     if a.action_quant is not None:
         os.environ["NIST_ACTION_QUANT"] = str(a.action_quant)
-    jobs = [(s, seed, a.per, i, a.split) for s in specs for seed in a.seeds for i in range(8 * a.per)]
+    task = a.task or ("compound" if a.profile == "v06" else "v05")
+    jobs = [(s, seed, a.per, i, a.split, task) for s in specs for seed in a.seeds for i in range(8 * a.per)]
+    if a.episodes:
+        jobs = [j for j in jobs if j[3] < a.episodes]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     t = time.time()

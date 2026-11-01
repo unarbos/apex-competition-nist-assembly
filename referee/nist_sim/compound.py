@@ -266,6 +266,8 @@ def make_compound(rng: np.random.Generator, cond: EpisodeConditions, tier: str) 
         for b in range(len(steps)):
             if pos[a] < pos[b] and (a, b) not in edges and rng.random() < cfg["edge_p"]:
                 edges.add((a, b))
+    if grasped:  # the pre-grasped peg can always be inserted first
+        edges = {(a, b) for a, b in edges if b != grasped[0]}
     for a, b in edges:
         steps[b].prereq.append(a)
     for s in steps:
@@ -507,6 +509,7 @@ class CompoundEpisode(Episode):
                 m.body_inertia[b] = self._base_inertia[b] * ev["scale"]
         elif kind == "delay":
             self._act_delay = int(ev["steps"])
+            self.c.act_delay = self._act_delay  # privileged tooling reads the cond
             self._act_buf = deque([np.zeros(ACT_DIM) for _ in range(self._act_delay)])
         elif kind == "rebias":
             d = np.array([math.cos(ev["ang"]), math.sin(ev["ang"])]) * ev["mag"]
@@ -547,7 +550,8 @@ class CompoundEpisode(Episode):
             i = s.part
             if self.peg_parked[i]:
                 return False, 0.0
-            if self.seated_now[i]:
+            # Done once seated (gripper clear); stays done while the peg remains in its hole.
+            if self.seated_now[i] or (self.step_done[k] and self._peg_in_hole(i)):
                 return True, PARTIAL_CAP
             p, _ = self.peg_pose(i)
             hx, hy = self.slot_xy[i]
@@ -564,15 +568,17 @@ class CompoundEpisode(Episode):
         if s.kind == "twist":
             i = s.part
             frac = float(np.clip(self.twist_acc[i] * s.twist_dir / s.twist_target, 0.0, 1.0))
-            return (frac >= 1.0 and self.seated_now[i]), PARTIAL_CAP * frac
+            done = frac >= 1.0 and (self.seated_now[i] or (self.step_done[k] and self._peg_in_hole(i)))
+            return done, PARTIAL_CAP * frac
         j = s.part
         if self.collar_parked[j]:
             return False, 0.0
-        done = self.collar_run[j] >= SEATED_HOLD
         p, _ = self.collar_pose(j)
         hx, hy = self.slot_xy[self.cs.collars[j].peg]
         bottom = p[2] - COLLAR_H / 2
         dxy = float(np.hypot(p[0] - hx, p[1] - hy))
+        still = dxy <= COLLAR_SEAT_XY and bottom <= BLOCK_H + COLLAR_SEAT_Z and self._peg_in_hole(self.cs.collars[j].peg)
+        done = self.collar_run[j] >= SEATED_HOLD or (self.step_done[k] and still)
         prog = 0.0
         if self._gripper_touching(self.collar_body[j]) and bottom > 0.003:
             prog = 0.05
