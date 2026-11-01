@@ -46,7 +46,7 @@ score is the weighted mean.
 
 ## Status
 
-Released in v0.6.0. The referee runs this task, and the live round size is 12 episodes per stratum
-(96) on 2 CPU. Open after launch: a learned policy beating scripted (naive BC 0.006; DAgger with a
+Released in v0.6.0. The referee runs this task, and the live round size is 8 episodes per stratum
+(64) on 2 CPU. Open after launch: a learned policy beating scripted (naive BC 0.006; DAgger with a
 stateful policy and PPO are next), a stateful-policy protocol with action rounding, and more
 step kinds (gear/key, screw, rework, stack).
