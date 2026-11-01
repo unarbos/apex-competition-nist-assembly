@@ -6,7 +6,7 @@ One episode is a randomized task graph on the v0.5 board:
   peg so it rests on the slot block) and ``twist`` (turn a seated round peg by a target angle in a
   given direction, a bayonet / fastener stand-in).
 - **Precedence.** Mandatory edges (a peg before its collar / twist) plus random extra edges drawn
-  per episode. A step completed while one of its prerequisites is not done earns reduced credit.
+  per episode. A step completed while one of its prerequisites is not done earns 0.15 instead of 0.70+.
 - **Waves.** Parts arrive in 1-4 waves. Later-wave parts are parked off the scene (no contacts, not
   observed) and arrive when the earlier waves are finished or at a random time, at a random free spot.
 - **Randomness between subtasks.** After each completed step a pre-drawn event may fire: friction,
@@ -45,7 +45,8 @@ from .env import (
 
 # ---- task vocabulary ----------------------------------------------------------------------------
 STEP_KINDS = ("insert", "collar", "twist")
-STEP_WEIGHT = {"insert": 1.0, "collar": 1.0, "twist": 0.6}
+# Compound steps carry most of the credit: a controller that only inserts pegs is capped well below 1.
+STEP_WEIGHT = {"insert": 0.3, "collar": 1.5, "twist": 1.0}
 STEP_BUDGET = {"insert": 260, "collar": 200, "twist": 130}  # control steps used to size the horizon
 LYING_EXTRA = 140
 WAVE_EXTRA = 40
@@ -53,7 +54,7 @@ MAX_COLLARS = 4
 COLLAR_T = 0.0025  # ring wall thickness
 COLLAR_H = 0.008  # ring height
 COLLAR_NSEG = 12
-COLLAR_MAX_PEG_OUTER = 0.0062  # gripper must straddle the ring
+COLLAR_MAX_PEG_OUTER = 0.0072  # ring outer radius <= ~10.9 mm: the 24 mm gripper must straddle it
 COLLAR_SEAT_XY = 0.003
 COLLAR_SEAT_Z = 0.0015
 TWIST_TARGET = (1.2, 2.0)  # rad
@@ -65,16 +66,16 @@ TIERS = ("c1", "c2", "c3", "c4")
 TIER_FRACTIONS = (0.15, 0.30, 0.30, 0.25)
 TIER_CFG = {
     "c1": dict(extra_pegs=0, collar_frac=0.0, twist_frac=0.0, waves=(1, 1), edge_p=0.00, event_p=0.00, slack=1.20),
-    "c2": dict(extra_pegs=0, collar_frac=0.35, twist_frac=0.40, waves=(1, 2), edge_p=0.10, event_p=0.25, slack=1.00),
-    "c3": dict(extra_pegs=1, collar_frac=0.50, twist_frac=0.60, waves=(2, 3), edge_p=0.20, event_p=0.45, slack=0.85),
-    "c4": dict(extra_pegs=2, collar_frac=0.70, twist_frac=0.80, waves=(3, 4), edge_p=0.30, event_p=0.65, slack=0.70),
+    "c2": dict(extra_pegs=0, collar_frac=0.50, twist_frac=0.60, waves=(1, 2), edge_p=0.10, event_p=0.25, slack=1.00),
+    "c3": dict(extra_pegs=1, collar_frac=0.70, twist_frac=0.80, waves=(2, 3), edge_p=0.20, event_p=0.45, slack=0.85),
+    "c4": dict(extra_pegs=2, collar_frac=0.90, twist_frac=1.00, waves=(3, 4), edge_p=0.30, event_p=0.65, slack=0.70),
 }
 # Perception is minor noise in v0.6: estimate biases / glitches scaled down from v0.5.1.
 NOISE_SCALE = dict(slot_bias=0.5, peg_delta=0.4, glitch=0.5, drift=0.5)
 
 # Credit rubric (per step, then weighted mean over steps).
 DONE_BASE, DONE_TIME = 0.70, 0.30
-OUT_OF_ORDER = 0.35
+OUT_OF_ORDER = 0.15
 PARTIAL_CAP = 0.30
 
 # Observation: v0.5 layout (184) + per-peg task (8 x 6) + collars (4 x 13) + globals (4).
