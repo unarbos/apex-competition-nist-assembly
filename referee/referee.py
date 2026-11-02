@@ -1,4 +1,4 @@
-"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.0).
+"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.1).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the
@@ -11,6 +11,7 @@ changes between subtasks; nist_sim.compound) and its score is the weighted per-s
 credit (compound_score). A fault (NaN / wrong shape / late) ends that episode; steps already
 done keep their credit if still done when it stops. The observation is 288-d; its first 184
 dims are the v0.5 layout, so 184-input policies keep running on the prefix (player/launch.py).
+Records use ``nist_lite_record/4`` (collars, full task graph, step_results, trajectory collars).
 """
 
 from __future__ import annotations
@@ -32,14 +33,23 @@ from gym_v1.client import PlayerClient, PlayerError
 from gym_v1.referee import GameResult, Referee, RefereeContext
 
 from nist_sim import profile as _profile
-from nist_sim.compound import OBS_DIM_V06, CompoundEpisode, compound_score, sample_compound
+from nist_sim.compound import (
+    OBS_DIM_V06,
+    CompoundEpisode,
+    compound_score,
+    record_events,
+    sample_compound,
+    step_results,
+)
 from nist_sim.conditions import episode_seed_sequence, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
 from nist_sim.scoring import episode_score, raw_score_from_episodes
 
 COMPOUND = _profile.ACTIVE.name == "v06"
 OBS_W = OBS_DIM_V06 if COMPOUND else OBS_DIM
-RECORD_FORMAT = "nist_lite_record/3" if COMPOUND else "nist_lite_record/2"
+# /4 = compound records with collars + full task + step_results (v0.6.1+).
+# /2 = v0.5 single-stage records. (/3 was the brief v0.6.0 layout; superseded.)
+RECORD_FORMAT = "nist_lite_record/4" if COMPOUND else "nist_lite_record/2"
 HISTORY_DIR = Path(os.environ.get("NIST_HISTORY_DIR", "/data/history"))
 DEFAULTS = {
     "episodes_per_stratum": 12,
@@ -89,13 +99,24 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                     for pi in range(e.n_pegs):
                         p, q = e.peg_pose(pi)
                         pegs.append({"pos": np.round(p, 5).tolist(), "quat": np.round(q, 4).tolist()})
-                    traj[i].append({
+                    frame = {
                         "t": e.steps,
                         "pegs": pegs,
                         "hand": np.round(e.data.qpos[0:4], 5).tolist(),
                         "action": None if a is None else np.round(np.clip(a, -1, 1), 3).tolist(),
                         "seated": list(e.seated_now),
-                    })
+                    }
+                    if COMPOUND:
+                        collars = []
+                        for cj in range(e.n_collars):
+                            cp, cq = e.collar_pose(cj)
+                            collars.append(
+                                {"pos": np.round(cp, 5).tolist(), "quat": np.round(cq, 4).tolist()}
+                            )
+                        frame["collars"] = collars
+                        frame["parked"] = list(e.peg_parked)
+                        frame["collar_parked"] = list(e.collar_parked)
+                    traj[i].append(frame)
             conn.send(True)
         elif msg[0] == "fail_all":
             for i in indices:
@@ -127,12 +148,17 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                     "score": score,
                 }
                 if COMPOUND:
-                    row["task"] = conds[i].compound.public()
+                    pub = dict(row["conditions"])
+                    pub["collars"] = conds[i].compound.record_collars()
+                    row["conditions"] = pub
+                    row["task"] = conds[i].compound.record_task()
                     row["tier"] = conds[i].compound.tier
                     row["steps_done"] = cinfo["n_done"]
                     row["steps_in_order"] = cinfo["n_in_order"]
                     row["n_steps"] = cinfo["n_steps"]
                     row["credit_by_kind"] = cinfo["per_kind"]
+                    row["step_results"] = step_results(e)
+                    row["events"] = record_events(e)
                     row["events_fired"] = cinfo["events"]
                     row["parts_lost"] = int(e.parts_lost)
                 rows.append(row)

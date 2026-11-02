@@ -18,7 +18,8 @@ sys.path.insert(0, str(ROOT / "referee"))
 from nist_sim.scoring import episode_score, peg_score  # noqa: E402
 
 FLOOR = 0.10
-SMALL = '{"episodes_per_stratum": 2}'
+# 8 strata × 1 = 8 episodes. Enough for smoke; keeps v0.6 compound evals inside CI time.
+SMALL = '{"episodes_per_stratum": 1, "workers": 2}'
 
 
 def run(policy: str, out: Path, seed: int = 3, override: str = SMALL) -> dict:

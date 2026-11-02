@@ -1,4 +1,4 @@
-# NIST-Lite v0.6 "Assembly II": design (released as v0.6.0)
+# NIST-Lite v0.6 "Assembly II": design (released as v0.6.0; patched as v0.6.1)
 
 ## Goal
 
@@ -25,7 +25,8 @@ is a minor knob, not the main axis.
 
 Each step is weighted: insert 0.3, collar 1.5, twist 1.0. A done step earns
 0.70 + 0.30 × (time remaining fraction). A done step whose prerequisites were not met
-earns 0.15× that. An unfinished step earns up to 0.30× for partial progress. The episode
+earns `max(0.30, 0.15 × in-order credit)`. An unfinished step earns up to 0.30 for
+partial progress (collar 0.20/0.30 tiers require the peg in its hole). The episode
 score is the weighted mean.
 
 ## Observation and physics (profile `v06`)
@@ -46,7 +47,8 @@ score is the weighted mean.
 
 ## Status
 
-Released in v0.6.0. The referee runs this task, and the live round size is 8 episodes per stratum
-(64) on 2 CPU. Open after launch: a learned policy beating scripted (naive BC 0.006; DAgger with a
+Released in v0.6.0; v0.6.1 patches out-of-order credit, collar partial gating, and
+`nist_lite_record/4` before launch. The referee runs this task, and the live round size is 8
+episodes per stratum (64) on 2 CPU. Open after launch: a learned policy beating scripted (naive BC 0.006; DAgger with a
 stateful policy and PPO are next), a stateful-policy protocol with action rounding, and more
 step kinds (gear/key, screw, rework, stack).

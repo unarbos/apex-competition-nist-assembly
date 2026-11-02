@@ -13,7 +13,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "referee"))
 import nist_sim.conditions as C  # noqa: E402
+import mujoco  # noqa: E402
 from nist_sim.compound import (  # noqa: E402
+    BLOCK_H,
+    COLLAR_H,
     DONE_BASE,
     OBS_DIM_V06,
     OUT_OF_ORDER,
@@ -84,8 +87,35 @@ def test_wave_arrives_by_its_deadline():
 
 
 def test_rubric():
-    assert step_credit(True, True, 0, 100, 0.0) == DONE_BASE + 0.30
-    assert step_credit(True, False, 0, 100, 0.0) == OUT_OF_ORDER
+    full = DONE_BASE + 0.30
+    assert step_credit(True, True, 0, 100, 0.0) == full
+    # Out-of-order is max(PARTIAL_CAP, OUT_OF_ORDER × in-order); never below partial.
+    ooo = step_credit(True, False, 0, 100, 0.0)
+    assert ooo == max(PARTIAL_CAP, OUT_OF_ORDER * full) >= PARTIAL_CAP
     assert step_credit(False, False, None, 100, 0.9) == PARTIAL_CAP
     e = _ep(1, 0)
     assert 0.0 <= compound_score(e)["score"] <= PARTIAL_CAP
+
+
+def test_collar_partial_requires_peg_in_hole():
+    """0.20 / 0.30 collar tiers need the peg seated; a ring on an empty slot stays ≤ 0.05."""
+    _, conds = sample_compound(4, 8)
+    idx = next(i for i, c in enumerate(conds) if c.compound.collars)
+    e = _ep(4, idx, per=8)
+    # Pick a collar whose peg starts unseated (not grasped into the hole).
+    k = next(k for k, s in enumerate(e.cs.steps) if s.kind == "collar")
+    j = e.cs.steps[k].part
+    peg_i = e.cs.collars[j].peg
+    if e.collar_parked[j]:
+        e._arrive(e.cs.collars[j].wave)
+    # Place the collar low over the empty slot without seating the peg.
+    hx, hy = e.slot_xy[peg_i]
+    e._set_free(e.collar_qadr[j], e.collar_vadr[j], [hx, hy, BLOCK_H + COLLAR_H / 2], [1.0, 0, 0, 0])
+    # Keep peg away from the hole if it is not already out.
+    if e._peg_in_hole(peg_i):
+        p, q = e.peg_pose(peg_i)
+        e._set_free(e.peg_qadr[peg_i], e.peg_vadr[peg_i], [hx + 0.05, hy + 0.05, p[2]], q)
+    mujoco.mj_forward(e.model, e.data)
+    done, prog = e._step_state(k)
+    assert not done
+    assert prog <= 0.05 + 1e-9

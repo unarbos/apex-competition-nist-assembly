@@ -1,6 +1,6 @@
 # NIST Assembly Competition
 
-Docs page text for v0.6.0 (replaces the v0.5.1 page). Platform-wide items that Macrocosmos
+Docs page text for v0.6.1 (replaces the v0.5.1 page). Platform-wide items that Macrocosmos
 sets (submission fee, rate limits) are not repeated here.
 
 ### NIST Assembly Competition
@@ -9,10 +9,17 @@ sets (submission fee, rate limits) are not repeated here.
 
 The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper on a Cartesian stage** (x, y, z, yaw) through **multi-peg sequential assembly** on a board modelled on the **NIST Assembly Task Board #1**, simulated in MuJoCo on CPU. Miners submit an ONNX policy that outputs incremental stage and gripper commands at 25 Hz. The setup borrows from AlphaNIST (Zhang et al., arXiv 2610.13354): the ATB-1 board, the 1 mm success criterion, 25 Hz control, diverse start states and free-order multi-part episodes. It is much smaller: pegs only, primitive geometry, a 4-DoF stage instead of a 7-DoF arm, and noisy state estimates instead of point clouds. Since v0.6 every episode is a **compound assembly task**: pegs, collars and twist-locks with random ordering constraints, parts arriving in waves, and physics that changes between subtasks. Scoring gives partial credit per step so that a ranked competition has a gradient.
 
+**What changed in v0.6.1**
+
+* **Out-of-order credit.** A step done before its prerequisites earns `max(0.30, 0.15 × in-order credit)`, so finishing never pays less than stopping just short of done.
+* **Collar partial credit needs the peg.** The 0.20 / 0.30 collar tiers require that collar's peg in its hole.
+* **Records `nist_lite_record/4`.** Episode rows carry `conditions.collars`, the full `task` graph, `step_results` and `events`. Trajectory frames add collar poses plus `parked` / `collar_parked` (world frame, same conventions as `/2`).
+* Smaller: extra precedence only when wave(a) ≤ wave(b); independent estimate biases on c3/c4 extra pegs; collar rows get the same glitch bursts and dropout as peg rows; release builds ignore `NIST_*` physics/rounding overrides.
+
 **What changed in v0.6.0 (breaking)**
 
 * **Compound tasks.** Each episode is a random assembly graph with three kinds of steps. An *insert* puts a peg into its own hole. A *collar* drops a ring over a peg that is already seated. A *twist* turns a seated round peg by a random 1.2 to 2.0 rad in a given direction, a bayonet-style lock that can take several regrasps.
-* **Random ordering.** A peg must be seated before its collar or twist, and random extra edges link steps across parts. Each step's blocked flag is observed. A step done before its prerequisites still counts, but only for 0.15 of its credit.
+* **Random ordering.** A peg must be seated before its collar or twist, and random extra edges link steps across parts. Each step's blocked flag is observed. A step done before its prerequisites still counts, at reduced credit (see v0.6.1).
 * **Parts arrive in waves.** There are 1 to 4 waves per episode. A later wave arrives when the earlier work is done or at a random deadline. Parts that haven't arrived are off the board and zeroed in the observation.
 * **Hidden changes between subtasks.** After a step completes, friction, controller gain, part mass, actuation delay or the pose-estimate bias may change, or a loose part may be shoved. The policy is not told.
 * **Four complexity tiers, c1 to c4** (15/30/30/25% of each stratum). They scale part count (up to 2 extra pegs), collar and twist share, wave count, graph density, event rate and time slack. c4 is meant to be close to impossible; even our privileged solver scores about 0.24 there.
@@ -123,10 +130,10 @@ A peg is **inserted** when, for 5 consecutive control steps, it is in its own ho
 Each step k has a weight `w_k` (insert 0.3, collar 1.5, twist 1.0) and a credit `c_k`:
 
 ```
-c_k = 0.70 + 0.30 * (1 - t_k / T)    done in order and still done at the end (t_k = step when done, T = horizon)
-c_k = 0.15 * that                    done while one of its prerequisites was still open
-c_k = up to 0.30                     not done: partial progress (grasped/lifted, aligned over the target,
-                                     partly inserted, collar around the peg, fraction twisted)
+c_k = 0.70 + 0.30 * (1 - t_k / T)              done in order and still done at the end (t_k = step when done, T = horizon)
+c_k = max(0.30, 0.15 * in-order credit)       done while one of its prerequisites was still open
+c_k = up to 0.30                              not done: partial progress (grasped/lifted, aligned over the target,
+                                              partly inserted, collar around a seated peg, fraction twisted)
 ```
 
 ```
@@ -140,7 +147,7 @@ raw_score = mean of S_e over all episodes      -> [0.0, 1.0]
 * The denominator is fixed: every episode counts, including ones ended by a fault.
 * To take the lead, a challenger must beat the current top raw score by more than 1%. The incumbent is re-scored at the start of each round on the same episodes, so the comparison is like-for-like. `baseline_raw_score` is 0.0.
 
-**Reference numbers (v0.6.0)**
+**Reference numbers (v0.6.x)**
 
 Measured on the public dev build, live mix, 64 paired episodes (2 seeds); see `CALIBRATION.md` in the repo:
 
@@ -162,12 +169,12 @@ The privileged solver is a limited reference. It doesn't adapt to the between-st
 * Opset **13 – 21**, standard operators only, one self-contained file (no external data).
 * Maximum size **50 MB**. The architecture is not constrained.
 * Default round length: **1 day**. Submissions are revealed **1 day** after evaluation.
-* After each round, every evaluation's records are available: a per-episode record (`nist_lite_record/3`) with the score, the task graph summary (tier, step kinds, edges, waves, collars), steps done and in order, credit by step kind, events fired, parts lost, per-peg outcomes, terminal reason and the exact conditions drawn, including the board layout (`conditions.slots`) and peg sizes, plus a full trajectory for every 8th episode. The website replay viewer draws each episode's own layout.
+* After each round, every evaluation's records are available: a per-episode record (`nist_lite_record/4`) with the score, the full task graph (`task.steps`, wave times), `conditions.collars`, per-step `step_results`, events, credit by step kind, parts lost, per-peg outcomes, terminal reason and the exact conditions drawn, including the board layout (`conditions.slots`) and peg sizes, plus a full trajectory for every 8th episode (collar poses and parked flags included). The website replay viewer draws each episode's own layout.
 
 **Tips for Miners**
 
 * **The new steps are where the score is.** Collars and twists carry most of the weight. A policy that only inserts pegs, however well, scores about 0.2.
-* **Read the graph.** The task table and blocked flags say which steps are open; out-of-order completions earn only 0.15 of their credit.
+* **Read the graph.** The task table and blocked flags say which steps are open; out-of-order completions earn `max(0.30, 0.15 × in-order credit)`.
 * **Expect the physics to change mid-episode.** After a step completes, friction, gain, mass, latency or the estimate bias may shift. Force/torque and the effect of your own actions are the only signals.
 * **The headroom is large.** The privileged solver scores about 0.41, and 0.24 on c4, and it is not adaptive. A privileged teacher distilled into an observation-only student, followed by RL, is a reasonable route. Naive behaviour cloning of our solver scores near zero, because the solver relies on true state.
 * **Train against the real simulator.** `referee/nist_sim` imports directly: with `NIST_PROFILE=v06`, `nist_sim.compound.sample_compound(seed, per_stratum)` draws a round's episodes and `CompoundEpisode(cond, rng).step(action)` is the exact simulator used for scoring. `tools/compound_solver.py` is the privileged reference, and `tools/calib_v06.py` scores policies on the compound task.

@@ -13,6 +13,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+
+# Same path the Dockerfile writes for release builds (see conditions.RESERVED_PATH default).
+_RESERVED_PATH = Path(os.environ.get("NIST_RESERVED_PATH", Path(__file__).with_name("reserved.json")))
+
+
+def _release_build() -> bool:
+    """True when the image was built with a held-out secret (reserved.json present)."""
+    return _RESERVED_PATH.is_file()
 
 
 @dataclass(frozen=True)
@@ -64,13 +73,15 @@ def get(name: str | None = None) -> Profile:
     if key not in PROFILES:
         raise ValueError(f"unknown NIST_PROFILE {key!r}; expected one of {sorted(PROFILES)}")
     p = PROFILES[key]
-    # Dev-only override for calibration sweeps (never set in released images).
-    dt = os.environ.get("NIST_PHYSICS_DT")
-    if name is None and dt:
-        p = replace(p, physics_dt=float(dt))
-    q = os.environ.get("NIST_ACTION_QUANT")
-    if name is None and q:
-        p = replace(p, action_quant=float(q))
+    # Dev-only overrides for calibration sweeps. Release builds (reserved.json present) ignore them
+    # so a miner cannot change physics timestep or action rounding via the environment.
+    if name is None and not _release_build():
+        dt = os.environ.get("NIST_PHYSICS_DT")
+        if dt:
+            p = replace(p, physics_dt=float(dt))
+        q = os.environ.get("NIST_ACTION_QUANT")
+        if q:
+            p = replace(p, action_quant=float(q))
     return p
 
 
