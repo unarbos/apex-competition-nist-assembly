@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.0
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.1
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -15,10 +15,10 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.0` | ☑ |
-| `spec.yaml` version `0.6.0`, v0.6.0 digests pinned | `spec.yaml` | ☑ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:f5a5d7cd25aa152c98f06a2582c3da215d4eb3e24aab1fa678b324cb54c91533` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:2b70df95998f68298aa595fdd558008491441919f16151c906b6c93ed645f8e8` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.1` (pending tag) | ☐ |
+| `spec.yaml` version `0.6.1` (digests still v0.6.0 until post-merge release) | `spec.yaml` | ☑ version / ☐ digests |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:f5a5d7cd25aa152c98f06a2582c3da215d4eb3e24aab1fa678b324cb54c91533` | ☑ (v0.6.0; re-pin on release) |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:2b70df95998f68298aa595fdd558008491441919f16151c906b6c93ed645f8e8` | ☑ (v0.6.0; re-pin on release) |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
@@ -26,7 +26,7 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 41305550083 (tag `v0.6.0`), both cosign-verified.
+onnxruntime 1.31.0. Image digests from release run 41305550083 (tag `v0.6.0`) until the v0.6.1 release.
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
@@ -59,10 +59,10 @@ onnxruntime 1.31.0. Image digests from release run 41305550083 (tag `v0.6.0`), b
   (1.2 / 1.0 / 0.85 / 0.70) + 40 per extra wave; mean ~1,810 control steps. (v0.5.x: 280 × K, mean
   ~1,260; the "200 × K" previously listed here was stale.)
 - **Scoring:** weighted per-step credit (insert 0.3 / collar 1.5 / twist 1.0). A done step earns
-  0.70 + 0.30·time, or ×0.15 if done out of order; an unfinished step earns ≤ 0.30 partial progress;
+  0.70 + 0.30·time; out of order earns `max(0.30, 0.15 × in-order)`; unfinished ≤ 0.30 partial;
   episode = weighted mean, round = mean.
 - **Lying pegs:** reachable and graspable, but the privileged solver seats 0/64. They are ~13% of
-  inserts and are stated as unproven headroom in `CALIBRATION.md`.
+  inserts, also delay later waves, and are stated as unproven headroom / ceiling in `CALIBRATION.md`.
 - **Reserved region:** `reserve.py` draws from extended `RANGES` at referee build time.
 - **Budget (measured on the v0.6.0 images, podman, 2 CPU / 2 GiB each, seed 1):** baseline policy,
   96 episodes: 426 s. Revealed v0.5 scripted king, 64 episodes: 410 s. The same setup ran v0.5.1 at
@@ -174,6 +174,17 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 - Calibration: `CALIBRATION.md` (privileged 0.41 overall / 0.24 c4, revealed v0.5 scripted ~0.20,
   zero 0.008). Learned-beats-scripted is open; work continues after launch.
 
-## 12. Supersedes
+## 12. v0.6.1 changes (pre-launch Macrocosmos fixes)
+- Out-of-order step credit is `max(PARTIAL_CAP, 0.15 × in-order credit)` (≥ 0.30); docs match.
+- Collar partial tiers 0.20 / 0.30 require that collar's peg in its hole.
+- Records `nist_lite_record/4`: `conditions.collars`, full `task` (steps, wave_time),
+  `step_results`, `events`; trajectories add `collars`, `parked`, `collar_parked` (world frame).
+- Extra precedence a→b only when wave(a) ≤ wave(b); c3/c4 extra pegs get independent estimate
+  biases; collar obs share peg glitch bursts / dropout.
+- Release builds ignore `NIST_PHYSICS_DT` / `NIST_ACTION_QUANT`. CI runs with `NIST_PROFILE=v06`.
+- Lying-peg ceiling restated in `CALIBRATION.md` (0/64 privileged; delays later waves).
+- Digests / tag: pin after merge (do not tag from this PR).
+
+## 13. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The
 efficiency idea is reused inside the per-peg `0.75 + 0.25·time` term.

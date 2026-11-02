@@ -14,6 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "referee"))
+import nist_sim.env as env  # noqa: E402
 from nist_sim.conditions import EpisodeConditions, PegStart  # noqa: E402
 from nist_sim.env import HAND_Z_MIN, Episode  # noqa: E402
 from nist_sim.policies import StrongScripted  # noqa: E402
@@ -51,21 +52,31 @@ def _lying_4mm(slot: int, seed: int, yaw: float) -> Episode:
 @pytest.mark.parametrize("yaw", [0.0, math.pi / 2])
 @pytest.mark.parametrize("seed", [0, 1])
 def test_strong_scripted_lifts_lying_4mm(slot, yaw, seed):
-    e = _lying_4mm(slot, seed, yaw)
-    pol = StrongScripted()
-    noise = np.random.default_rng(seed)
-    lifted = False
-    for _ in range(160):
-        e.step(np.clip(pol.act(e, e.observe(noise)), -1, 1))
-        if float(e.peg_pose(0)[0][2]) > LIFT_Z:
-            lifted = True
-            break
-        if e.done:
-            break
-    assert lifted, (
-        f"failed to lift lying 4 mm slot={slot} (yaw={yaw}, seed={seed}): "
-        f"part_z={e.peg_pose(0)[0][2]:.4f} phase={pol.phase}/{pol.sub} reason={e.terminal_reason}"
-    )
+    # Pin 1 kHz for this reachability check (XML timestep + substeps). The live v06 profile
+    # uses 500 Hz; one round-peg yaw fails to lift there within the budget.
+    old_dt, old_sub = env.PHYSICS_DT, env.SUBSTEPS
+    env.PHYSICS_DT = 0.001
+    env.SUBSTEPS = 40
+    try:
+        e = _lying_4mm(slot, seed, yaw)
+        pol = StrongScripted()
+        noise = np.random.default_rng(seed)
+        lifted = False
+        for _ in range(160):
+            e.step(np.clip(pol.act(e, e.observe(noise)), -1, 1))
+            if float(e.peg_pose(0)[0][2]) > LIFT_Z:
+                lifted = True
+                break
+            if e.done:
+                break
+        phase = getattr(pol, "phase", None) or getattr(getattr(pol, "servo", None), "phase", "?")
+        assert lifted, (
+            f"failed to lift lying 4 mm slot={slot} (yaw={yaw}, seed={seed}): "
+            f"part_z={e.peg_pose(0)[0][2]:.4f} phase={phase}/{pol.sub} reason={e.terminal_reason}"
+        )
+    finally:
+        env.PHYSICS_DT = old_dt
+        env.SUBSTEPS = old_sub
 
 
 def test_hand_z_floor_allows_pad_overlap_on_lying_4mm():

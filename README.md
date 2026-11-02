@@ -5,15 +5,15 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.6.0** ("Assembly II", compound tasks). **Breaking.** Every episode is now a
-> random multi-step assembly graph rather than a list of independent pegs. Peg inserts are joined
-> by collars, which fit only over a seated peg, and by twist-lock steps. Random precedence links
-> the steps, parts arrive in waves, and the physics changes without notice between subtasks.
-> Episodes come in four complexity tiers (c1–c4), and each step earns partial credit. The
-> observation grows to `[B, 288]`, and its first 184 dims keep the v0.5 layout. A policy with a
-> static 184-wide input still runs: the player feeds it that prefix. Records are
-> `nist_lite_record/3`. The board, families, estimate noise and `timeout_s` (1800 s) carry over
-> from v0.5.1. Scores are not comparable with v0.5.x.
+> Version: **v0.6.1** ("Assembly II", compound tasks). Every episode is a random multi-step
+> assembly graph rather than a list of independent pegs. Peg inserts are joined by collars, which
+> fit only over a seated peg, and by twist-lock steps. Random precedence links the steps, parts
+> arrive in waves, and the physics changes without notice between subtasks. Episodes come in four
+> complexity tiers (c1–c4), and each step earns partial credit. The observation is `[B, 288]`, and
+> its first 184 dims keep the v0.5 layout. A policy with a static 184-wide input still runs: the
+> player feeds it that prefix. Records are `nist_lite_record/4`. v0.6.1 fixes out-of-order credit,
+> collar partial-credit gating, and the record layout for the replay viewer. Scores are not
+> comparable with v0.5.x.
 >
 > v0.5.1: harder pose estimates (5–11.5 mm peg-vs-hole offset, drift, glitch bursts) and more
 > lying starts. v0.5.0: board layout and peg shapes are drawn per episode.
@@ -45,7 +45,7 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.6.0)
+## The task (v0.6.1)
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions, slot yaw, and a cross-section per slot from continuous families
@@ -82,9 +82,11 @@ families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
   control steps on the live mix (easy 16%, medium 25%, hard 29%).
 - **Score:** each step `k` has weight `w_k`: insert 0.3, collar 1.5, twist 1.0.
   - A step done in order and still done at the end earns `0.70 + 0.30 · (1 − t_done/T)`.
-  - A step done while its prerequisites were still open earns 0.15× that.
+  - A step done while its prerequisites were still open earns
+    `max(0.30, 0.15 × in-order credit)` (never less than unfinished partial).
   - An unfinished step earns up to 0.30 for partial progress (grasp/lift, alignment,
-    partial insertion, collar around the peg, fraction twisted).
+    partial insertion, collar around a seated peg, fraction twisted). Collar 0.20 / 0.30
+    tiers require that collar's peg in its hole.
   - The episode score is `Σ w_k c_k / Σ w_k`; the round score is the mean over episodes.
   - A lost part (off the board) no longer ends the episode. Its steps just can't finish.
 - **Round size:** 8 strata (K × clutter). The fixture uses 8 per stratum (64 episodes); the

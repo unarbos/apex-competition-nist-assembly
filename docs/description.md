@@ -1,4 +1,4 @@
-# Competition description (v0.6.0)
+# Competition description (v0.6.1)
 
 Short text for the competition description field on Apex.
 

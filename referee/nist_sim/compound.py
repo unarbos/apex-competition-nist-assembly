@@ -6,7 +6,8 @@ One episode is a randomized task graph on the v0.5 board:
   peg so it rests on the slot block) and ``twist`` (turn a seated round peg by a target angle in a
   given direction, a bayonet / fastener stand-in).
 - **Precedence.** Mandatory edges (a peg before its collar / twist) plus random extra edges drawn
-  per episode. A step completed while one of its prerequisites is not done earns 0.15 instead of 0.70+.
+  per episode (only when the prerequisite's wave is at most the dependent's). A step completed while
+  one of its prerequisites is not done earns ``max(PARTIAL_CAP, OUT_OF_ORDER × in-order credit)``.
 - **Waves.** Parts arrive in 1-4 waves. Later-wave parts are parked off the scene (no contacts, not
   observed) and arrive when the earlier waves are finished or at a random time, at a random free spot.
 - **Randomness between subtasks.** After each completed step a pre-drawn event may fire: friction,
@@ -28,7 +29,13 @@ import mujoco
 import numpy as np
 
 from . import conditions as C
-from .conditions import EpisodeConditions, PegStart, sample_episodes
+from .conditions import (
+    GLITCH_NOISE_GAIN,
+    GLITCH_OFFSET,
+    EpisodeConditions,
+    PegStart,
+    sample_episodes,
+)
 from .env import (
     ACT_DIM,
     BLOCK_H,
@@ -76,6 +83,8 @@ NOISE_SCALE = dict(slot_bias=0.5, peg_delta=0.4, glitch=0.5, drift=0.5)
 
 # Credit rubric (per step, then weighted mean over steps).
 DONE_BASE, DONE_TIME = 0.70, 0.30
+# Multiplier on in-order credit when a step finishes with open prerequisites. Floored at
+# PARTIAL_CAP so finishing out of order never pays less than stopping just short of done.
 OUT_OF_ORDER = 0.15
 PARTIAL_CAP = 0.30
 
@@ -119,6 +128,7 @@ class CompoundSpec:
     events: list[dict | None]  # indexed by completion count (0-based)
 
     def public(self) -> dict:
+        """Compact task summary (used in logs / older tooling)."""
         return {
             "tier": self.tier,
             "n_steps": len(self.steps),
@@ -127,6 +137,35 @@ class CompoundSpec:
             "n_waves": self.n_waves,
             "n_collars": len(self.collars),
         }
+
+    def record_task(self) -> dict:
+        """Full task graph for ``nist_lite_record/4`` episode rows (replay viewer)."""
+        steps = []
+        for s in self.steps:
+            row = {"kind": s.kind, "part": int(s.part), "peg": int(s.peg), "prereq": list(s.prereq)}
+            if s.kind == "twist":
+                row["twist_target"] = round(float(s.twist_target), 6)
+                row["twist_dir"] = int(s.twist_dir)
+            steps.append(row)
+        return {
+            "tier": self.tier,
+            "n_waves": int(self.n_waves),
+            "wave_time": [int(t) for t in self.wave_time],
+            "steps": steps,
+        }
+
+    def record_collars(self) -> list[dict]:
+        """Public collar specs for ``conditions.collars`` in ``nist_lite_record/4``."""
+        return [
+            {
+                "peg": int(c.peg),
+                "r_in": round(float(c.r_in), 6),
+                "r_out": round(float(c.r_out), 6),
+                "height": COLLAR_H,
+                "wave": int(c.wave),
+            }
+            for c in self.collars
+        ]
 
 
 # ---- generator ----------------------------------------------------------------------------------
@@ -180,13 +219,27 @@ def _extend_pegs(rng, cond: EpisodeConditions, n_extra: int) -> None:
     w = np.array([0.32, 0.12, 0.06, 0.50, 0.0])  # never a second grasped start
     new = C._draw_peg_starts_with_weights(rng, extra, cond.slots, w)
     for p in new:
+        # Independent directions at the same magnitudes as an existing peg (do not copy biases).
         j = int(rng.integers(0, len(cond.pegs)))
-        cond.slot_bias_list.append(cond.slot_bias_list[j])
-        cond.slot_bias_yaw_list.append(cond.slot_bias_yaw_list[j])
-        cond.peg_bias_delta_list.append(cond.peg_bias_delta_list[j])
-        cond.peg_yaw_delta_list.append(cond.peg_yaw_delta_list[j])
+        mag = math.hypot(*cond.slot_bias_list[j])
+        ang = float(rng.uniform(0, 2 * math.pi))
+        cond.slot_bias_list.append((mag * math.cos(ang), mag * math.sin(ang)))
+        yaw_mag = abs(cond.slot_bias_yaw_list[j])
+        cond.slot_bias_yaw_list.append(yaw_mag * (1.0 if rng.random() < 0.5 else -1.0))
+        dmag = math.hypot(*cond.peg_bias_delta_list[j])
+        dang = float(rng.uniform(0, 2 * math.pi))
+        cond.peg_bias_delta_list.append((dmag * math.cos(dang), dmag * math.sin(dang)))
+        ymag = abs(cond.peg_yaw_delta_list[j])
+        cond.peg_yaw_delta_list.append(ymag * (1.0 if rng.random() < 0.5 else -1.0))
         cond.pegs.append(p)
     cond.n_pegs = len(cond.pegs)
+
+
+def _step_wave_of(s: TaskStep, peg_wave: list[int], collars: list[CollarSpec]) -> int:
+    """Wave index of the part a step acts on (collar wave, else peg wave)."""
+    if s.kind == "collar":
+        return collars[s.part].wave
+    return peg_wave[s.peg]
 
 
 def _soften_noise(cond: EpisodeConditions) -> None:
@@ -265,16 +318,33 @@ def make_compound(rng: np.random.Generator, cond: EpisodeConditions, tier: str) 
         edges.add((col.peg, sc))
         tw = [k for k, s in enumerate(steps) if s.kind == "twist" and s.peg == col.peg]
         if tw and rng.random() < 0.5:
-            edges.add((tw[0], sc) if rng.random() < 0.5 else (sc, tw[0]))
+            # Collar wave is ≥ peg wave; only allow collar→twist when waves are equal.
+            tw_i = tw[0]
+            if collars[j].wave > peg_wave[col.peg]:
+                edges.add((tw_i, sc))
+            else:
+                edges.add((tw_i, sc) if rng.random() < 0.5 else (sc, tw_i))
     # Random extra precedence consistent with a random topological order.
+    # Only a→b when wave(a) ≤ wave(b), so an honest policy is never forced to wait on a later wave.
     topo = _topo_random(rng, len(steps), edges)
     pos = {s: k for k, s in enumerate(topo)}
     for a in range(len(steps)):
         for b in range(len(steps)):
-            if pos[a] < pos[b] and (a, b) not in edges and rng.random() < cfg["edge_p"]:
+            if (
+                pos[a] < pos[b]
+                and (a, b) not in edges
+                and rng.random() < cfg["edge_p"]
+                and _step_wave_of(steps[a], peg_wave, collars) <= _step_wave_of(steps[b], peg_wave, collars)
+            ):
                 edges.add((a, b))
     if grasped:  # the pre-grasped peg can always be inserted first
         edges = {(a, b) for a, b in edges if b != grasped[0]}
+    # Hard invariant: no edge from a later-wave step to an earlier-wave step.
+    edges = {
+        (a, b)
+        for a, b in edges
+        if _step_wave_of(steps[a], peg_wave, collars) <= _step_wave_of(steps[b], peg_wave, collars)
+    }
     for a, b in edges:
         steps[b].prereq.append(a)
     for s in steps:
@@ -358,6 +428,9 @@ class CompoundEpisode(Episode):
         self.parts_lost = 0
         self.twist_acc = [0.0] * self.n_pegs
         self._twist_prev = [None] * self.n_pegs
+        # Collar estimate glitch / dropout (same burst process as peg rows).
+        self._glitch_collar = np.zeros((max(1, self.n_collars), 2))
+        self._last_collar_obs = [None] * self.n_collars
         self._release_lists()
 
     # -- model ---------------------------------------------------------------------------------
@@ -587,14 +660,17 @@ class CompoundEpisode(Episode):
         hx, hy = self.slot_xy[self.cs.collars[j].peg]
         bottom = p[2] - COLLAR_H / 2
         dxy = float(np.hypot(p[0] - hx, p[1] - hy))
-        still = dxy <= COLLAR_SEAT_XY and bottom <= BLOCK_H + COLLAR_SEAT_Z and self._peg_in_hole(self.cs.collars[j].peg)
+        peg_i = self.cs.collars[j].peg
+        peg_ok = self._peg_in_hole(peg_i)
+        still = dxy <= COLLAR_SEAT_XY and bottom <= BLOCK_H + COLLAR_SEAT_Z and peg_ok
         done = self.collar_run[j] >= SEATED_HOLD or (self.step_done[k] and still)
         prog = 0.0
         if self._gripper_touching(self.collar_body[j]) and bottom > 0.003:
             prog = 0.05
-        if dxy < COLLAR_SEAT_XY and bottom < BLOCK_H + PEG_LEN - BLOCK_H:
+        # 0.20 / 0.30 tiers require the collar's peg to be in its hole (empty-slot ring ≠ near seat).
+        if peg_ok and dxy < COLLAR_SEAT_XY and bottom < BLOCK_H + PEG_LEN - BLOCK_H:
             prog = 0.20
-        if dxy < COLLAR_SEAT_XY and bottom < BLOCK_H + 0.010:
+        if peg_ok and dxy < COLLAR_SEAT_XY and bottom < BLOCK_H + 0.010:
             prog = PARTIAL_CAP
         return done, prog
 
@@ -697,9 +773,24 @@ class CompoundEpisode(Episode):
     def step_blocked(self, k: int) -> bool:
         return not all(self.step_done[p] for p in self.cs.steps[k].prereq)
 
+    def _glitch_step(self, noise_rng: np.random.Generator) -> float:
+        """Extend peg/slot/clutter glitch bursts with independent collar offsets."""
+        was_active = self._glitch_left > 0
+        gain = super()._glitch_step(noise_rng)
+        if self._glitch_left == 0:
+            self._glitch_collar[:] = 0.0
+        elif not was_active:
+            n = self._glitch_collar.shape[0]
+            mag = noise_rng.uniform(GLITCH_OFFSET[0], GLITCH_OFFSET[1], n)
+            ang = noise_rng.uniform(0.0, 2 * math.pi, n)
+            self._glitch_collar = np.stack([mag * np.cos(ang), mag * np.sin(ang)], axis=1)
+        return gain
+
     # -- observation -----------------------------------------------------------------------------------
     def observe(self, noise_rng: np.random.Generator) -> np.ndarray:
         base = super().observe(noise_rng).astype(np.float64)
+        # Parent already advanced the glitch burst; gain matches peg-row treatment this step.
+        glitch_gain = GLITCH_NOISE_GAIN if self._glitch_left > 0 else 1.0
         p0 = 16 + ACT_DIM
         for i in range(self.n_pegs):
             if self.peg_parked[i]:
@@ -725,14 +816,28 @@ class CompoundEpisode(Episode):
             if self.collar_parked[j]:
                 continue
             p, q = self.collar_pose(j)
-            pn, qn = self._noisy_pose(p, q, noise_rng, bias_xy=self._peg_bias_xy[i], yaw_bias=0.0)
+            pn, qn = self._noisy_pose(
+                p, q, noise_rng,
+                bias_xy=self._peg_bias_xy[i] + self._glitch_collar[j],
+                yaw_bias=0.0,
+                gain=glitch_gain,
+            )
             hx, hy = self.slot_xy[i]
-            hx_e = hx + self._slot_bias_xy[i][0] + float(noise_rng.normal(0, self.c.obs_noise))
-            hy_e = hy + self._slot_bias_xy[i][1] + float(noise_rng.normal(0, self.c.obs_noise))
+            sn = self.c.obs_noise * glitch_gain
+            hx_e = hx + self._slot_bias_xy[i][0] + self._glitch_slot[i][0] + float(noise_rng.normal(0, sn))
+            hy_e = hy + self._slot_bias_xy[i][1] + self._glitch_slot[i][1] + float(noise_rng.normal(0, sn))
             c = self.cs.collars[j]
-            col[b : b + COLLAR_FEAT] = [1.0, (pn[0] - hx_e) * 10, (pn[1] - hy_e) * 10, (pn[2] - BLOCK_H) * 10,
-                                        *qn, c.r_in * 100, c.r_out * 100, i / MAX_PEGS,
-                                        float(self.step_done[k]), float(self.step_blocked(k))]
+            feat = np.array(
+                [1.0, (pn[0] - hx_e) * 10, (pn[1] - hy_e) * 10, (pn[2] - BLOCK_H) * 10,
+                 *qn, c.r_in * 100, c.r_out * 100, i / MAX_PEGS,
+                 float(self.step_done[k]), float(self.step_blocked(k))],
+                dtype=np.float64,
+            )
+            if noise_rng.random() < self.c.dropout_prob and self._last_collar_obs[j] is not None:
+                feat = self._last_collar_obs[j]
+            else:
+                self._last_collar_obs[j] = feat.copy()
+            col[b : b + COLLAR_FEAT] = feat
         glob = np.array([
             self.steps / max(1, self.c.max_steps),
             sum(self.step_done) / max(1, len(self.step_done)),
@@ -745,13 +850,51 @@ class CompoundEpisode(Episode):
 
 
 # ---- scoring ----------------------------------------------------------------------------------------
+def in_order_credit(done_at: int | None, horizon: int) -> float:
+    """Full in-order done credit: ``DONE_BASE + DONE_TIME * (1 - done_at/horizon)``."""
+    t = 0.0 if done_at is None else max(0.0, 1.0 - done_at / max(1, horizon))
+    return DONE_BASE + DONE_TIME * t
+
+
 def step_credit(done: bool, in_order: bool, done_at: int | None, horizon: int, progress: float) -> float:
     if done:
+        full = in_order_credit(done_at, horizon)
         if not in_order:
-            return OUT_OF_ORDER
-        t = 0.0 if done_at is None else max(0.0, 1.0 - done_at / max(1, horizon))
-        return DONE_BASE + DONE_TIME * t
+            # Never pay less for finishing out of order than for stopping just short of done.
+            return max(PARTIAL_CAP, OUT_OF_ORDER * full)
+        return full
     return min(PARTIAL_CAP, progress)
+
+
+def step_results(ep: CompoundEpisode) -> list[dict]:
+    """Per-step result rows for ``nist_lite_record/4`` (aligned with ``task.steps``)."""
+    rows = []
+    for k, s in enumerate(ep.cs.steps):
+        cr = step_credit(
+            ep.step_done[k], ep.step_in_order[k], ep.step_done_at[k], ep.c.max_steps, ep.step_progress[k]
+        )
+        rows.append(
+            {
+                "done": bool(ep.step_done[k]),
+                "done_at": ep.step_done_at[k],
+                "in_order": bool(ep.step_in_order[k]),
+                "credit": round(float(cr), 5),
+            }
+        )
+    return rows
+
+
+def record_events(ep: CompoundEpisode) -> list[dict]:
+    """Events that fired, for ``nist_lite_record/4`` (``t`` = control step, world-frame sim)."""
+    out = []
+    for ev in ep.events_fired:
+        row = {"t": int(ev.get("step", 0)), "kind": ev["kind"]}
+        for key, val in ev.items():
+            if key in ("step", "kind"):
+                continue
+            row[key] = val
+        out.append(row)
+    return out
 
 
 def compound_score(ep: CompoundEpisode) -> dict:

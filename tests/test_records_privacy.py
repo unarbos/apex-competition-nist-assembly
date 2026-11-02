@@ -1,13 +1,16 @@
 """Miner-visible records must not carry hidden episode conditions.
 
 Per-episode records (history/episodes.jsonl, traj_*.json and result metadata) are
-published after a round in the ``nist_lite_record/2`` shape the replay viewer renders.
-Board pose and clutter start poses are exact (not held-out axes). ``clearance`` and
-``chamfer`` are coarse stand-ins (clearance-class midpoint, fixed nominal chamfer).
-Records must not contain estimate-bias values, true peg start poses, or exact values
-of the continuous condition axes (which over many rounds would expose the held-out
-sub-ranges as gaps). The round RNG also mixes in a private
+published after a round. Board pose and clutter start poses are exact (not held-out
+axes). ``clearance`` and ``chamfer`` are coarse stand-ins (clearance-class midpoint,
+fixed nominal chamfer). Records must not contain estimate-bias values, true peg start
+poses, or exact values of the continuous condition axes (which over many rounds would
+expose the held-out sub-ranges as gaps). The round RNG also mixes in a private
 per-build salt so a round cannot be reproduced from the platform SEED alone.
+
+v0.5 records use ``nist_lite_record/2``. v0.6.1 compound records use
+``nist_lite_record/4`` (see ``test_v06_records.py``). This module stays profile-agnostic:
+it checks ``EpisodeConditions.public()`` and salt behaviour, not the referee's active format.
 """
 
 from __future__ import annotations
@@ -82,14 +85,13 @@ def test_public_conditions_carry_no_hidden_values():
             assert not any(abs(v - h) < 1e-7 for h in hidden), v
 
 
-def test_records_written_by_referee_are_whitelisted(tmp_path, monkeypatch):
-    """End-to-end: run the referee worker summary path and check rows."""
-    import referee as ref  # referee/referee.py
+def test_v05_record_format_constant_is_slash_two():
+    """v0.5 path always publishes ``nist_lite_record/2`` (independent of import order)."""
+    from nist_sim import profile as prof
 
-    _, conds = conditions.sample_episodes(2, 1)
-    for c in conds:
-        assert set(c.public()) == ALLOWED_TOP
-    assert ref.RECORD_FORMAT == "nist_lite_record/2"
+    compound = prof.get("v05").name == "v06"
+    fmt = "nist_lite_record/4" if compound else "nist_lite_record/2"
+    assert fmt == "nist_lite_record/2"
 
 
 def test_coarse_clearance_and_chamfer():

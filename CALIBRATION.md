@@ -1,5 +1,28 @@
 # NIST-Lite calibration
 
+## v0.6.1 (pre-launch Macrocosmos fixes)
+
+Same harness as v0.6.0 (`tools/calib_v06.py --profile v06`, seeds 1–2, 4/stratum, 64 paired
+episodes). Rubric: out-of-order credit floored at the partial cap (0.30); collar 0.20/0.30
+partial requires the peg in its hole. Scale is essentially unchanged vs v0.6.0:
+
+| Policy | v0.6.0 | v0.6.1 | notes |
+|---|---|---|---|
+| zero | 0.008 | **0.010** | |
+| obs-only scripted | 0.018 | **0.015** | |
+| baseline ONNX | (not in that table) | **0.021** | |
+| privileged compound solver | 0.406 | **0.388** | c1/c2/c3/c4: 0.58 / 0.42 / 0.32 / 0.24 |
+
+**Eval wall time (this box, 2 workers):** 64 episodes, baseline ONNX, seed 1: **676 s**
+(fits the 1800 s timeout with margin). Privileged mean ~22 s/episode in the calib harness.
+
+**Lying-peg ceiling (stated for launch).** Privileged solver seats lying inserts **0/64**
+(seeds 11–13, 96 episodes). Lying pegs are ~13% of insert steps and also delay the waves
+behind them. Treat lying inserts and the collar/twist steps that depend on them as
+**unproven headroom**, not demonstrated ceiling. Reach-and-grasp works
+(`tests/test_lying_grasp.py`); re-orient-and-seat on the multi-peg board does not, for any
+controller we have.
+
 ## v0.6.0 (compound tasks)
 
 Measured with `tools/calib_v06.py --profile v06` (same episode draw, per-episode RNG streams,

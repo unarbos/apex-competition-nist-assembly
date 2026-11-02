@@ -5,3 +5,4 @@ __pycache__/
 test_policies/*.onnx
 baselines/*.onnx
 referee/nist_sim/reserved.json
+.venv/

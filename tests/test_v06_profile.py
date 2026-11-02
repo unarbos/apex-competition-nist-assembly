@@ -18,12 +18,29 @@ from nist_sim.conditions import episode_seed_sequence, sample_episodes  # noqa: 
 from nist_sim.env import Episode  # noqa: E402
 
 
-def test_default_profile_is_live_v05():
+def test_named_profiles_and_quantize_identity():
     p = profile.get("v05")
     assert p.action_quant == 0.0 and profile.get("v06").action_quant == 0.0
     assert profile.ACTIVE.name in profile.PROFILES
     a = np.array([0.1234567, -0.5, 1.0, -1.0, 0.0])
     assert profile.quantize_action(a, 0.0) is a
+
+
+def test_release_build_ignores_nist_dev_overrides(tmp_path, monkeypatch):
+    """When reserved.json is present (release image), NIST_PHYSICS_DT / NIST_ACTION_QUANT are ignored."""
+    reserved = tmp_path / "reserved.json"
+    reserved.write_text('{"salt": 1, "ranges": {}}')
+    monkeypatch.setattr(profile, "_RESERVED_PATH", reserved)
+    monkeypatch.setenv("NIST_PHYSICS_DT", "0.001")
+    monkeypatch.setenv("NIST_ACTION_QUANT", "0.05")
+    p = profile.get()  # ACTIVE name from env; overrides must not apply
+    assert p.physics_dt == profile.PROFILES[p.name].physics_dt
+    assert p.action_quant == profile.PROFILES[p.name].action_quant
+    # Dev path (no reserved file) still honours overrides.
+    monkeypatch.setattr(profile, "_RESERVED_PATH", tmp_path / "missing.json")
+    p_dev = profile.get()
+    assert p_dev.physics_dt == 0.001
+    assert p_dev.action_quant == 0.05
 
 
 def test_quantize_snaps_and_clips():
