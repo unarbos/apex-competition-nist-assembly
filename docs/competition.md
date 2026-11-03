@@ -1,6 +1,6 @@
 # NIST Assembly Competition
 
-Docs page text for v0.6.1 (replaces the v0.5.1 page). Platform-wide items that Macrocosmos
+Docs page text for v0.6.2 (replaces the v0.5.1 page). Platform-wide items that Macrocosmos
 sets (submission fee, rate limits) are not repeated here.
 
 ### NIST Assembly Competition
@@ -8,6 +8,10 @@ sets (submission fee, rate limits) are not repeated here.
 **Getting a peg to the hole is not the same as seating it.** The last millimetre is the hard part: with 0.25 to 0.8 mm of radial clearance, the contact that completes an insertion is the same contact that jams it. A peg still held in the gripper has not been assembled, and on a full board each seated peg is one more thing the gripper can knock out on the way to the next.
 
 The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper on a Cartesian stage** (x, y, z, yaw) through **multi-peg sequential assembly** on a board modelled on the **NIST Assembly Task Board #1**, simulated in MuJoCo on CPU. Miners submit an ONNX policy that outputs incremental stage and gripper commands at 25 Hz. The setup borrows from AlphaNIST (Zhang et al., arXiv 2610.13354): the ATB-1 board, the 1 mm success criterion, 25 Hz control, diverse start states and free-order multi-part episodes. It is much smaller: pegs only, primitive geometry, a 4-DoF stage instead of a 7-DoF arm, and noisy state estimates instead of point clouds. Since v0.6 every episode is a **compound assembly task**: pegs, collars and twist-locks with random ordering constraints, parts arriving in waves, and physics that changes between subtasks. Scoring gives partial credit per step so that a ranked competition has a gradient.
+
+**What changed in v0.6.2**
+
+* **Mass-change fix.** After a hidden part-mass change the simulator now refreshes the derived MuJoCo constants (subtree mass, inverse weights). Before, they stayed at the old mass, so the next grasp could oscillate and end the episode as `unstable`. Thanks to msulab for the report.
 
 **What changed in v0.6.1**
 

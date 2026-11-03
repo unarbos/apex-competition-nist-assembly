@@ -590,6 +590,13 @@ class CompoundEpisode(Episode):
                 ratio = new / max(1e-9, float(self._base_mass[b]))
                 m.body_mass[b] = new
                 m.body_inertia[b] = self._base_inertia[b] * ratio
+            # v0.6.2: refresh the derived constants MuJoCo computes from mass/inertia at compile
+            # time (body_subtreemass, dof_M0, body/dof_invweight0). Stale values made the next grasp
+            # oscillate under implicitfast and could end the episode "unstable" (reported by
+            # msulab). A scratch MjData is used because mj_setConst runs kinematics at qpos0 on the
+            # data it is given; the live episode state is untouched. Nothing else in the model is
+            # changed (parking, friction and gain edits are not derived quantities).
+            mujoco.mj_setConst(m, mujoco.MjData(m))
         elif kind == "delay":
             self._act_delay = int(ev["steps"])
             self.c.act_delay = self._act_delay  # privileged tooling reads the cond

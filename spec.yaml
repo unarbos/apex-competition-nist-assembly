@@ -1,6 +1,6 @@
 schema: apex.competition.v1
 id: nist_lite_assembly
-version: 0.6.1
+version: 0.6.2
 display_name: "NIST-Lite Robot Assembly (RL)"
 kind: solo
 process_type: cpu

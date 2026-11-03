@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.1
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.2
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -15,8 +15,8 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.1` | ☑ |
-| `spec.yaml` version `0.6.1`, v0.6.1 digests pinned | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.2` (pending tag) | ☐ |
+| `spec.yaml` version `0.6.2` (digests still v0.6.1 until post-merge release) | `spec.yaml` | ☑ version / ☐ digests |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:c39dddef877efaaf87a0e84bed6291be72731d364a83b3ab10ca6af1afb15426` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:adb314562a44788343bf9419ff201f9f8827e6504d383add23d66f21c289127e` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -26,7 +26,7 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 41474262290 (tag `v0.6.1`), both cosign-verified.
+onnxruntime 1.31.0. Image digests from release run 41474262290 (tag `v0.6.1`) until the v0.6.2 release.
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
@@ -184,6 +184,15 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 - Release builds ignore `NIST_PHYSICS_DT` / `NIST_ACTION_QUANT`. CI runs with `NIST_PROFILE=v06`.
 - Lying-peg ceiling restated in `CALIBRATION.md` (0/64 privileged; delays later waves).
 - Digests / tag: pin after merge (do not tag from this PR).
+
+## 12a. v0.6.2 changes (mass-event fix)
+- A `mass` event rescales peg `body_mass` / `body_inertia` and now calls `mj_setConst` on a
+  scratch `MjData`, so `body_subtreemass`, `dof_M0`, `body_invweight0` and `dof_invweight0`
+  match the new masses. Stale constants made the next grasp oscillate under `implicitfast` and
+  could end the episode `unstable` (reported by msulab, Discord, Nov 2 2026). The live state and
+  the other event / parking edits are untouched (regression test in `tests/test_v06_compound.py`).
+- No other model edits have derived constants: parking (contype/conaffinity/gravcomp), friction
+  and gain events were checked.
 
 ## 13. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The

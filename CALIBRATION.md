@@ -1,5 +1,24 @@
 # NIST-Lite calibration
 
+## v0.6.2 (mass-event fix)
+
+A `mass` event now refreshes MuJoCo's derived mass constants (`mj_setConst`), so the next grasp
+no longer oscillates and ejects the peg (reported by msulab). Same harness and episodes as v0.6.1
+(`tools/calib_v06.py --profile v06`, seeds 1–2, 4/stratum, 64 paired episodes):
+
+| Policy | v0.6.1 | v0.6.2 |
+|---|---|---|
+| zero | 0.010 | **0.010** |
+| obs-only scripted | 0.015 | **0.015** |
+| baseline ONNX | 0.021 | **0.021** |
+| privileged compound solver | 0.388 | **0.403** (c1/c2/c3/c4 0.58 / 0.47 / 0.31 / 0.26) |
+
+Episodes with a scheduled mass event (dev seeds 3210–3213, 8/stratum: 91 of 256 episodes, 47 where
+the event fired), privileged solver: `unstable` endings **3 → 0**; mean score 0.275 → 0.272
+(within noise; the solver re-grasps carefully, so the effect is larger for policies that
+grasp hard right after a change). Policies that rarely finish a step almost never trigger an
+event and are unchanged. Projected live eval time 259 s for the slowest policy (≤ 400 s bar).
+
 ## v0.6.1 (pre-launch Macrocosmos fixes)
 
 Same harness as v0.6.0 (`tools/calib_v06.py --profile v06`, seeds 1–2, 4/stratum, 64 paired

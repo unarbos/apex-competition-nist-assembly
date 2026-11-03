@@ -1,4 +1,4 @@
-"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.1).
+"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.2).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the

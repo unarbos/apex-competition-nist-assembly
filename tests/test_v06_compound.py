@@ -119,3 +119,34 @@ def test_collar_partial_requires_peg_in_hole():
     done, prog = e._step_state(k)
     assert not done
     assert prog <= 0.05 + 1e-9
+
+
+def test_mass_event_refreshes_derived_constants():
+    """v0.6.2: a mass event must leave the model as if compiled with the new masses (msulab)."""
+    import copy
+
+    ep = _ep(3210, 0, per=1)
+    m = ep.model
+    for _ in range(10):
+        ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
+    ep._fire_event(dict(kind="gain", scale=1.3))
+    ep._fire_event(dict(kind="friction", scale=0.6))
+    keep = {f: getattr(m, f).copy() for f in (
+        "actuator_gainprm", "actuator_biasprm", "geom_friction", "geom_contype",
+        "geom_conaffinity", "body_gravcomp", "qpos0", "body_pos")}
+    q, v = ep.data.qpos.copy(), ep.data.qvel.copy()
+    pegs = list(ep.peg_body)
+    iw_before = m.body_invweight0[pegs, 0].copy()
+    ep._fire_event(dict(kind="mass", scale=2.0))
+    # Free-floating pegs are their own subtree: subtree mass must track the new body mass.
+    np.testing.assert_allclose(m.body_subtreemass[pegs], m.body_mass[pegs])
+    np.testing.assert_allclose(m.body_invweight0[pegs, 0], iw_before / 2.0, rtol=1e-6)
+    # Same derived fields as a fresh mj_setConst on a copy (i.e. nothing left stale).
+    ref = copy.deepcopy(m)
+    mujoco.mj_setConst(ref, mujoco.MjData(ref))
+    for f in ("body_subtreemass", "body_invweight0", "dof_invweight0", "dof_M0"):
+        np.testing.assert_allclose(getattr(m, f), getattr(ref, f), err_msg=f)
+    # Live state and the other event / parking edits are preserved.
+    assert np.array_equal(ep.data.qpos, q) and np.array_equal(ep.data.qvel, v)
+    for f, a in keep.items():
+        assert np.array_equal(getattr(m, f), a), f
