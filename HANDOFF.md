@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.2
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.3
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -15,8 +15,8 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.2` | ☑ |
-| `spec.yaml` version `0.6.2` with v0.6.2 digests; `apex-dev preflight` passes (stage + prod) | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.3` (pending tag) | ☐ |
+| `spec.yaml` version `0.6.3` (digests still v0.6.2 until post-merge release) | `spec.yaml` | ☑ version / ☐ digests |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:f0f115abcfdd364dd3c060344e8541cc910f4220e50a210631f87bb2d5939c2c` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:deb9a0dde2ca7a81d473b2a6c959972aaf2223329067c8f97bbeee87351eacc2` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -191,8 +191,18 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   match the new masses. Stale constants made the next grasp oscillate under `implicitfast` and
   could end the episode `unstable` (reported by msulab, Discord, Nov 2 2026). The live state and
   the other event / parking edits are untouched (regression test in `tests/test_v06_compound.py`).
-- No other model edits have derived constants: parking (contype/conaffinity/gravcomp), friction
-  and gain events were checked.
+- Friction and gain events have no derived constants. (Parking does: see 12b.)
+
+## 12b. v0.6.3 changes (parked parts after a mass event)
+- `mj_setConst` also re-derives `body_contype` / `body_conaffinity` as the OR of the body's
+  *current* geom masks. Parked (later-wave) parts have their geom masks set to 0, so a mass event
+  while they were parked zeroed their body masks; when their wave arrived the geoms came back but
+  the body masks stayed 0, the broad phase skipped them, and they fell through the board and were
+  counted lost (reported by OddK, Discord, Nov 2 2026). The mass branch now restores the
+  compile-time body masks after `mj_setConst`; parked geoms are still filtered at the geom level.
+- A full-model diff of `mj_setConst` on a model with parked parts shows `body_contype` /
+  `body_conaffinity` are the only fields it changes besides the mass-derived constants.
+  Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
 ## 13. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The

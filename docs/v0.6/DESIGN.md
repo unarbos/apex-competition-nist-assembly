@@ -1,4 +1,4 @@
-# NIST-Lite v0.6 "Assembly II": design (released as v0.6.0; patched as v0.6.1 and v0.6.2)
+# NIST-Lite v0.6 "Assembly II": design (released as v0.6.0; patched as v0.6.1, v0.6.2 and v0.6.3)
 
 ## Goal
 
