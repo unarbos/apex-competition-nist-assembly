@@ -150,3 +150,41 @@ def test_mass_event_refreshes_derived_constants():
     assert np.array_equal(ep.data.qpos, q) and np.array_equal(ep.data.qvel, v)
     for f, a in keep.items():
         assert np.array_equal(getattr(m, f), a), f
+
+
+def test_mass_event_keeps_parked_parts_collidable():
+    """v0.6.3: mj_setConst re-derives body_contype/conaffinity from the current geom masks.
+
+    Parked (later-wave) parts have their geoms switched off, so a mass event while they were parked
+    zeroed their body masks; after their wave arrived the broad phase skipped them and they fell
+    through the board as lost parts (reported by OddK). Body masks must survive the mass event and
+    arrived parts must rest on the table.
+    """
+    ep = _ep(3, 25, per=8)
+    m = ep.model
+    parked_pegs = [i for i, p in enumerate(ep.peg_parked) if p]
+    parked_cols = [j for j, p in enumerate(ep.collar_parked) if p]
+    assert parked_pegs and parked_cols and ep.cs.n_waves > 1
+    ct0, ca0 = m.body_contype.copy(), m.body_conaffinity.copy()
+    for _ in range(5):
+        ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
+    ep._fire_event(dict(kind="mass", scale=1.5))
+    np.testing.assert_array_equal(m.body_contype, ct0)
+    np.testing.assert_array_equal(m.body_conaffinity, ca0)
+    # The mass fix (v0.6.2) is still in place.
+    pegs = list(ep.peg_body)
+    np.testing.assert_allclose(m.body_subtreemass[pegs], m.body_mass[pegs])
+    # Parked geoms stay switched off until their wave arrives.
+    for i in parked_pegs:
+        b = ep.peg_body[i]
+        assert not m.geom_contype[m.body_geomadr[b] : m.body_geomadr[b] + m.body_geomnum[b]].any()
+    for w in range(1, ep.cs.n_waves):
+        if not ep.wave_arrived[w]:
+            ep._arrive(w)
+    for _ in range(150):
+        ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
+    assert ep.parts_lost == 0
+    for i in parked_pegs:
+        assert not ep.peg_parked[i] and ep.peg_pose(i)[0][2] > 0.0, i
+    for j in parked_cols:
+        assert not ep.collar_parked[j] and ep.collar_pose(j)[0][2] > 0.0, j

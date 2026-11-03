@@ -5,7 +5,7 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.6.2** ("Assembly II", compound tasks). Every episode is a random multi-step
+> Version: **v0.6.3** ("Assembly II", compound tasks). Every episode is a random multi-step
 > assembly graph rather than a list of independent pegs. Peg inserts are joined by collars, which
 > fit only over a seated peg, and by twist-lock steps. Random precedence links the steps, parts
 > arrive in waves, and the physics changes without notice between subtasks. Episodes come in four
@@ -14,7 +14,8 @@ platform’s 1% takeover rule. Submit the policy as an ONNX file.
 > player feeds it that prefix. Records are `nist_lite_record/4`. v0.6.1 fixes out-of-order credit,
 > collar partial-credit gating, and the record layout for the replay viewer. v0.6.2 fixes stale
 > MuJoCo mass constants after a hidden mass change (spurious `unstable` episodes; reported by
-> msulab). Scores are not comparable with v0.5.x.
+> msulab). v0.6.3 fixes later-wave parts falling through the board after a mass change
+> (reported by OddK). Scores are not comparable with v0.5.x.
 >
 > v0.5.1: harder pose estimates (5–11.5 mm peg-vs-hole offset, drift, glitch bursts) and more
 > lying starts. v0.5.0: board layout and peg shapes are drawn per episode.
@@ -46,7 +47,7 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.6.2)
+## The task (v0.6.3)
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions, slot yaw, and a cross-section per slot from continuous families

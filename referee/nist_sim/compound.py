@@ -454,6 +454,9 @@ class CompoundEpisode(Episode):
             self.collar_body.append(mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"collar{j}"))
         self._geom_contype = m.geom_contype.copy()
         self._geom_conaff = m.geom_conaffinity.copy()
+        # Compile-time body collision masks (OR of the body's geom masks, all parts active).
+        self._body_contype = m.body_contype.copy()
+        self._body_conaff = m.body_conaffinity.copy()
         self._base_friction = m.geom_friction[:, 0].copy()
         self._base_mass = m.body_mass.copy()
         self._base_inertia = m.body_inertia.copy()
@@ -597,6 +600,13 @@ class CompoundEpisode(Episode):
             # data it is given; the live episode state is untouched. Nothing else in the model is
             # changed (parking, friction and gain edits are not derived quantities).
             mujoco.mj_setConst(m, mujoco.MjData(m))
+            # v0.6.3: mj_setConst also re-derives body_contype/body_conaffinity from the *current*
+            # geom masks. Parked (later-wave) parts have their geoms switched off, so their body
+            # masks became 0 and stayed 0 after the wave arrived: the broad phase skipped them and
+            # they fell through the board (reported by OddK). Restore the compile-time body masks;
+            # parked geoms are still filtered at the geom level.
+            m.body_contype[:] = self._body_contype
+            m.body_conaffinity[:] = self._body_conaff
         elif kind == "delay":
             self._act_delay = int(ev["steps"])
             self.c.act_delay = self._act_delay  # privileged tooling reads the cond
