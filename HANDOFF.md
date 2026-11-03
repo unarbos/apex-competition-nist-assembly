@@ -15,10 +15,10 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.3` (pending tag) | ☐ |
-| `spec.yaml` version `0.6.3` (digests still v0.6.2 until post-merge release) | `spec.yaml` | ☑ version / ☐ digests |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:f0f115abcfdd364dd3c060344e8541cc910f4220e50a210631f87bb2d5939c2c` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:deb9a0dde2ca7a81d473b2a6c959972aaf2223329067c8f97bbeee87351eacc2` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.3` | ☑ |
+| `spec.yaml` version `0.6.3` with v0.6.3 digests; `apex-dev preflight` passes (stage + prod) | `spec.yaml` | ☑ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:362ea25b5f7fdc7b6567e8f919fb8bd2e7521cdf048adeec6771d6fc161e2c7a` | ☑ |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:385e39bffb066440a2583e713ec981be9cfc7c1eca31483ee516bbb0ac650717` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
