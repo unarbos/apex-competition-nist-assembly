@@ -6,13 +6,14 @@ partial credit per peg (not binary all-or-nothing), so ranking stays open under 
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
 > Version: **v0.7.0** ("Assembly III", profile `v07`) — denser graphs, new step kinds
-> (`rework`, `screw`, `stack`, `key`), press-gated screws, yaw-index keys, stronger between-step
-> events. Observation stays `[B, 288]` with v0.6 encodings extended in-place (see below).
-> Referee default is `v07` (`NIST_PROFILE=v06` still selects Assembly II). Image digests remain
-> the last released v0.6.3 pins until the tag cut. Scores are **not** comparable with v0.6.x.
+> (`rework`, `screw`, `stack`, `key`), press-gated screws, **obs-indexed key yaw**, mis-seated
+> rework, stack rings, and residual noise so open-loop v0.6 controllers fail. Observation stays
+> `[B, 288]` with v0.6 encodings extended in-place. Referee default is `v07`. Eval caps:
+> 80 ms policy deadline, 550 s round wall, 18 s/episode wall, horizon 1000. Digests remain the
+> last v0.6.3 pins until the tag cut. Scores are **not** comparable with v0.6.x.
 >
-> Every episode is a random multi-step assembly graph (inserts, collars, twists, plus v0.7 gates).
-> Four complexity tiers (c1–c4); weighted partial credit per step. Records `nist_lite_record/4`.
+> Every episode is a random multi-step assembly graph. Four complexity tiers (c1–c4); weighted
+> partial credit per step. Records `nist_lite_record/4`.
 >
 > v0.5.1: harder pose estimates (5–11.5 mm peg-vs-hole offset, drift, glitch bursts) and more
 > lying starts. v0.5.0: board layout and peg shapes are drawn per episode.

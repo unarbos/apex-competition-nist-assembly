@@ -209,15 +209,16 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 ## 13. v0.7.0 (Assembly III, live)
 - Profile `v07` is the live referee default (`referee.py` sets `NIST_PROFILE=v07`).
   Spec version `0.7.0`. Digests stay on the last v0.6.3 pins until the owner tags/releases.
-- Module `referee/nist_sim/compound_v07.py`: denser tiers, new steps (`rework`, `screw`,
-  `stack`, `key`), press-gated screws, yaw-index keys, late reveals, `swap_bias` events.
-  Stack generation is deferred (contact flaky); hardness is screw/key weighted.
+- Module `referee/nist_sim/compound_v07.py`: denser tiers, `rework` / `screw` / `stack` / `key`,
+  press-gated screws, obs-indexed key yaw, late reveals, `swap_bias` events. Weight lands on
+  key/rework/stack so open-loop v0.6 controllers cannot clear the mean.
+- Eval caps: `deadline_ms=80`, `round_wall_s=550`, episode wall 18 s, `MAX_HORIZON=1000`.
 - Observation remains 288-d; v0.7 encodings reuse twist/collar channels (see README / DESIGN).
 - Privileged solver (`tools/compound_solver.py`), v0.6-style port (`tools/v06_style_scripted.py`),
   and `tools/compound_obs_scripted.py`; `tools/calib_v06.py --profile v07`.
-- Calibration (seed 7, 8/stratum, 64 eps): privileged **0.583** (c4 **0.334**), v0.6-style
-  **0.313**, obs-only **0.071**, zero **0.008**. Measured 64-ep privileged wall on 2 CPU:
-  **206 s**. Details in `CALIBRATION.md`.
+- Calibration (seed 7, 8/stratum, 64 eps): privileged **0.577** (c4 **0.497**), v0.6-style
+  **0.126**, obs-only **0.016**, zero **0.003**; projected live ≤159 s. Details in
+  `CALIBRATION.md`.
 - Design notes: `docs/v0.7/DESIGN.md`.
 
 ## 14. Supersedes

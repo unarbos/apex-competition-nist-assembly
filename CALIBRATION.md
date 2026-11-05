@@ -3,31 +3,32 @@
 ## v0.7.0 (Assembly III, profile `v07`, live default)
 
 Live referee default is `v07` (spec `0.7.0`). Digests stay at the last released v0.6.3 pins
-until the tag/release cut. Measured with `tools/calib_v06.py --profile v07` (seed 7,
-8/stratum, 64 paired live episodes, 4 workers) on the real referee episode draw:
+until the tag/release cut. Hardness is in **obs-indexed keys**, **rework extract**, **stack
+rings**, denser graphs, and residual noise — not an obs-layout break. Referee caps:
+`deadline_ms=80`, `round_wall_s=550`, per-episode wall 18 s, `MAX_HORIZON=1000`.
+
+Measured with `tools/calib_v06.py --profile v07` (seed 7, 8/stratum, 64 paired live
+episodes, 4 workers):
 
 | Policy | Overall | c1 / c2 / c3 / c4 | steps done | mean s/ep | projected 64-ep live (2 CPU × 0.55) |
 |---|---|---|---|---|---|
-| zero | **0.008** | 0.01 / 0.01 / 0.00 / 0.01 | 0.01 | 5.9 | 104 s |
-| compound obs-only scripted (`tools/compound_obs_scripted.py`) | **0.071** | 0.06 / 0.10 / 0.07 / 0.02 | 0.06 | 6.4 | 112 s |
-| v0.6-style scripted (`tools/v06_style_scripted.py`) | **0.313** | 0.36 / 0.32 / 0.31 / 0.16 | 0.50 | 6.6 | 117 s |
-| privileged compound solver (`tools/compound_solver.py`) | **0.583** | 0.65 / 0.60 / 0.57 / 0.33 | 0.66 | 6.3 | 110 s |
+| zero | **0.003** | 0.01 / 0.00 / 0.00 / 0.00 | 0.01 | 7.7 | 136 s |
+| compound obs-only scripted | **0.016** | 0.01 / 0.02 / 0.02 / 0.01 | 0.03 | 9.0 | 159 s |
+| v0.6-style scripted | **0.126** | 0.16 / 0.11 / 0.10 / 0.10 | 0.26 | 7.7 | 136 s |
+| privileged compound solver | **0.577** | 0.62 / 0.55 / 0.59 / 0.50 | 0.78 | 8.5 | 150 s |
 
-Credit by kind (privileged): insert 0.71, screw 0.65, key 0.35, collar 0.34, rework 0.10, twist ~0.
-Stack is deferred in the generator (contact flaky).
-
-**Measured** 64-ep privileged eval wall on 2 CPUs (`taskset -c 0,1`, seed 7, 8/stratum): **206 s**
-(mean score 0.583). Well under the ≤ ~600 s bar.
+Credit by kind (privileged): rework 0.71, insert 0.67, screw 0.65, stack 0.57, key 0.54,
+collar 0.04.
 
 Release bars:
 
 | Bar | Target | Measured | Met |
 |---|---|---|---|
-| privileged reference | ≥ 0.55 | 0.583 | yes |
-| privileged on c4 | ≤ 0.40 | 0.334 | yes |
-| v0.6-style scripted | ≤ 0.35 | 0.313 | yes |
-| obs-only scripted | ≤ 0.15 | 0.071 | yes |
-| measured 64-ep eval on 2 CPU | ≤ ~600 s | 206 s | yes |
+| privileged reference | ≥ 0.50 | 0.577 | yes |
+| privileged on c4 | ≤ 0.50 | 0.497 | yes |
+| v0.6-style scripted | ≤ 0.30 | 0.126 | yes |
+| obs-only scripted | ≤ 0.15 | 0.016 | yes |
+| projected 64-ep live (2 CPU) | ≤ ~600 s | 159 s | yes |
 
 Reproduce:
 

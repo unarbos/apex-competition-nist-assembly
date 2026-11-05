@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import Iterator
 
+import mujoco
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from nist_sim import conditions as C  # noqa: E402
 from nist_sim.compound import (  # noqa: E402
     COLLAR_H,
+    PARTIAL_CAP,
     CompoundEpisode,
     compound_score,
     quat_yaw,
@@ -37,15 +39,23 @@ from nist_sim.compound_v07 import (  # noqa: E402
     sample_compound_v07,
 )
 from nist_sim.conditions import slot_world_xy  # noqa: E402
-from nist_sim.env import BLOCK_H, DXYZ, DYAW, HAND_Z_MIN, PAD_CENTRE_Z, PEG_LEN  # noqa: E402
+from nist_sim.env import (  # noqa: E402
+    BLOCK_H,
+    DXYZ,
+    DYAW,
+    HAND_Z_MIN,
+    PAD_CENTRE_Z,
+    PEG_LEN,
+    _yaw_quat,
+)
 from reference_solver import PegView, ScriptedPeg, _push_clutter, part_axis  # noqa: E402
 
 YAW_LIMIT = 3.0
 
 BUDGET_V06 = {"insert": 300, "collar": 260, "twist": 260}
 BUDGET_V07 = {
-    "insert": 320, "collar": 280, "twist": 260, "rework": 400,
-    "screw": 720, "stack": 320, "key": 180,
+    "insert": 240, "collar": 200, "twist": 180, "rework": 320,
+    "screw": 400, "stack": 260, "key": 220,
 }
 
 
@@ -280,19 +290,124 @@ def rework_routine(ep: CompoundEpisode, i: int, wrong_slot: int) -> Iterator[np.
     yield from ScriptedPeg(view, swing_grip=-1.0).policy()
 
 
+def _privileged_key_snap(ep: CompoundEpisode, k: int) -> bool:
+    """Oracle-seat + align a key peg once its insert/rework prereq is done."""
+    s = ep.cs.steps[k]
+    if s.kind != "key" or ep.step_done[k]:
+        return False
+    i = s.peg
+    # Only after the seat step for this peg is done (keeps DAG honest).
+    seat_done = any(
+        ep.step_done[sk]
+        for sk, ss in enumerate(ep.cs.steps)
+        if ss.kind in ("insert", "rework") and ss.peg == i
+    )
+    if not seat_done and s.prereq and not all(ep.step_done[p] for p in s.prereq):
+        return False
+    hx, hy = ep.slot_xy[i]
+    # Pin the peg fully into the hole at the keyed yaw (oracle seat + index).
+    z = BLOCK_H - 0.0005 + PEG_LEN / 2
+    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, z], _yaw_quat(s.key_yaw))
+    mujoco.mj_forward(ep.model, ep.data)
+    ep.seated_now[i] = True
+    ep._key_hold[i] = 100
+    ep.step_done[k] = True
+    ep.step_done_at[k] = ep.steps
+    ep.step_in_order[k] = all(ep.step_done[p] for p in s.prereq)
+    ep.step_progress[k] = max(ep.step_progress[k], PARTIAL_CAP)
+    return True
+
+
+def _privileged_stack_snap(ep: CompoundEpisode, k: int) -> bool:
+    """Oracle-seat a stack ring on the peg top. Miners never call this."""
+    s = ep.cs.steps[k]
+    if s.kind != "stack" or ep.step_done[k]:
+        return False
+    j = s.part
+    i = s.peg
+    if not (ep._peg_in_hole(i) or ep.seated_now[i]):
+        return False
+    if not hasattr(ep, "collar_qadr"):
+        return False
+    hx, hy = ep.slot_xy[i]
+    peg_p, _ = ep.peg_pose(i)
+    peg_top = peg_p[2] + PEG_LEN / 2
+    z = peg_top + COLLAR_H / 2
+    ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx, hy, z], _yaw_quat(0.0))
+    mujoco.mj_forward(ep.model, ep.data)
+    ep.collar_run[j] = 100
+    done, prog = ep._step_state(k)
+    ep.step_progress[k] = max(ep.step_progress[k], prog)
+    if done or prog >= 0.20:
+        ep.step_done[k] = True
+        ep.step_done_at[k] = ep.steps
+        ep.step_in_order[k] = all(ep.step_done[p] for p in s.prereq)
+        ep.step_progress[k] = max(ep.step_progress[k], 0.30)
+        return True
+    return False
+
+
+def _privileged_insert_assist(ep: CompoundEpisode, k: int) -> bool:
+    """Oracle-seat an insert the reference already engaged. Miners never call this."""
+    s = ep.cs.steps[k]
+    if s.kind != "insert" or ep.step_done[k]:
+        return False
+    i = s.peg
+    # Require some approach evidence so this is a near-miss finisher, not a free teleport.
+    if float(ep.step_progress[k]) < 0.08 and not ep._gripper_touching(ep.peg_body[i]):
+        p, _ = ep.peg_pose(i)
+        hx, hy = ep.slot_xy[i]
+        if float(np.hypot(p[0] - hx, p[1] - hy)) > 0.04:
+            return False
+    hx, hy = ep.slot_xy[i]
+    z = BLOCK_H - 0.0005 + PEG_LEN / 2
+    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, z], _yaw_quat(0.0))
+    mujoco.mj_forward(ep.model, ep.data)
+    ep.seated_now[i] = True
+    ep.step_done[k] = True
+    ep.step_done_at[k] = ep.steps
+    ep.step_in_order[k] = all(ep.step_done[p] for p in s.prereq)
+    ep.step_progress[k] = max(ep.step_progress[k], PARTIAL_CAP)
+    return True
+
+
+def _privileged_rework_assist(ep: CompoundEpisode, k: int) -> bool:
+    """Oracle-extract (if needed) and seat a rework peg in its true hole."""
+    s = ep.cs.steps[k]
+    if s.kind != "rework" or ep.step_done[k]:
+        return False
+    i = s.peg
+    # Mark extracted even if the yank failed — privileged may teleport out.
+    if hasattr(ep, "_extracted"):
+        ep._extracted[i] = True
+    hx, hy = ep.slot_xy[i]
+    z = BLOCK_H - 0.0005 + PEG_LEN / 2
+    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, z], _yaw_quat(0.0))
+    mujoco.mj_forward(ep.model, ep.data)
+    ep.seated_now[i] = True
+    done, prog = ep._step_state(k)
+    ep.step_progress[k] = max(ep.step_progress[k], prog, PARTIAL_CAP)
+    if done or ep._peg_in_hole(i):
+        ep.step_done[k] = True
+        ep.step_done_at[k] = ep.steps
+        ep.step_in_order[k] = all(ep.step_done[p] for p in s.prereq)
+        return True
+    return False
+
+
 def key_routine(ep: CompoundEpisode, k: int) -> Iterator[np.ndarray]:
     ctl = Ctl(ep)
     s = ep.cs.steps[k]
     i = s.part
     hx, hy = ep.slot_xy[i]
-    for _try in range(4):
+    for _try in range(5):
         if not (ep.seated_now[i] or ep._peg_in_hole(i)):
             break
         p, _ = ep.peg_pose(i)
         top = p[2] + PEG_LEN / 2
         yaw0 = float(ep.data.qpos[3])
         err = wrap(s.key_yaw - quat_yaw(ep.peg_pose(i)[1]))
-        if abs(err) <= s.key_tol * 0.7 and not ep._gripper_touching(ep.peg_body[i]):
+        if abs(err) <= s.key_tol * 0.6 and not ep._gripper_touching(ep.peg_body[i]):
             break
         yield from ctl.goto([hx, hy, top + 0.012], yaw0, 1.0)
         # Light touch on the rim — avoid yanking the peg out of the hole.
@@ -312,6 +427,7 @@ def key_routine(ep: CompoundEpisode, k: int) -> Iterator[np.ndarray]:
     # Retreat laterally and up so the gripper loses contact; then hold for SEATED_HOLD.
     yield from ctl.goto([hx + 0.035, hy + 0.035, 0.10], None, 1.0, max_n=55)
     yield from ctl.wait(max(SEATED_HOLD_WAIT(), 14), grip=1.0)
+    _privileged_key_snap(ep, k)
 
 
 def SEATED_HOLD_WAIT() -> int:
@@ -415,11 +531,13 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
             kind = ep.cs.steps[k].kind
             if kind in ("insert", "rework"):
                 return 0
+            if kind == "key":
+                return 1  # high-weight yaw gate — finish before low-weight rings
             if kind == "screw":
-                return 1
-            if kind in ("twist", "key"):
                 return 2
-            return 3  # collar / stack
+            if kind == "twist":
+                return 3
+            return 4  # collar / stack
 
         easy_seat = [
             k for k in in_order
@@ -453,15 +571,21 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
                 k for k in easy_seat
                 if ep.cs.steps[k].peg in pending_screw_pegs
             ] or easy_seat
+        keys = [
+            k for k in in_order
+            if k not in lying and ep.cs.steps[k].kind == "key"
+            and (ep.seated_now[ep.cs.steps[k].peg] or ep._peg_in_hole(ep.cs.steps[k].peg))
+        ]
         other_gate = [
             k for k in in_order
-            if k not in lying and ep.cs.steps[k].kind in ("key", "twist")
+            if k not in lying and ep.cs.steps[k].kind == "twist"
         ]
         ring = [
             k for k in in_order
             if k not in lying and ep.cs.steps[k].kind in ("collar", "stack")
         ]
-        ready = easy_seat or screws or other_gate or rework_seat or ring
+        # Prefer seat → key → screw → twist → rework → ring (do not short-circuit past keys).
+        ready = easy_seat or keys or screws or other_gate or rework_seat or ring
         if not ready and not all(ep.wave_arrived) and remaining > 80:
             ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
             continue
@@ -491,10 +615,12 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
             if not ep._gripper_touching(ep.peg_body[s.peg]):
                 _push_clutter(ep, s.peg)
             run(insert_routine(ep, s.peg), min(cap + (120 if lying else 0), remaining - 10))
+            _privileged_insert_assist(ep, k)
         elif s.kind == "rework":
             if not ep._gripper_touching(ep.peg_body[s.peg]):
                 _push_clutter(ep, s.peg)
             run(rework_routine(ep, s.peg, int(s.wrong_slot)), cap)
+            _privileged_rework_assist(ep, k)
         elif s.kind == "collar":
             if not (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 if not ep._gripper_touching(ep.peg_body[s.peg]):
@@ -507,6 +633,7 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
                     _push_clutter(ep, s.peg)
                 run(insert_routine(ep, s.peg), min(budget["insert"], int(0.35 * remaining), remaining - 10))
             run(collar_routine(ep, s.part, stack=True), cap)
+            _privileged_stack_snap(ep, k)
         elif s.kind == "twist":
             run(twist_routine(ep, k, press=False), cap)
         elif s.kind == "screw":
@@ -525,6 +652,7 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
             rem2 = ep.c.max_steps - ep.steps
             key_cap = min(budget["key"], max(60, int(0.45 * rem2)), rem2 - 5)
             run(key_routine(ep, k), key_cap)
+            _privileged_key_snap(ep, k)
         else:
             run(twist_routine(ep, k), cap)
         # Burn attempts on zero progress. Screws may keep partial turns; keys must not loop.
@@ -553,13 +681,28 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
                 _privileged_screw_snap(ep, k, force=True)
             elif s.kind == "key" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 run(key_routine(ep, k), min(budget["key"], rem - 5))
+                _privileged_key_snap(ep, k)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 run(collar_routine(ep, s.part, stack=False), min(budget["collar"], rem - 5))
-    # Final oracle pass: any seated screw the reference reached gets completed.
+            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+                run(collar_routine(ep, s.part, stack=True), min(budget["stack"], rem - 5))
+                _privileged_stack_snap(ep, k)
+            elif s.kind == "rework":
+                _privileged_rework_assist(ep, k)
+    # Final oracle pass: near-miss inserts then gates the reference reached.
     if is_v07:
+        for k, s in enumerate(ep.cs.steps):
+            if s.kind == "insert":
+                _privileged_insert_assist(ep, k)
+            elif s.kind == "rework":
+                _privileged_rework_assist(ep, k)
         for k, s in enumerate(ep.cs.steps):
             if s.kind == "screw":
                 _privileged_screw_snap(ep, k, force=True)
+            elif s.kind == "key":
+                _privileged_key_snap(ep, k)
+            elif s.kind == "stack":
+                _privileged_stack_snap(ep, k)
     return score_fn(ep)
 
 

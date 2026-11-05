@@ -21,6 +21,7 @@ import json
 import multiprocessing as mp
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -64,8 +65,14 @@ compound_score = compound_score_v07 if ASSEMBLY_III else compound_score_v06
 RECORD_FORMAT = "nist_lite_record/4" if COMPOUND else "nist_lite_record/2"
 HISTORY_DIR = Path(os.environ.get("NIST_HISTORY_DIR", "/data/history"))
 DEFAULTS = {
-    "episodes_per_stratum": 12,
-    "deadline_ms": 500,
+    # Live v0.7: 8/stratum → 64 episodes. Spec timeout is 1800 s; we stay ≪ that.
+    "episodes_per_stratum": 8,
+    # Per-batch policy budget. Kings are ~40–60 ms/call; 80 ms leaves headroom but
+    # stops a runaway ONNX from burning the platform timeout.
+    "deadline_ms": 80,
+    # Whole-round wall budget (seconds). Stops the lockstep loop once exceeded so a
+    # slow policy cannot approach the 1800 s platform timeout on 2 CPU.
+    "round_wall_s": 550,
     "workers": 2,
     "record_stride": 8,
     "records_enabled": True,
@@ -213,6 +220,7 @@ class NistLiteReferee(Referee):
         cfg = {**DEFAULTS, **(ctx.config or {})}
         per = int(cfg["episodes_per_stratum"])
         deadline_ms = int(cfg["deadline_ms"])
+        round_wall_s = float(cfg.get("round_wall_s", 550))
         stride = int(cfg["record_stride"]) if cfg["records_enabled"] else 0
         split = os.environ.get("NIST_SPLIT", "live")
         round_ranges, conds = _sample(ctx.seed, per, split)
@@ -245,8 +253,13 @@ class NistLiteReferee(Referee):
             player_fault = f"reset failed: {type(e).__name__}"
 
         calls = 0
+        round_t0 = time.perf_counter()
+        hit_round_wall = False
         for _ in range(max_steps):
             if player_fault:
+                break
+            if (time.perf_counter() - round_t0) >= round_wall_s:
+                hit_round_wall = True
                 break
             for c in conns:
                 c.send(("obs",))
@@ -274,7 +287,11 @@ class NistLiteReferee(Referee):
             for c in conns:
                 c.recv()
 
-        reason = "player_fault" if player_fault else "time_limit"
+        reason = (
+            "player_fault"
+            if player_fault
+            else ("round_wall" if hit_round_wall else "time_limit")
+        )
         for c in conns:
             c.send(("fail_all", reason))
         for c in conns:
