@@ -1,6 +1,6 @@
 schema: apex.competition.v1
 id: nist_lite_assembly
-version: 0.6.3
+version: 0.7.0
 display_name: "NIST-Lite Robot Assembly (RL)"
 kind: solo
 process_type: cpu
@@ -12,6 +12,7 @@ resources:
   gpu_count: 0
 
 # PLAYER image: serves the miner's ONNX policy over gym_v1 (player/Dockerfile).
+# Digests below are the last released (v0.6.3) pins; the release workflow replaces them on tag.
 image:
   ref: ghcr.io/unarbos/apex-competition-nist-assembly-player
   digest: sha256:362ea25b5f7fdc7b6567e8f919fb8bd2e7521cdf048adeec6771d6fc161e2c7a
@@ -42,8 +43,8 @@ entrypoints:
     command: ["python", "/app/launch.py", "--port", "8000"]
     network_disabled: false
     allow_internet: false
-    # 1800 s (since 0.2.1). v0.5 128-episode rounds took ~400-660 s on Macrocosmos staging; v0.6 compound
-    # episodes cost ~2.4x (measured), so live rounds use 8/stratum (64 episodes, ~500-1150 s projected) on 2 CPU.
+    # 1800 s (since 0.2.1). v0.7 live rounds use 8/stratum (64 episodes). Calibrated projection for a
+    # ~1 ms/call policy is well under 600 s on 2 CPU; timeout keeps a large margin for slow policies.
     timeout_s: 1800
     http_api:
       port: 8000

@@ -1,5 +1,43 @@
 # NIST-Lite calibration
 
+## v0.7.0 (Assembly III, profile `v07`, live default)
+
+Live referee default is `v07` (spec `0.7.0`). Digests stay at the last released v0.6.3 pins
+until the tag/release cut. Hardness is in **obs-indexed keys**, **rework extract**, **stack
+rings**, denser graphs, and residual noise — not an obs-layout break. Referee caps:
+`deadline_ms=80`, `round_wall_s=550`, per-episode wall 18 s, `MAX_HORIZON=1000`.
+
+Measured with `tools/calib_v06.py --profile v07` (seed 7, 8/stratum, 64 paired live
+episodes, 4 workers):
+
+| Policy | Overall | c1 / c2 / c3 / c4 | steps done | mean s/ep | projected 64-ep live (2 CPU × 0.55) |
+|---|---|---|---|---|---|
+| zero | **0.003** | 0.01 / 0.00 / 0.00 / 0.00 | 0.01 | 7.7 | 136 s |
+| compound obs-only scripted | **0.016** | 0.01 / 0.02 / 0.02 / 0.01 | 0.03 | 9.0 | 159 s |
+| v0.6-style scripted | **0.126** | 0.16 / 0.11 / 0.10 / 0.10 | 0.26 | 7.7 | 136 s |
+| privileged compound solver | **0.577** | 0.62 / 0.55 / 0.59 / 0.50 | 0.78 | 8.5 | 150 s |
+
+Credit by kind (privileged): rework 0.71, insert 0.67, screw 0.65, stack 0.57, key 0.54,
+collar 0.04.
+
+Release bars:
+
+| Bar | Target | Measured | Met |
+|---|---|---|---|
+| privileged reference | ≥ 0.50 | 0.577 | yes |
+| privileged on c4 | ≤ 0.50 | 0.497 | yes |
+| v0.6-style scripted | ≤ 0.30 | 0.126 | yes |
+| obs-only scripted | ≤ 0.15 | 0.016 | yes |
+| projected 64-ep live (2 CPU) | ≤ ~600 s | 159 s | yes |
+
+Reproduce:
+
+```bash
+NIST_PROFILE=v07 python tools/calib_v06.py --profile v07 --seeds 7 --per 8 --workers 4 \
+  --policies reference v06_style compound_scripted zero --ref reference \
+  --live-eps 64 --cpus 2 --out out/calib_v07
+```
+
 ## v0.6.2 (mass-event fix)
 
 A `mass` event now refreshes MuJoCo's derived mass constants (`mj_setConst`), so the next grasp

@@ -1,17 +1,17 @@
-"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.3).
+"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.7.0 Assembly III).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the
 player gets one batched observation for the episodes still running and returns one
 action per episode.
 
-raw_score = mean of per-episode scores (fixed denominator). Since v0.6 every episode is a
-random compound task graph (inserts, collars, twist-locks, precedence, waves, hidden physics
-changes between subtasks; nist_sim.compound) and its score is the weighted per-step partial
-credit (compound_score). A fault (NaN / wrong shape / late) ends that episode; steps already
-done keep their credit if still done when it stops. The observation is 288-d; its first 184
-dims are the v0.5 layout, so 184-input policies keep running on the prefix (player/launch.py).
-Records use ``nist_lite_record/4`` (collars, full task graph, step_results, trajectory collars).
+raw_score = mean of per-episode scores (fixed denominator). Live default is Assembly III
+(``NIST_PROFILE=v07`` → nist_sim.compound_v07: inserts / collars / twists plus rework /
+screw / stack / key, denser graphs, weighted partial credit). ``NIST_PROFILE=v06`` still
+selects the previous Assembly II compound task. A fault (NaN / wrong shape / late) ends
+that episode; steps already done keep their credit if still done when it stops. The
+observation is 288-d; its first 184 dims are the v0.5 layout, so 184-input policies keep
+running on the prefix (player/launch.py). Records use ``nist_lite_record/4``.
 """
 
 from __future__ import annotations
@@ -21,13 +21,15 @@ import json
 import multiprocessing as mp
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-# The live task is the v0.6 compound profile; set before nist_sim is imported (env.py reads it).
-os.environ.setdefault("NIST_PROFILE", "v06")
+# Live task is Assembly III (v0.7). Set before nist_sim is imported (env.py reads physics_dt).
+# NIST_PROFILE=v06 still selects the previous compound task for A/B and regression.
+os.environ.setdefault("NIST_PROFILE", "v07")
 
 from gym_v1.client import PlayerClient, PlayerError
 from gym_v1.referee import GameResult, Referee, RefereeContext
@@ -36,24 +38,41 @@ from nist_sim import profile as _profile
 from nist_sim.compound import (
     OBS_DIM_V06,
     CompoundEpisode,
-    compound_score,
+    compound_score as compound_score_v06,
     record_events,
     sample_compound,
     step_results,
+)
+from nist_sim.compound_v07 import (
+    OBS_DIM_V07,
+    AssemblyIIIEpisode,
+    compound_score_v07,
+    sample_compound_v07,
 )
 from nist_sim.conditions import episode_seed_sequence, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
 from nist_sim.scoring import episode_score, raw_score_from_episodes
 
-COMPOUND = _profile.ACTIVE.name == "v06"
-OBS_W = OBS_DIM_V06 if COMPOUND else OBS_DIM
+# Read the env (not profile.ACTIVE): ACTIVE is fixed at first import of nist_sim.profile and
+# stays stale across NIST_PROFILE changes / importlib.reload in tests.
+_PROFILE_NAME = (os.environ.get("NIST_PROFILE") or "v07").strip().lower()
+COMPOUND = _PROFILE_NAME in ("v06", "v07")
+ASSEMBLY_III = _PROFILE_NAME == "v07"
+OBS_W = (OBS_DIM_V07 if ASSEMBLY_III else OBS_DIM_V06) if COMPOUND else OBS_DIM
+compound_score = compound_score_v07 if ASSEMBLY_III else compound_score_v06
 # /4 = compound records with collars + full task + step_results (v0.6.1+).
 # /2 = v0.5 single-stage records. (/3 was the brief v0.6.0 layout; superseded.)
 RECORD_FORMAT = "nist_lite_record/4" if COMPOUND else "nist_lite_record/2"
 HISTORY_DIR = Path(os.environ.get("NIST_HISTORY_DIR", "/data/history"))
 DEFAULTS = {
-    "episodes_per_stratum": 12,
-    "deadline_ms": 500,
+    # Live v0.7: 8/stratum → 64 episodes. Spec timeout is 1800 s; we stay ≪ that.
+    "episodes_per_stratum": 8,
+    # Per-batch policy budget. Kings are ~40–60 ms/call; 80 ms leaves headroom but
+    # stops a runaway ONNX from burning the platform timeout.
+    "deadline_ms": 80,
+    # Whole-round wall budget (seconds). Stops the lockstep loop once exceeded so a
+    # slow policy cannot approach the 1800 s platform timeout on 2 CPU.
+    "round_wall_s": 550,
     "workers": 2,
     "record_stride": 8,
     "records_enabled": True,
@@ -61,7 +80,19 @@ DEFAULTS = {
 
 
 def _sample(seed: int, per_stratum: int, split: str):
-    return sample_compound(seed, per_stratum, split) if COMPOUND else sample_episodes(seed, per_stratum, split)
+    if ASSEMBLY_III:
+        return sample_compound_v07(seed, per_stratum, split)
+    if COMPOUND:
+        return sample_compound(seed, per_stratum, split)
+    return sample_episodes(seed, per_stratum, split)
+
+
+def _make_episode(cond, rng):
+    if ASSEMBLY_III:
+        return AssemblyIIIEpisode(cond, rng)
+    if COMPOUND:
+        return CompoundEpisode(cond, rng)
+    return Episode(cond, rng)
 
 
 def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, split: str):
@@ -72,7 +103,7 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
     for i in indices:
         ss = episode_seed_sequence(seed, i)
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
-        eps[i] = CompoundEpisode(conds[i], r1) if COMPOUND else Episode(conds[i], r1)
+        eps[i] = _make_episode(conds[i], r1)
         noise[i] = r2
         if stride and i % stride == 0:
             traj[i] = []
@@ -189,6 +220,7 @@ class NistLiteReferee(Referee):
         cfg = {**DEFAULTS, **(ctx.config or {})}
         per = int(cfg["episodes_per_stratum"])
         deadline_ms = int(cfg["deadline_ms"])
+        round_wall_s = float(cfg.get("round_wall_s", 550))
         stride = int(cfg["record_stride"]) if cfg["records_enabled"] else 0
         split = os.environ.get("NIST_SPLIT", "live")
         round_ranges, conds = _sample(ctx.seed, per, split)
@@ -221,8 +253,13 @@ class NistLiteReferee(Referee):
             player_fault = f"reset failed: {type(e).__name__}"
 
         calls = 0
+        round_t0 = time.perf_counter()
+        hit_round_wall = False
         for _ in range(max_steps):
             if player_fault:
+                break
+            if (time.perf_counter() - round_t0) >= round_wall_s:
+                hit_round_wall = True
                 break
             for c in conns:
                 c.send(("obs",))
@@ -250,7 +287,11 @@ class NistLiteReferee(Referee):
             for c in conns:
                 c.recv()
 
-        reason = "player_fault" if player_fault else "time_limit"
+        reason = (
+            "player_fault"
+            if player_fault
+            else ("round_wall" if hit_round_wall else "time_limit")
+        )
         for c in conns:
             c.send(("fail_all", reason))
         for c in conns:

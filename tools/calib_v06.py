@@ -4,8 +4,9 @@
         --policies reference obs_scripted path/to/policy.onnx path/to/policy.onnx+eps=1e-4 \
         --ref obs_scripted --out /tmp/calib_v06
 
-Policy specs: ``zero``, ``baseline``, ``obs_scripted``, ``refport`` (obs-only reference port),
-``reference`` (privileged), or an ONNX path. Append ``+eps=X`` to run an *epsilon copy*: the same
+Policy specs: ``zero``, ``baseline``, ``obs_scripted``, ``compound_scripted`` (288-d compound
+obs-only scripted), ``refport`` (obs-only reference port), ``reference`` (privileged), or an
+ONNX path. Append ``+eps=X`` to run an *epsilon copy*: the same
 policy with a constant ``X`` added to every observation entry, or ``+aeps=X`` to add a fixed
 pseudo-random +-X to every action component (closest to a re-exported copy). A copy that behaves the same should
 score the same; the fraction of episodes whose score changes measures how much of a round is
@@ -46,7 +47,17 @@ BARS = {
     "reroll_identical_min": 0.95,
     "projected_live_s_max": 400.0,
 }
-SCRIPTED = {"baseline", "obs_scripted", "refport"}
+SCRIPTED = {"baseline", "obs_scripted", "compound_scripted", "v06_style", "refport"}
+# v0.7 Assembly III bars (success criteria from the v0.7-dev brief).
+BARS_V07 = {
+    "privileged_min_compound": 0.50,
+    "c4_privileged_max": 0.50,  # c4 still below privileged mean; headroom vs kings
+    "scripted_max": 0.30,  # v0.6-style / revealed-king ceiling on v0.7
+    "obs_scripted_max": 0.15,
+    "scripted_ratio_max": 0.70,
+    "reroll_identical_min": 0.95,
+    "projected_live_s_max": 600.0,  # 64-ep live on 2 CPU
+}
 
 
 def parse_spec(spec: str) -> tuple[str, float]:
@@ -71,17 +82,35 @@ def _worker_init(root: str, profile: str) -> None:
     sys.path.insert(0, os.path.join(root, "tools"))
 
 
+# Per-worker ONNX session cache (spawn workers; avoid reloading a multi-MB model every episode).
+_ONNX_CACHE: dict[str, tuple] = {}
+
+
 def _make_act(base: str):
     if base.endswith(".onnx"):
         import onnxruntime as ort
 
-        so = ort.SessionOptions()
-        so.intra_op_num_threads = 1
-        so.inter_op_num_threads = 1
-        sess = ort.InferenceSession(base, so, providers=["CPUExecutionProvider"])
-        nm = sess.get_inputs()[0].name
+        hit = _ONNX_CACHE.get(base)
+        if hit is None:
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 1
+            so.inter_op_num_threads = 1
+            sess = ort.InferenceSession(base, so, providers=["CPUExecutionProvider"])
+            nm = sess.get_inputs()[0].name
+            shp = sess.get_inputs()[0].shape
+            _ONNX_CACHE[base] = (sess, nm, shp)
+            hit = _ONNX_CACHE[base]
+        sess, nm, _shp = hit
         return lambda o: np.asarray(sess.run(None, {nm: o.astype(np.float32)[None]})[0]).reshape(-1)[:5]
     if base == "zero":
+        return lambda o: np.zeros(5)
+    if base == "compound_scripted":
+        from compound_obs_scripted import CompoundObsScripted
+
+        pol = CompoundObsScripted()
+        return lambda o: pol.act(o.astype(np.float32))
+    if base == "v06_style":
+        # Handled inside run_compound (privileged-state v0.6 insert/collar/twist port).
         return lambda o: np.zeros(5)
     from nist_sim import policies as P
 
@@ -90,31 +119,46 @@ def _make_act(base: str):
 
 
 def run_compound(job: tuple) -> dict:
-    """One v0.6 compound episode. 184-input policies see the v0.5-compatible obs prefix."""
+    """One compound episode (v0.6 or v0.7). 184-input policies see the v0.5-compatible obs prefix."""
     spec, seed, per, i, split = job[:5]
     import nist_sim.conditions as C
     from nist_sim import profile
     from nist_sim.compound import OBS_DIM_V06, CompoundEpisode, compound_score, sample_compound
+    from nist_sim.compound_v07 import (
+        OBS_DIM_V07,
+        AssemblyIIIEpisode,
+        compound_score_v07,
+        sample_compound_v07,
+    )
     from nist_sim.env import OBS_DIM
 
     base, eps = parse_spec(spec)
-    _, conds = sample_compound(seed, per, split)
+    v07 = profile.ACTIVE.name == "v07"
+    sample = sample_compound_v07 if v07 else sample_compound
+    make_ep = AssemblyIIIEpisode if v07 else CompoundEpisode
+    score_fn = compound_score_v07 if v07 else compound_score
+    obs_full = OBS_DIM_V07 if v07 else OBS_DIM_V06
+    _, conds = sample(seed, per, split)
     c = conds[i]
     r1, r2 = (np.random.default_rng(s) for s in C.episode_seed_sequence(seed, i).spawn(2))
     t0 = time.perf_counter()
-    e = CompoundEpisode(c, r1)
+    e = make_ep(c, r1)
     if base == "reference":
         from compound_solver import solve_compound
 
         r = solve_compound(e)
+    elif base == "v06_style":
+        from v06_style_scripted import solve_v06_style
+
+        r = solve_v06_style(e)
     else:
         act = _make_act(base)
         width = OBS_DIM
-        if base.endswith(".onnx"):
-            import onnxruntime as ort
-
-            shp = ort.InferenceSession(base, providers=["CPUExecutionProvider"]).get_inputs()[0].shape
-            width = OBS_DIM_V06 if (len(shp) > 1 and shp[-1] == OBS_DIM_V06) else OBS_DIM
+        if base == "compound_scripted":
+            width = obs_full
+        elif base.endswith(".onnx"):
+            _sess, _nm, shp = _ONNX_CACHE[base]
+            width = obs_full if (len(shp) > 1 and shp[-1] in (OBS_DIM_V06, OBS_DIM_V07)) else OBS_DIM
         obs_eps = eps if eps > 0 else 0.0
         a_rng = np.random.default_rng([seed, i, 0xAE])
         while not e.done:
@@ -125,7 +169,7 @@ def run_compound(job: tuple) -> dict:
             if not np.all(np.isfinite(a)):
                 a = np.zeros(5)
             e.step(np.clip(a, -1, 1))
-        r = compound_score(e)
+        r = score_fn(e)
     wall = time.perf_counter() - t0
     return dict(policy=spec, seed=seed, i=i, score=float(r["score"]), wall_s=round(wall, 3), steps=int(e.steps),
                 max_steps=int(c.max_steps), k=int(c.n_pegs), tier=c.compound.tier, n_steps=r["n_steps"],
@@ -235,40 +279,57 @@ def summarize(rows: list[dict], specs: list[str], ref: str | None, live_eps: int
     return out
 
 
-def bars_table(summ: dict) -> list[tuple[str, str, str, str]]:
+def bars_table(summ: dict, profile: str = "v06") -> list[tuple[str, str, str, str]]:
     P = summ["policies"]
     rows = []
     compound = any("steps_done_frac" in p for p in P.values())
+    bars = BARS_V07 if profile == "v07" else BARS
     if "reference" in P:
         v = P["reference"]["mean"]
-        lo = BARS["privileged_min_compound"] if compound else BARS["privileged_min"]
+        lo = bars.get("privileged_min_compound", bars.get("privileged_min", 0.3)) if compound else bars.get("privileged_min", 0.6)
         rows.append(("privileged reference", f">= {lo}", f"{v:.3f}", "yes" if v >= lo else "NO"))
         if compound:
             top = P["reference"]["tier"].get("c4")
             if top is not None:
-                rows.append(("privileged on hardest tier c4 (ceiling headroom)", f"<= {BARS['c4_privileged_max']}", f"{top:.3f}",
-                             "yes" if top <= BARS["c4_privileged_max"] else "NO"))
+                rows.append(("privileged on hardest tier c4 (ceiling headroom)", f"<= {bars['c4_privileged_max']}", f"{top:.3f}",
+                             "yes" if top <= bars["c4_privileged_max"] else "NO"))
     scr = [(s, P[s]["mean"]) for s in P if s != "reference" and s != "zero" and not parse_spec(s)[1]]
     if scr:
         s, v = max(scr, key=lambda t: t[1])
-        if compound and "reference" in P:
-            lim = BARS["scripted_ratio_max"] * P["reference"]["mean"]
-            rows.append((f"best non-privileged ({os.path.basename(s)})", f"<= {BARS['scripted_ratio_max']} x privileged = {lim:.3f}",
+        if profile == "v07":
+            if "v06_style" in P:
+                v06s = P["v06_style"]["mean"]
+                rows.append(("v0.6-style scripted (insert/collar/twist port)", f"<= {bars['scripted_max']}",
+                             f"{v06s:.3f}", "yes" if v06s <= bars["scripted_max"] else "NO"))
+            obs_names = [n for n in ("compound_scripted", "obs_scripted") if n in P]
+            if obs_names:
+                on, ov = max(((n, P[n]["mean"]) for n in obs_names), key=lambda t: t[1])
+                lim = bars.get("obs_scripted_max", 0.15)
+                rows.append((f"obs-only scripted ({on})", f"<= {lim}", f"{ov:.3f}",
+                             "yes" if ov <= lim else "NO"))
+            rows.append((f"best non-privileged ({os.path.basename(s)})", f"<= {bars['scripted_max']}",
+                         f"{v:.3f}", "yes" if v <= bars["scripted_max"] else "NO"))
+            if "reference" in P and P["reference"]["mean"] > 0:
+                rows.append(("scripted below privileged", f"< reference {P['reference']['mean']:.3f}",
+                             f"{v:.3f}", "yes" if v < P["reference"]["mean"] - 0.15 else "NO"))
+        elif compound and "reference" in P:
+            lim = bars["scripted_ratio_max"] * P["reference"]["mean"]
+            rows.append((f"best non-privileged ({os.path.basename(s)})", f"<= {bars['scripted_ratio_max']} x privileged = {lim:.3f}",
                          f"{v:.3f}", "yes" if v <= lim else "NO"))
         else:
-            rows.append((f"best scripted ({os.path.basename(s)})", f"<= {BARS['scripted_max']}", f"{v:.3f}", "yes" if v <= BARS["scripted_max"] else "NO"))
+            rows.append((f"best scripted ({os.path.basename(s)})", f"<= {bars['scripted_max']}", f"{v:.3f}", "yes" if v <= bars["scripted_max"] else "NO"))
     for s, r in summ["reroll"].items():
         f = r["identical_frac"]
-        rows.append((f"epsilon copy {s}: identical episodes", f">= {BARS['reroll_identical_min']}", f"{f:.2f}",
-                     "yes" if f >= BARS["reroll_identical_min"] else "NO"))
+        rows.append((f"epsilon copy {s}: identical episodes", f">= {bars['reroll_identical_min']}", f"{f:.2f}",
+                     "yes" if f >= bars["reroll_identical_min"] else "NO"))
     worst = max((p["projected_live_s"] for p in P.values()), default=float("nan"))
-    rows.append(("projected live eval time (slowest policy)", f"<= {BARS['projected_live_s_max']:.0f} s", f"{worst:.0f} s",
-                 "yes" if worst <= BARS["projected_live_s_max"] else "NO"))
+    rows.append(("projected live eval time (slowest policy)", f"<= {bars['projected_live_s_max']:.0f} s", f"{worst:.0f} s",
+                 "yes" if worst <= bars["projected_live_s_max"] else "NO"))
     return rows
 
 
 def write_md(path: Path, summ: dict, args) -> None:
-    L = [f"# v0.6 calibration run (profile `{args.profile}`, action quant {os.environ.get('NIST_ACTION_QUANT') or 'profile default'}, physics dt {os.environ.get('NIST_PHYSICS_DT') or 'profile default'})", "",
+    L = [f"# v0.{args.profile[1:]} calibration run (profile `{args.profile}`, action quant {os.environ.get('NIST_ACTION_QUANT') or 'profile default'}, physics dt {os.environ.get('NIST_PHYSICS_DT') or 'profile default'})", "",
          f"Seeds {args.seeds}, {args.per}/stratum, split `{args.split}`, {summ['episodes']} paired episodes. "
          f"Projection: {args.live_eps} live episodes on {args.cpus} CPU x prod factor {args.prod_factor}.", "",
          "| Policy | mean | by tier | mean s/episode | projected live s |", "|---|---|---|---|---|"]
@@ -290,15 +351,15 @@ def write_md(path: Path, summ: dict, args) -> None:
         for s, r in summ["reroll"].items():
             L.append(f"| {s} | {r['delta']:+.4f} | {r['se']:.4f} | {r['identical_frac']:.2f} |")
     L += ["", "Release bars:", "", "| Bar | Target | Measured | Met |", "|---|---|---|---|"]
-    L += [f"| {a} | {b} | {c} | {d} |" for a, b, c, d in bars_table(summ)]
+    L += [f"| {a} | {b} | {c} | {d} |" for a, b, c, d in bars_table(summ, args.profile)]
     path.write_text("\n".join(L) + "\n")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--profile", default="v05", choices=["v05", "v06"])
+    ap.add_argument("--profile", default="v05", choices=["v05", "v06", "v07"])
     ap.add_argument("--policies", nargs="+", required=True)
-    ap.add_argument("--task", choices=["v05", "compound"], default=None, help="default: compound for v06, else v05")
+    ap.add_argument("--task", choices=["v05", "compound"], default=None, help="default: compound for v06/v07, else v05")
     ap.add_argument("--episodes", type=int, default=0, help="only the first N episodes of each seed (0 = all)")
     ap.add_argument("--ref", default=None, help="policy spec for paired deltas")
     ap.add_argument("--seeds", type=int, nargs="+", default=[1])
@@ -326,7 +387,7 @@ def main() -> None:
         os.environ["NIST_ACTION_QUANT"] = str(a.action_quant)
     if a.physics_dt is not None:
         os.environ["NIST_PHYSICS_DT"] = str(a.physics_dt)
-    task = a.task or ("compound" if a.profile == "v06" else "v05")
+    task = a.task or ("compound" if a.profile in ("v06", "v07") else "v05")
     jobs = [(s, seed, a.per, i, a.split, task) for s in specs for seed in a.seeds for i in range(8 * a.per)]
     if a.episodes:
         jobs = [j for j in jobs if j[3] < a.episodes]
@@ -343,8 +404,9 @@ def main() -> None:
     summ["wall_s"] = round(time.time() - t, 1)
     summ["args"] = vars(a)
     (out / "summary.json").write_text(json.dumps(summ, indent=1, default=str))
-    write_md(out / "CALIB_V06.md", summ, a)
-    print((out / "CALIB_V06.md").read_text())
+    md_name = "CALIB_V07.md" if a.profile == "v07" else "CALIB_V06.md"
+    write_md(out / md_name, summ, a)
+    print((out / md_name).read_text())
 
 
 if __name__ == "__main__":

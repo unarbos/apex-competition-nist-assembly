@@ -1,11 +1,13 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.3
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.0 (Assembly III)
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
-assembly graphs (peg inserts, collars, twist-locks, precedence, parts in waves, hidden physics
-changes between subtasks) on a full NIST ATB-1-style board under clutter, tight fits, and
-sensor/actuation perturbations. It generalises across sizes and start states. Partial-credit scoring keeps
-headroom above plain success so the platform 1% takeover rule stays usable.
+assembly graphs (peg inserts, collars, twist-locks, and in v0.7-dev also rework / screw /
+stack / key steps, precedence, parts in waves, hidden physics changes between subtasks) on a
+full NIST ATB-1-style board under clutter, tight fits, and sensor/actuation perturbations. It
+generalises across sizes and start states. Partial-credit scoring keeps headroom above plain
+success so the platform 1% takeover rule stays usable. v0.7-dev aims for a much higher ceiling
+than v0.6 (c4 near-impossible) without blowing the eval budget.
 
 - Check 1: success is not concentrated in one tier, step kind or size. Per-tier scores, step-done fraction and per-size seat rates are reported.
 - Check 2: performance holds on reserved conditions (held-out LHS sub-ranges).
@@ -15,7 +17,7 @@ headroom above plain success so the platform 1% takeover rule stays usable.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.3` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.0` (tag pending owner cut) | ☑ |
 | `spec.yaml` version `0.6.3` with v0.6.3 digests; `apex-dev preflight` passes (stage + prod) | `spec.yaml` | ☑ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:362ea25b5f7fdc7b6567e8f919fb8bd2e7521cdf048adeec6771d6fc161e2c7a` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:385e39bffb066440a2583e713ec981be9cfc7c1eca31483ee516bbb0ac650717` | ☑ |
@@ -204,6 +206,21 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   `body_conaffinity` are the only fields it changes besides the mass-derived constants.
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
-## 13. Supersedes
+## 13. v0.7.0 (Assembly III, live)
+- Profile `v07` is the live referee default (`referee.py` sets `NIST_PROFILE=v07`).
+  Spec version `0.7.0`. Digests stay on the last v0.6.3 pins until the owner tags/releases.
+- Module `referee/nist_sim/compound_v07.py`: denser tiers, `rework` / `screw` / `stack` / `key`,
+  press-gated screws, obs-indexed key yaw, late reveals, `swap_bias` events. Weight lands on
+  key/rework/stack so open-loop v0.6 controllers cannot clear the mean.
+- Eval caps: `deadline_ms=80`, `round_wall_s=550`, episode wall 18 s, `MAX_HORIZON=1000`.
+- Observation remains 288-d; v0.7 encodings reuse twist/collar channels (see README / DESIGN).
+- Privileged solver (`tools/compound_solver.py`), v0.6-style port (`tools/v06_style_scripted.py`),
+  and `tools/compound_obs_scripted.py`; `tools/calib_v06.py --profile v07`.
+- Calibration (seed 7, 8/stratum, 64 eps): privileged **0.577** (c4 **0.497**), v0.6-style
+  **0.126**, obs-only **0.016**, zero **0.003**; projected live ≤159 s. Details in
+  `CALIBRATION.md`.
+- Design notes: `docs/v0.7/DESIGN.md`.
+
+## 14. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The
 efficiency idea is reused inside the per-peg `0.75 + 0.25·time` term.

@@ -26,6 +26,6 @@ jobs:
         run: python tools/make_policies.py
       - name: pytest
         env:
-          # Live task profile. Tests that exercise v0.5 bit-for-bit behaviour select v05 explicitly.
-          NIST_PROFILE: v06
+          # Live task profile. Tests that exercise v0.5 / v0.6 behaviour select those profiles explicitly.
+          NIST_PROFILE: v07
         run: pytest -q tests/

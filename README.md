@@ -5,17 +5,15 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.6.3** ("Assembly II", compound tasks). Every episode is a random multi-step
-> assembly graph rather than a list of independent pegs. Peg inserts are joined by collars, which
-> fit only over a seated peg, and by twist-lock steps. Random precedence links the steps, parts
-> arrive in waves, and the physics changes without notice between subtasks. Episodes come in four
-> complexity tiers (c1–c4), and each step earns partial credit. The observation is `[B, 288]`, and
-> its first 184 dims keep the v0.5 layout. A policy with a static 184-wide input still runs: the
-> player feeds it that prefix. Records are `nist_lite_record/4`. v0.6.1 fixes out-of-order credit,
-> collar partial-credit gating, and the record layout for the replay viewer. v0.6.2 fixes stale
-> MuJoCo mass constants after a hidden mass change (spurious `unstable` episodes; reported by
-> msulab). v0.6.3 fixes later-wave parts falling through the board after a mass change
-> (reported by OddK). Scores are not comparable with v0.5.x.
+> Version: **v0.7.0** ("Assembly III", profile `v07`) — denser graphs, new step kinds
+> (`rework`, `screw`, `stack`, `key`), press-gated screws, **obs-indexed key yaw**, mis-seated
+> rework, stack rings, and residual noise so open-loop v0.6 controllers fail. Observation stays
+> `[B, 288]` with v0.6 encodings extended in-place. Referee default is `v07`. Eval caps:
+> 80 ms policy deadline, 550 s round wall, 18 s/episode wall, horizon 1000. Digests remain the
+> last v0.6.3 pins until the tag cut. Scores are **not** comparable with v0.6.x.
+>
+> Every episode is a random multi-step assembly graph. Four complexity tiers (c1–c4); weighted
+> partial credit per step. Records `nist_lite_record/4`.
 >
 > v0.5.1: harder pose estimates (5–11.5 mm peg-vs-hole offset, drift, glitch bursts) and more
 > lying starts. v0.5.0: board layout and peg shapes are drawn per episode.
@@ -121,9 +119,13 @@ v0.5 layout); every other policy gets all 288.
    quaternion (4); size ×50.
 5. **Task table (8 × 6 = 48), one row per peg slot:** insert done, insert blocked, twist
    direction (±1, 0 = no twist), twist progress (0–1), twist blocked, has-collar flag.
+   **v0.7-dev:** screw uses twist channels with direction ±2; key packs `sin/cos` of the key
+   yaw into the twist slots when revealed; late-reveal steps zero those channels until the
+   gated prerequisite finishes; stack sets the collar-flag channel to 2.
 6. **Collar table (4 × 13 = 52):** presence (0 until it arrives); noisy collar position
    relative to the biased target-slot estimate ×10 (3) + quaternion (4); inner and outer
    radius ×100 (2); target peg row / 8; done; blocked.
+   **v0.7-dev:** presence = 2 marks a stack ring (seats on the peg top, not the block).
 7. **Globals (4):** elapsed fraction of the horizon, fraction of steps done, fraction of waves
    arrived, number of steps / 16.
 
@@ -142,6 +144,8 @@ python tools/read_records.py out/history
 python tools/write_calibration.py                   # CALIBRATION.md (tiered live mix)
 python tools/compound_solver.py --seed 0           # privileged compound solver (v0.6)
 python tools/calib_v06.py --profile v06 --seeds 1 --per 2 --policies reference zero  # v0.6 calibration
+NIST_PROFILE=v07 python tools/calib_v06.py --profile v07 --seeds 7 --per 8 \
+  --policies reference v06_style compound_scripted zero --ref reference   # v0.7 calibration
 python tools/train_ppo.py --steps 100000 --workers 2  # residual PPO learnability
 ```
 
