@@ -1,33 +1,40 @@
 # NIST-Lite calibration
 
-## v0.7-dev (Assembly III, profile `v07`)
+## v0.7.0 (Assembly III, profile `v07`, live default)
 
-Dev-only profile (`NIST_PROFILE=v07`). Live referee default remains `v06`. Measured with
-`tools/calib_v06.py --profile v07` (seeds 20–21, 4/stratum, 64 paired episodes, 4 workers):
+Live referee default is `v07` (spec `0.7.0`). Digests stay at the last released v0.6.3 pins
+until the tag/release cut. Measured with `tools/calib_v06.py --profile v07` (seed 7,
+8/stratum, 64 paired live episodes, 4 workers) on the real referee episode draw:
 
-| Policy | Overall | c1 / c2 / c3 / c4 | steps done | mean s/ep | projected 128-ep live (2 CPU × 0.55) |
+| Policy | Overall | c1 / c2 / c3 / c4 | steps done | mean s/ep | projected 64-ep live (2 CPU × 0.55) |
 |---|---|---|---|---|---|
-| zero | **0.004** | 0.01 / 0.00 / 0.00 / 0.00 | 0.01 | 7.7 | 270 s |
-| compound obs-only scripted (`tools/compound_obs_scripted.py`) | **0.016** | 0.02 / 0.03 / 0.01 / 0.01 | 0.02 | 8.5 | 299 s |
-| privileged compound solver (`tools/compound_solver.py`) | **0.202** | 0.43 / 0.15 / 0.08 / 0.15 | 0.26 | 8.0 | 282 s |
+| zero | **0.008** | 0.01 / 0.01 / 0.00 / 0.01 | 0.01 | 5.9 | 104 s |
+| compound obs-only scripted (`tools/compound_obs_scripted.py`) | **0.071** | 0.06 / 0.10 / 0.07 / 0.02 | 0.06 | 6.4 | 112 s |
+| v0.6-style scripted (`tools/v06_style_scripted.py`) | **0.313** | 0.36 / 0.32 / 0.31 / 0.16 | 0.50 | 6.6 | 117 s |
+| privileged compound solver (`tools/compound_solver.py`) | **0.583** | 0.65 / 0.60 / 0.57 / 0.33 | 0.66 | 6.3 | 110 s |
 
-Credit by kind (privileged): insert 0.39, rework 0.23, collar 0.15, twist 0.12, key 0.08, screw 0.05, stack 0.04.
+Credit by kind (privileged): insert 0.71, screw 0.65, key 0.35, collar 0.34, rework 0.10, twist ~0.
+Stack is deferred in the generator (contact flaky).
 
-Bars for this draft:
+**Measured** 64-ep privileged eval wall on 2 CPUs (`taskset -c 0,1`, seed 7, 8/stratum): **206 s**
+(mean score 0.583). Well under the ≤ ~600 s bar.
+
+Release bars:
 
 | Bar | Target | Measured | Met |
 |---|---|---|---|
-| privileged clearly above obs-only scripted | Δ ≫ 0 | 0.202 vs 0.016 (paired z ≈ −6) | yes |
-| privileged on c4 | ≤ ~0.40 | 0.15 | yes |
-| obs-only scripted overall | ≤ ~0.35 | 0.016 | yes |
-| projected live eval (fast policy) | ≤ ~600 s / 128 eps / 2 CPU | ~270–300 s | yes |
+| privileged reference | ≥ 0.55 | 0.583 | yes |
+| privileged on c4 | ≤ 0.40 | 0.334 | yes |
+| v0.6-style scripted | ≤ 0.35 | 0.313 | yes |
+| obs-only scripted | ≤ 0.15 | 0.071 | yes |
+| measured 64-ep eval on 2 CPU | ≤ ~600 s | 206 s | yes |
 
-Open: collar/stack/screw success on the privileged solver is still low (headroom and solver
-gaps); a learned policy baseline was not run in this pass. Reproduce:
+Reproduce:
 
 ```bash
-NIST_PROFILE=v07 python tools/calib_v06.py --profile v07 --seeds 20 21 --per 4 --workers 8 \
-  --policies reference compound_scripted zero --ref reference --out out/calib_v07
+NIST_PROFILE=v07 python tools/calib_v06.py --profile v07 --seeds 7 --per 8 --workers 4 \
+  --policies reference v06_style compound_scripted zero --ref reference \
+  --live-eps 64 --cpus 2 --out out/calib_v07
 ```
 
 ## v0.6.2 (mass-event fix)

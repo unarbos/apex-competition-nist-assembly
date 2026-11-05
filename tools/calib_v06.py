@@ -47,16 +47,16 @@ BARS = {
     "reroll_identical_min": 0.95,
     "projected_live_s_max": 400.0,
 }
-SCRIPTED = {"baseline", "obs_scripted", "compound_scripted", "refport"}
+SCRIPTED = {"baseline", "obs_scripted", "compound_scripted", "v06_style", "refport"}
 # v0.7 Assembly III bars (success criteria from the v0.7-dev brief).
 BARS_V07 = {
-    # Solvability floor is lower than v0.6 on purpose: ceiling is the product goal.
-    "privileged_min_compound": 0.18,
+    "privileged_min_compound": 0.55,
     "c4_privileged_max": 0.40,
-    "scripted_max": 0.35,
-    "scripted_ratio_max": 0.85,
+    "scripted_max": 0.35,  # v0.6-style strategy ceiling on v0.7
+    "obs_scripted_max": 0.15,
+    "scripted_ratio_max": 0.70,
     "reroll_identical_min": 0.95,
-    "projected_live_s_max": 600.0,
+    "projected_live_s_max": 600.0,  # 64-ep live on 2 CPU
 }
 
 
@@ -99,6 +99,9 @@ def _make_act(base: str):
 
         pol = CompoundObsScripted()
         return lambda o: pol.act(o.astype(np.float32))
+    if base == "v06_style":
+        # Handled inside run_compound (privileged-state v0.6 insert/collar/twist port).
+        return lambda o: np.zeros(5)
     from nist_sim import policies as P
 
     pol = {"baseline": P.NearestFirstBaseline, "obs_scripted": P.ObsOnlyScripted}[base]()
@@ -134,6 +137,10 @@ def run_compound(job: tuple) -> dict:
         from compound_solver import solve_compound
 
         r = solve_compound(e)
+    elif base == "v06_style":
+        from v06_style_scripted import solve_v06_style
+
+        r = solve_v06_style(e)
     else:
         act = _make_act(base)
         width = OBS_DIM
@@ -282,11 +289,21 @@ def bars_table(summ: dict, profile: str = "v06") -> list[tuple[str, str, str, st
     if scr:
         s, v = max(scr, key=lambda t: t[1])
         if profile == "v07":
+            if "v06_style" in P:
+                v06s = P["v06_style"]["mean"]
+                rows.append(("v0.6-style scripted (insert/collar/twist port)", f"<= {bars['scripted_max']}",
+                             f"{v06s:.3f}", "yes" if v06s <= bars["scripted_max"] else "NO"))
+            obs_names = [n for n in ("compound_scripted", "obs_scripted") if n in P]
+            if obs_names:
+                on, ov = max(((n, P[n]["mean"]) for n in obs_names), key=lambda t: t[1])
+                lim = bars.get("obs_scripted_max", 0.15)
+                rows.append((f"obs-only scripted ({on})", f"<= {lim}", f"{ov:.3f}",
+                             "yes" if ov <= lim else "NO"))
             rows.append((f"best non-privileged ({os.path.basename(s)})", f"<= {bars['scripted_max']}",
                          f"{v:.3f}", "yes" if v <= bars["scripted_max"] else "NO"))
             if "reference" in P and P["reference"]["mean"] > 0:
-                rows.append((f"scripted below privileged", f"< reference {P['reference']['mean']:.3f}",
-                             f"{v:.3f}", "yes" if v < P["reference"]["mean"] - 0.05 else "NO"))
+                rows.append(("scripted below privileged", f"< reference {P['reference']['mean']:.3f}",
+                             f"{v:.3f}", "yes" if v < P["reference"]["mean"] - 0.15 else "NO"))
         elif compound and "reference" in P:
             lim = bars["scripted_ratio_max"] * P["reference"]["mean"]
             rows.append((f"best non-privileged ({os.path.basename(s)})", f"<= {bars['scripted_ratio_max']} x privileged = {lim:.3f}",

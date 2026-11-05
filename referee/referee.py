@@ -1,19 +1,17 @@
-"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.3 live / v0.7-dev).
+"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.7.0 Assembly III).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the
 player gets one batched observation for the episodes still running and returns one
 action per episode.
 
-raw_score = mean of per-episode scores (fixed denominator). Since v0.6 every episode is a
-random compound task graph (inserts, collars, twist-locks, precedence, waves, hidden physics
-changes between subtasks; nist_sim.compound) and its score is the weighted per-step partial
-credit (compound_score). With ``NIST_PROFILE=v07`` the referee uses Assembly III
-(nist_sim.compound_v07: rework / screw / stack / key, denser graphs). Default remains v06.
-A fault (NaN / wrong shape / late) ends that episode; steps already done keep their credit if
-still done when it stops. The observation is 288-d; its first 184 dims are the v0.5 layout, so
-184-input policies keep running on the prefix (player/launch.py). Records use
-``nist_lite_record/4`` (collars, full task graph, step_results, trajectory collars).
+raw_score = mean of per-episode scores (fixed denominator). Live default is Assembly III
+(``NIST_PROFILE=v07`` → nist_sim.compound_v07: inserts / collars / twists plus rework /
+screw / stack / key, denser graphs, weighted partial credit). ``NIST_PROFILE=v06`` still
+selects the previous Assembly II compound task. A fault (NaN / wrong shape / late) ends
+that episode; steps already done keep their credit if still done when it stops. The
+observation is 288-d; its first 184 dims are the v0.5 layout, so 184-input policies keep
+running on the prefix (player/launch.py). Records use ``nist_lite_record/4``.
 """
 
 from __future__ import annotations
@@ -28,9 +26,9 @@ from typing import Any
 
 import numpy as np
 
-# The live task is the v0.6 compound profile; set before nist_sim is imported (env.py reads it).
-# v0.7 Assembly III is opt-in via NIST_PROFILE=v07 (dev); releasing it is a separate step.
-os.environ.setdefault("NIST_PROFILE", "v06")
+# Live task is Assembly III (v0.7). Set before nist_sim is imported (env.py reads physics_dt).
+# NIST_PROFILE=v06 still selects the previous compound task for A/B and regression.
+os.environ.setdefault("NIST_PROFILE", "v07")
 
 from gym_v1.client import PlayerClient, PlayerError
 from gym_v1.referee import GameResult, Referee, RefereeContext
@@ -56,7 +54,7 @@ from nist_sim.scoring import episode_score, raw_score_from_episodes
 
 # Read the env (not profile.ACTIVE): ACTIVE is fixed at first import of nist_sim.profile and
 # stays stale across NIST_PROFILE changes / importlib.reload in tests.
-_PROFILE_NAME = (os.environ.get("NIST_PROFILE") or "v06").strip().lower()
+_PROFILE_NAME = (os.environ.get("NIST_PROFILE") or "v07").strip().lower()
 COMPOUND = _PROFILE_NAME in ("v06", "v07")
 ASSEMBLY_III = _PROFILE_NAME == "v07"
 OBS_W = (OBS_DIM_V07 if ASSEMBLY_III else OBS_DIM_V06) if COMPOUND else OBS_DIM

@@ -21,6 +21,7 @@ from nist_sim.env import Episode  # noqa: E402
 def test_named_profiles_and_quantize_identity():
     p = profile.get("v05")
     assert p.action_quant == 0.0 and profile.get("v06").action_quant == 0.0
+    assert profile.get("v07").name == "v07" and profile.get("v07").physics_dt == 0.002
     assert profile.ACTIVE.name in profile.PROFILES
     a = np.array([0.1234567, -0.5, 1.0, -1.0, 0.0])
     assert profile.quantize_action(a, 0.0) is a

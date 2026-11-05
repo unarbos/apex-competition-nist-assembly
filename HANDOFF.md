@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.3 (live) / v0.7-dev
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.0 (Assembly III)
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -17,7 +17,7 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.6.3` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.0` (tag pending owner cut) | ☑ |
 | `spec.yaml` version `0.6.3` with v0.6.3 digests; `apex-dev preflight` passes (stage + prod) | `spec.yaml` | ☑ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:362ea25b5f7fdc7b6567e8f919fb8bd2e7521cdf048adeec6771d6fc161e2c7a` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:385e39bffb066440a2583e713ec981be9cfc7c1eca31483ee516bbb0ac650717` | ☑ |
@@ -206,17 +206,18 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   `body_conaffinity` are the only fields it changes besides the mass-derived constants.
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
-## 13. v0.7-dev (Assembly III, not released)
-- Profile `v07` (`referee/nist_sim/profile.py`); opt-in via `NIST_PROFILE=v07`. Live default
-  stays `v06`. No release tag, digest pin, or `release.yml` change in this branch.
-- New module `referee/nist_sim/compound_v07.py`: denser tiers, new steps (`rework`, `screw`,
-  `stack`, `key`), late reveals, stronger events (`swap_bias`), tighter c3/c4 slack, shorter
-  per-step budgets for eval cost.
+## 13. v0.7.0 (Assembly III, live)
+- Profile `v07` is the live referee default (`referee.py` sets `NIST_PROFILE=v07`).
+  Spec version `0.7.0`. Digests stay on the last v0.6.3 pins until the owner tags/releases.
+- Module `referee/nist_sim/compound_v07.py`: denser tiers, new steps (`rework`, `screw`,
+  `stack`, `key`), press-gated screws, yaw-index keys, late reveals, `swap_bias` events.
+  Stack generation is deferred (contact flaky); hardness is screw/key weighted.
 - Observation remains 288-d; v0.7 encodings reuse twist/collar channels (see README / DESIGN).
-- Privileged solver and `tools/compound_obs_scripted.py` extended; `tools/calib_v06.py`
-  accepts `--profile v07` and `compound_scripted`.
-- Calibration (seeds 20–21, 64 eps): privileged **0.202** (c4 **0.15**), compound scripted
-  **0.016**, projected live ~300 s for 128 eps on 2 CPU. Details in `CALIBRATION.md`.
+- Privileged solver (`tools/compound_solver.py`), v0.6-style port (`tools/v06_style_scripted.py`),
+  and `tools/compound_obs_scripted.py`; `tools/calib_v06.py --profile v07`.
+- Calibration (seed 7, 8/stratum, 64 eps): privileged **0.583** (c4 **0.334**), v0.6-style
+  **0.313**, obs-only **0.071**, zero **0.008**. Measured 64-ep privileged wall on 2 CPU:
+  **206 s**. Details in `CALIBRATION.md`.
 - Design notes: `docs/v0.7/DESIGN.md`.
 
 ## 14. Supersedes

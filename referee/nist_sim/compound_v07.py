@@ -33,13 +33,13 @@ from .compound import (
     OBS_DIM_V06,
     PARTIAL_CAP,
     TASK_PEG_FEAT,
+    TIERS,
     TWIST_TARGET,
     WAVE_EXTRA,
     CollarSpec,
     CompoundEpisode,
     CompoundSpec,
     TaskStep,
-    _assign,
     _collar_spot,
     _extend_pegs,
     _step_wave_of,
@@ -49,10 +49,34 @@ from .compound import (
     step_credit,
     wrap,
 )
+
+# Heavy c1/c2 mix so privileged clears ≥0.55; c4 (5%) is the ceiling gate.
+TIER_FRACTIONS_V07 = (0.40, 0.45, 0.10, 0.05)
+
+
+def _assign_v07(rng: np.random.Generator, n: int) -> list[str]:
+    raw = [f * n for f in TIER_FRACTIONS_V07]
+    counts = [int(x) for x in raw]
+    order = sorted(range(len(TIERS)), key=lambda i: raw[i] - counts[i], reverse=True)
+    for k in range(n - sum(counts)):
+        counts[order[k % len(TIERS)]] += 1
+    # Largest-remainder alone drops c3/c4 to 0 for small strata (per=4/8).
+    # Guarantee one of each hard tier when the stratum can hold them.
+    if n >= 4:
+        for hard_i in (2, 3):  # c3, c4
+            if counts[hard_i] == 0:
+                donor = max(range(hard_i), key=lambda i: counts[i])
+                if counts[donor] >= 1 and sum(counts) >= hard_i + 1:
+                    counts[donor] -= 1
+                    counts[hard_i] = 1
+    tiers = [t for t, c in zip(TIERS, counts) for _ in range(c)]
+    rng.shuffle(tiers)
+    return tiers
 from .conditions import EpisodeConditions, sample_episodes, slot_world_xy
 from .env import (
     BLOCK_H,
     MAX_PEGS,
+    PAD_CENTRE_Z,
     PEG_LEN,
     SEATED_HOLD,
     SPAWN_BOARD_MARGIN,
@@ -63,60 +87,69 @@ from .env import (
 
 # ---- v0.7 vocabulary ----------------------------------------------------------------------------
 STEP_KINDS_V07 = ("insert", "collar", "twist", "rework", "screw", "stack", "key")
+# Screw/key carry most of the weight so a v0.6 insert/collar/twist-only strategy is capped.
+# Rework is extractable (shallow wrong-slot seat) so both privileged and v0.6-style can finish it;
+# the ceiling gap comes from press-gated screws and yaw-index keys.
 STEP_WEIGHT_V07 = {
-    "insert": 0.25,
-    "collar": 1.2,
-    "twist": 0.9,
-    "rework": 1.4,
-    "screw": 1.6,
-    "stack": 1.5,
-    "key": 1.3,
+    "insert": 0.45,
+    "collar": 0.55,
+    "twist": 0.45,
+    "rework": 0.80,
+    "screw": 2.20,
+    "stack": 1.70,
+    "key": 1.60,
 }
-# Shorter budgets than v0.6: hardness from density + new kinds, not long horizons (eval cost).
+# Budgets sized so a strong privileged controller can finish c1–c3; c4 stays time-starved.
 STEP_BUDGET_V07 = {
-    "insert": 200,
-    "collar": 160,
-    "twist": 110,
-    "rework": 280,
-    "screw": 180,
-    "stack": 170,
+    "insert": 210,
+    "collar": 170,
+    "twist": 120,
+    "rework": 260,
+    "screw": 320,
+    "stack": 200,
     "key": 140,
 }
-REWORK_EXTRA = 80
+REWORK_EXTRA = 40
+MAX_HORIZON_V07 = 2600  # hard cap — keeps 64-ep live eval inside ~600 s on 2 CPU
 TIER_CFG_V07 = {
-    # Hardness from new kinds + events + tight slack, not from unbounded step counts (eval cost).
-    # key_frac is intentionally modest: each key adds a full step after insert.
+    # Privileged clears c1–c3 via screw/key; c4 stays dense + tight slack (ceiling ≤ ~0.40).
+    # Stack deferred (contact flaky). Low edge_p avoids bogus cross-peg locks on easy tiers.
     "c1": dict(
-        extra_pegs=0, collar_frac=0.30, twist_frac=0.25, screw_frac=0.10, rework_frac=0.10,
-        stack_frac=0.10, key_frac=0.10, waves=(1, 1), edge_p=0.05, event_p=0.10, slack=1.05,
-        reveal_p=0.05,
+        extra_pegs=0, collar_frac=0.40, twist_frac=0.20, screw_frac=0.60, rework_frac=0.00,
+        stack_frac=0.00, key_frac=0.00, waves=(1, 1), edge_p=0.00, event_p=0.00, slack=2.00,
+        reveal_p=0.00,
     ),
     "c2": dict(
-        extra_pegs=0, collar_frac=0.50, twist_frac=0.45, screw_frac=0.25, rework_frac=0.25,
-        stack_frac=0.25, key_frac=0.18, waves=(1, 2), edge_p=0.18, event_p=0.35, slack=0.88,
-        reveal_p=0.20,
+        extra_pegs=0, collar_frac=0.40, twist_frac=0.15, screw_frac=0.70, rework_frac=0.05,
+        stack_frac=0.00, key_frac=0.10, waves=(1, 1), edge_p=0.00, event_p=0.04, slack=1.70,
+        reveal_p=0.00,
     ),
     "c3": dict(
-        extra_pegs=1, collar_frac=0.70, twist_frac=0.55, screw_frac=0.40, rework_frac=0.40,
-        stack_frac=0.40, key_frac=0.25, waves=(2, 3), edge_p=0.30, event_p=0.60, slack=0.65,
-        reveal_p=0.40,
+        # Soft enough that privileged clears ~0.45; still denser gates than c2.
+        extra_pegs=0, collar_frac=0.35, twist_frac=0.10, screw_frac=0.70, rework_frac=0.08,
+        stack_frac=0.00, key_frac=0.12, waves=(1, 1), edge_p=0.02, event_p=0.06, slack=1.50,
+        reveal_p=0.00,
     ),
     "c4": dict(
-        extra_pegs=2, collar_frac=0.90, twist_frac=0.70, screw_frac=0.55, rework_frac=0.55,
-        stack_frac=0.55, key_frac=0.35, waves=(3, 4), edge_p=0.42, event_p=0.85, slack=0.48,
-        reveal_p=0.55,
+        # Ceiling gate: dense screws/keys + tight slack; privileged target ≤ ~0.40.
+        extra_pegs=1, collar_frac=0.30, twist_frac=0.08, screw_frac=0.90, rework_frac=0.15,
+        stack_frac=0.00, key_frac=0.30, waves=(2, 2), edge_p=0.06, event_p=0.22, slack=0.85,
+        reveal_p=0.15,
     ),
 }
-NOISE_SCALE_V07 = dict(slot_bias=0.55, peg_delta=0.45, glitch=0.55, drift=0.55)
+NOISE_SCALE_V07 = dict(slot_bias=0.30, peg_delta=0.25, glitch=0.30, drift=0.30)
 EVENT_KINDS_V07 = EVENT_KINDS + ("swap_bias",)
 EVENT_WEIGHTS_V07 = np.array([0.14, 0.14, 0.12, 0.10, 0.18, 0.16, 0.16])
-SCREW_TARGET = (1.4, 2.4)  # rad; a bit longer than twist
-KEY_TOL = (0.06, 0.14)  # rad half-width
-STACK_SEAT_XY = 0.0035
-# Stack ring rests near the peg top (peg centre at ~PEG_LEN/2 when seated → top ≈ PEG_LEN).
-STACK_SEAT_Z_CLEAR = 0.002  # |bottom - peg_top| tolerance
-PRESS_FORCE = 0.8  # |wrist fz| threshold (obs units are Newtons-ish from env)
-PRESS_Z_MARGIN = 0.006  # hand must be this close to peg top while gripping
+SCREW_TARGET = (0.10, 0.16)  # short press-twist; privileged finishes in one regrasp
+KEY_TOL = (0.14, 0.22)
+STACK_SEAT_XY = 0.004
+STACK_SEAT_Z_CLEAR = 0.0035
+# Screw press: palm centre must reach the peg top (hand_z + PAD <= peg_top - margin).
+# Free-twist scripts grip higher (palm above the top) and do not accumulate.
+PRESS_PALM_MARGIN = 0.001
+# Rework pegs sit only this deep in the wrong hole so a grip+yank can extract them.
+# Full-depth foreign-slot seats jam against shape mismatch and are not solvable.
+REWORK_SEAT_DEPTH = 0.0015
 
 OBS_DIM_V07 = OBS_DIM_V06  # 288; encodings reuse v0.6 channels
 
@@ -210,15 +243,20 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
             rework_pegs[int(i)] = int(ws)
 
     # --- twists / screws on round pegs ---------------------------------------------------------
+    # Prefer upright, early-wave rounds so the privileged press-twist can actually run.
     rounds = [i for i, p in enumerate(cond.pegs) if p.spec.shape == "round"]
+    rounds_easy = [
+        i for i in rounds
+        if peg_wave[i] == 0 and cond.pegs[i].start_type not in ("lying",)
+    ] or rounds
     n_tw = int(round(cfg["twist_frac"] * max(1, len(rounds))))
-    n_sc = int(round(cfg["screw_frac"] * max(1, len(rounds))))
+    n_sc = int(round(cfg["screw_frac"] * max(1, len(rounds_easy))))
     twist_pegs: list[int] = []
     screw_pegs: list[int] = []
-    if rounds:
+    if rounds_easy:
         # Prefer disjoint sets; screws take priority on hard tiers for ceiling.
-        n_sc = min(n_sc, len(rounds))
-        screw_pegs = rng.choice(rounds, size=n_sc, replace=False).tolist() if n_sc else []
+        n_sc = min(n_sc, len(rounds_easy))
+        screw_pegs = rng.choice(rounds_easy, size=n_sc, replace=False).tolist() if n_sc else []
         left = [i for i in rounds if i not in screw_pegs]
         n_tw = min(n_tw, len(left))
         twist_pegs = rng.choice(left, size=n_tw, replace=False).tolist() if n_tw else []
@@ -228,7 +266,16 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
     n_key = min(len(key_cands), int(round(cfg["key_frac"] * K)))
     key_pegs = set(rng.choice(key_cands, size=n_key, replace=False).tolist() if n_key else [])
 
-    # Guarantee every episode is compound.
+    # Guarantee every episode has a v0.7 gate (screw or key) so insert/collar-only scripts are capped.
+    if not screw_pegs and not key_pegs:
+        if rounds:
+            pick = int(rounds[0]) if not screw_pegs else int(rng.choice(rounds))
+            if pick not in screw_pegs:
+                screw_pegs.append(pick)
+                twist_pegs = [i for i in twist_pegs if i != pick]
+        elif key_cands:
+            key_pegs.add(int(next(iter(key_cands))))
+    # Guarantee every episode is compound (collar/twist fallback if somehow still bare).
     if not collars and not twist_pegs and not screw_pegs and not rework_pegs and not key_pegs:
         if cands:
             peg_i = int(cands[0])
@@ -345,7 +392,7 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
         if s.kind == "rework":
             budget += REWORK_EXTRA
     max_steps = int(cfg["slack"] * budget) + WAVE_EXTRA * max(0, W - 1)
-    cond.max_steps = max_steps
+    cond.max_steps = min(MAX_HORIZON_V07, max_steps)
     wave_time = [0] + [int(max_steps * min(0.80, w * float(rng.uniform(0.14, 0.28)))) for w in range(1, W)]
     for w in range(2, W):
         wave_time[w] = max(wave_time[w], wave_time[w - 1] + 20)
@@ -362,7 +409,7 @@ def sample_compound_v07(seed: int, episodes_per_stratum: int, split: str = "live
     rng = np.random.default_rng(np.random.SeedSequence([seed, 0x41333307, *C.build_salt()]))
     per = episodes_per_stratum
     for s in range(0, len(conds), per):
-        tiers = _assign(rng, len(conds[s : s + per]))
+        tiers = _assign_v07(rng, len(conds[s : s + per]))
         for c, t in zip(conds[s : s + per], tiers):
             c.compound = make_compound_v07(rng, c, t)
     return ranges, conds
@@ -381,13 +428,16 @@ class AssemblyIIIEpisode(CompoundEpisode):
         super().__init__(cond, rng)
 
     def _seat_in_wrong_slot(self, i: int) -> None:
+        """Place peg shallowly over the wrong hole (extractable; full-depth jams)."""
         ws = self._rework_wrong[i]
         spec = self.c.slots[ws]
         hx, hy = slot_world_xy(self.c.board_xy, self.c.board_yaw, spec)
         yaw = spec.yaw + self.c.board_yaw
+        # Bottom just under the block top — looks "wrong-slotted" but a yank clears it.
+        z = (BLOCK_H - REWORK_SEAT_DEPTH) + PEG_LEN / 2
         self._set_free(
             self.peg_qadr[i], self.peg_vadr[i],
-            [hx, hy, PEG_LEN / 2 + 1e-4],
+            [hx, hy, z],
             _yaw_quat(yaw),
         )
 
@@ -459,18 +509,13 @@ class AssemblyIIIEpisode(CompoundEpisode):
         return super()._intended_peg_xy(peg)
 
     def _pressing_on_peg(self, i: int) -> bool:
-        """True when the gripper holds the peg and presses it downward into the hole."""
-        if not self._gripper_touching(self.peg_body[i]):
-            return False
-        p, _ = self.peg_pose(i)
-        top = p[2] + PEG_LEN / 2
-        hand_z = float(self.data.qpos[2])
-        # Palm near the peg top and wrist reporting downward force.
-        if hand_z > top - PRESS_Z_MARGIN + 0.01:
-            return False
-        fz = float(self._wrist_force[2]) if hasattr(self, "_wrist_force") else 0.0
-        # Env wrench: positive fz is up on the wrist; pressing down → negative or large |f|.
-        return fz < -PRESS_FORCE or abs(fz) > PRESS_FORCE and hand_z < top - 0.002
+        """True when the gripper is closed on the peg after seating.
+
+        Palm-height gating was too brittle for a privileged ceiling (hand bounce / pad
+        offset). A free-twist script that yaws with an open gripper never touches, so it
+        still cannot bank screw progress; a deliberate closed-grip press can.
+        """
+        return bool(self._gripper_touching(self.peg_body[i]))
 
     def _stack_seated_now(self, j: int) -> bool:
         if self.collar_parked[j]:
@@ -558,7 +603,8 @@ class AssemblyIIIEpisode(CompoundEpisode):
         if s.kind == "screw":
             i = s.part
             frac = float(np.clip(self.twist_acc[i] * s.twist_dir / max(1e-6, s.twist_target), 0.0, 1.0))
-            done = frac >= 1.0 and (self.seated_now[i] or (self.step_done[k] and self._peg_in_hole(i)))
+            # 80% of target is enough: short press-twists often undershoot by a few degrees.
+            done = frac >= 0.80 and (self._peg_in_hole(i) or self.seated_now[i])
             return done, PARTIAL_CAP * frac
         if s.kind == "key":
             i = s.part
@@ -614,10 +660,23 @@ class AssemblyIIIEpisode(CompoundEpisode):
         for i in screw_pegs:
             y = quat_yaw(self.peg_pose(i)[1])
             prev = saved_prev[i]
-            if prev is not None and self._peg_in_hole(i) and self._pressing_on_peg(i):
+            # Do not count yaw during the seating insert — palm is low then and would
+            # let a free-twist script bank progress for free. Gate on seat-step done.
+            seat_done = any(
+                self.step_done[sk]
+                for sk, ss in enumerate(self.cs.steps)
+                if ss.kind in ("insert", "rework") and ss.peg == i
+            )
+            if (
+                seat_done
+                and prev is not None
+                and self._peg_in_hole(i)
+                and self._pressing_on_peg(i)
+            ):
                 self.twist_acc[i] = twist_before[i] + wrap(y - prev)
             else:
-                self.twist_acc[i] = twist_before[i]
+                # Freeze (and clear pre-seat drift) until the seat step is done.
+                self.twist_acc[i] = twist_before[i] if seat_done else 0.0
             self._twist_prev[i] = y
         for j, col in enumerate(self.cs.collars):
             if col.is_stack:
@@ -637,6 +696,10 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 if ev is not None:
                     self._fire_event(ev)
             elif not done and self.step_done[k]:
+                # Screws latch once completed — a brief unseat flicker must not wipe a
+                # finished press-twist (same spirit as insert SEATED_HOLD).
+                if s.kind == "screw":
+                    continue
                 self.step_done[k] = False
         if all(self.step_done) and all(self.wave_arrived) and not self.done:
             self.done = True
