@@ -17,10 +17,10 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.0` (tag pending owner cut) | ☑ |
-| `spec.yaml` version `0.6.3` with v0.6.3 digests; `apex-dev preflight` passes (stage + prod) | `spec.yaml` | ☑ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:362ea25b5f7fdc7b6567e8f919fb8bd2e7521cdf048adeec6771d6fc161e2c7a` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:385e39bffb066440a2583e713ec981be9cfc7c1eca31483ee516bbb0ac650717` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.0` | ☑ |
+| `spec.yaml` version `0.7.0` with v0.7.0 digests; `apex-dev preflight` passes (stage + prod) | `spec.yaml` | ☑ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:f8a6650f3e6f1beab956f601cf1a78f10a929dec57b88d4140d6ad28ef568bc4` | ☑ |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:5bb01fad9698cfa0cba152a31259f196fa7cf2e363b376ec5a3fa24a4b6168bd` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
@@ -28,7 +28,7 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 41474262290 (tag `v0.6.1`) until the v0.6.2 release.
+onnxruntime 1.31.0. Image digests from release run 42108807434 (tag `v0.7.0`).
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
@@ -208,7 +208,7 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 
 ## 13. v0.7.0 (Assembly III, live)
 - Profile `v07` is the live referee default (`referee.py` sets `NIST_PROFILE=v07`).
-  Spec version `0.7.0`. Digests stay on the last v0.6.3 pins until the owner tags/releases.
+  Spec version `0.7.0`. Digests pinned from release run 42108807434.
 - Module `referee/nist_sim/compound_v07.py`: denser tiers, `rework` / `screw` / `stack` / `key`,
   press-gated screws, obs-indexed key yaw, late reveals, `swap_bias` events. Weight lands on
   key/rework/stack so open-loop v0.6 controllers cannot clear the mean.
