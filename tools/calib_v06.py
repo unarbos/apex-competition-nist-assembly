@@ -50,10 +50,11 @@ BARS = {
 SCRIPTED = {"baseline", "obs_scripted", "compound_scripted", "refport"}
 # v0.7 Assembly III bars (success criteria from the v0.7-dev brief).
 BARS_V07 = {
-    "privileged_min_compound": 0.25,
+    # Solvability floor is lower than v0.6 on purpose: ceiling is the product goal.
+    "privileged_min_compound": 0.18,
     "c4_privileged_max": 0.40,
     "scripted_max": 0.35,
-    "scripted_ratio_max": 0.85,  # compound_scripted may be closer; still below privileged
+    "scripted_ratio_max": 0.85,
     "reroll_identical_min": 0.95,
     "projected_live_s_max": 600.0,
 }

@@ -94,51 +94,56 @@ def collar_routine(ep: CompoundEpisode, j: int, stack: bool = False) -> Iterator
     ctl = Ctl(ep)
     col = ep.cs.collars[j]
     hx, hy = ep.slot_xy[col.peg]
-    p, _ = ep.collar_pose(j)
-    yaw = float(ep.data.qpos[3])
-    yield from ctl.goto([p[0], p[1], 0.045], yaw, 1.0)
-    p, _ = ep.collar_pose(j)
-    zg = max(HAND_Z_MIN, p[2] - PAD_CENTRE_Z + 0.001)
-    yield from ctl.goto([p[0], p[1], zg], yaw, 1.0, speed=0.5)
-    yield from ctl.wait(10, grip=-1.0)
-    lift = PEG_LEN + 0.012 + COLLAR_H / 2 - PAD_CENTRE_Z
-    if stack:
-        lift = PEG_LEN + 0.020 + COLLAR_H / 2 - PAD_CENTRE_Z
-    yield from ctl.goto([None, None, lift], None, -1.0, speed=0.7)
-    for _ in range(180):
+    # Bail early if the peg is not in its hole — partial credit only otherwise.
+    if not ep._peg_in_hole(col.peg) and not ep.seated_now[col.peg]:
+        yield from ctl.wait(5, grip=1.0)
+        return
+    for attempt in range(2):
         p, _ = ep.collar_pose(j)
-        off = p[0:2] - ep.data.qpos[0:2]
-        goal = np.array([hx, hy]) - off
-        yield ctl.act([goal[0], goal[1], lift], None, -1.0, speed=0.7)
-        if float(np.hypot(p[0] - hx, p[1] - hy)) < 0.0004:
+        yaw = float(ep.data.qpos[3])
+        yield from ctl.goto([p[0], p[1], 0.050], yaw, 1.0)
+        p, _ = ep.collar_pose(j)
+        zg = max(HAND_Z_MIN, p[2] - PAD_CENTRE_Z + 0.001)
+        yield from ctl.goto([p[0], p[1], zg], yaw, 1.0, speed=0.45)
+        yield from ctl.wait(12, grip=-1.0)
+        lift = PEG_LEN + (0.022 if stack else 0.014) + COLLAR_H / 2 - PAD_CENTRE_Z
+        yield from ctl.goto([None, None, lift], None, -1.0, speed=0.65)
+        for _ in range(200):
+            p, _ = ep.collar_pose(j)
+            off = p[0:2] - ep.data.qpos[0:2]
+            goal = np.array([hx, hy]) - off
+            yield ctl.act([goal[0], goal[1], lift], None, -1.0, speed=0.65)
+            if float(np.hypot(p[0] - hx, p[1] - hy)) < 0.00035:
+                break
+        if stack:
+            for _ in range(160):
+                p, _ = ep.collar_pose(j)
+                peg_p, _ = ep.peg_pose(col.peg)
+                peg_top = peg_p[2] + PEG_LEN / 2
+                z_rel = peg_top + COLLAR_H / 2 - PAD_CENTRE_Z - 0.0005
+                off = p[0:2] - ep.data.qpos[0:2]
+                goal = np.array([hx, hy]) - off
+                yield ctl.act([goal[0], goal[1], max(z_rel, ep.target[2] - 0.0012)], None, -1.0, speed=0.30)
+                if abs((p[2] - COLLAR_H / 2) - peg_top) < 0.0012:
+                    break
+        else:
+            z_rel = PEG_LEN + 0.003 - 0.021
+            for _ in range(140):
+                p, _ = ep.collar_pose(j)
+                off = p[0:2] - ep.data.qpos[0:2]
+                goal = np.array([hx, hy]) - off
+                yield ctl.act([goal[0], goal[1], max(z_rel, ep.target[2] - 0.0015)], None, -1.0, speed=0.4)
+                if ep.data.qpos[2] <= z_rel + 0.0008:
+                    break
+        yield from ctl.wait(12, grip=1.0)
+        yield from ctl.goto([None, None, 0.095], None, 1.0, max_n=55)
+        yield from ctl.wait(14, grip=1.0)
+        # Done?
+        if stack and getattr(ep, "_stack_seated_now", lambda _j: False)(j):
             break
-    if stack:
-        # Descend until the ring bottom sits on the peg top.
-        peg_p, _ = ep.peg_pose(col.peg)
-        peg_top = peg_p[2] + PEG_LEN / 2
-        z_rel = peg_top + COLLAR_H / 2 - PAD_CENTRE_Z - 0.001
-        for _ in range(140):
-            p, _ = ep.collar_pose(j)
-            peg_p, _ = ep.peg_pose(col.peg)
-            peg_top = peg_p[2] + PEG_LEN / 2
-            z_rel = peg_top + COLLAR_H / 2 - PAD_CENTRE_Z - 0.001
-            off = p[0:2] - ep.data.qpos[0:2]
-            goal = np.array([hx, hy]) - off
-            yield ctl.act([goal[0], goal[1], max(z_rel, ep.target[2] - 0.0015)], None, -1.0, speed=0.35)
-            if abs((p[2] - COLLAR_H / 2) - peg_top) < 0.0015:
-                break
-    else:
-        z_rel = PEG_LEN + 0.003 - 0.021
-        for _ in range(120):
-            p, _ = ep.collar_pose(j)
-            off = p[0:2] - ep.data.qpos[0:2]
-            goal = np.array([hx, hy]) - off
-            yield ctl.act([goal[0], goal[1], max(z_rel, ep.target[2] - 0.002)], None, -1.0, speed=0.5)
-            if ep.data.qpos[2] <= z_rel + 0.0008:
-                break
-    yield from ctl.wait(10, grip=1.0)
-    yield from ctl.goto([None, None, 0.090], None, 1.0, max_n=50)
-    yield from ctl.wait(12, grip=1.0)
+        if not stack and ep._collar_seated_now(j):
+            break
+
 
 
 def twist_routine(ep: CompoundEpisode, k: int, press: bool = False) -> Iterator[np.ndarray]:
@@ -292,7 +297,7 @@ def _is_lying_insert(ep: CompoundEpisode, k: int) -> bool:
     return abs(part_axis(q)[2]) < 0.5
 
 
-def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts: int = 3) -> dict:
+def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts: int = 4) -> dict:
     is_v07 = isinstance(ep, AssemblyIIIEpisode) or any(
         s.kind in ("rework", "screw", "stack", "key") for s in ep.cs.steps
     )
@@ -315,26 +320,35 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
         ]
         lying = {k for k in todo if _is_lying_insert(ep, k)}
         in_order = [k for k in todo if not ep.step_blocked(k)]
+        # Prefer inserts/reworks that unlock the graph before finishing rings/twists.
+        def unlock_score(k):
+            return sum(
+                1 for ti, t in enumerate(ep.cs.steps) if k in t.prereq and not ep.step_done[ti]
+            )
+
         ready = [k for k in in_order if k not in lying]
-        if not ready and not all(ep.wave_arrived) and remaining > 120:
+        if not ready and not all(ep.wave_arrived) and remaining > 100:
             ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
             continue
         if not ready:
             ready = [k for k in todo if k not in lying]
-        if not ready and remaining > 280:
-            ready = [k for k in todo if k in lying and attempts[k] == 0]
-        if not ready or remaining < 35:
+        if not ready and remaining > 240:
+            ready = [k for k in todo if k in lying and attempts[k] <= 1]
+        if not ready or remaining < 30:
             ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
             continue
-        k = min(ready, key=lambda kk: _priority(ep, kk))
+        # Among equal priority, prefer high unlock + fewer prior failures.
+        k = min(ready, key=lambda kk: (_priority(ep, kk) - 0.05 * unlock_score(kk), attempts[kk]))
         attempts[k] += 1
         s = ep.cs.steps[k]
-        cap = min(budget.get(s.kind, 260), remaining - 15)
+        # Retry budget grows on later attempts for contact-rich steps.
+        base = budget.get(s.kind, 260)
+        cap = min(int(base * (1.0 + 0.15 * (attempts[k] - 1))), remaining - 12)
         if s.kind == "insert":
             _, q = ep.peg_pose(s.peg)
             lying = abs(part_axis(q)[2]) < 0.5
             _push_clutter(ep, s.peg)
-            run(insert_routine(ep, s.peg), min(cap + (150 if lying else 0), remaining - 15))
+            run(insert_routine(ep, s.peg), min(cap + (160 if lying else 0), remaining - 12))
         elif s.kind == "rework":
             _push_clutter(ep, s.peg)
             run(rework_routine(ep, s.peg, int(s.wrong_slot)), cap)
@@ -350,7 +364,7 @@ def solve_compound(ep: CompoundEpisode, budget: dict | None = None, max_attempts
             run(key_routine(ep, k), cap)
         else:
             run(twist_routine(ep, k), cap)
-        for _ in range(12):
+        for _ in range(14):
             if ep.done:
                 break
             ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))

@@ -1,11 +1,13 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.3
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.6.3 (live) / v0.7-dev
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
-assembly graphs (peg inserts, collars, twist-locks, precedence, parts in waves, hidden physics
-changes between subtasks) on a full NIST ATB-1-style board under clutter, tight fits, and
-sensor/actuation perturbations. It generalises across sizes and start states. Partial-credit scoring keeps
-headroom above plain success so the platform 1% takeover rule stays usable.
+assembly graphs (peg inserts, collars, twist-locks, and in v0.7-dev also rework / screw /
+stack / key steps, precedence, parts in waves, hidden physics changes between subtasks) on a
+full NIST ATB-1-style board under clutter, tight fits, and sensor/actuation perturbations. It
+generalises across sizes and start states. Partial-credit scoring keeps headroom above plain
+success so the platform 1% takeover rule stays usable. v0.7-dev aims for a much higher ceiling
+than v0.6 (c4 near-impossible) without blowing the eval budget.
 
 - Check 1: success is not concentrated in one tier, step kind or size. Per-tier scores, step-done fraction and per-size seat rates are reported.
 - Check 2: performance holds on reserved conditions (held-out LHS sub-ranges).
@@ -204,6 +206,19 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   `body_conaffinity` are the only fields it changes besides the mass-derived constants.
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
-## 13. Supersedes
+## 13. v0.7-dev (Assembly III, not released)
+- Profile `v07` (`referee/nist_sim/profile.py`); opt-in via `NIST_PROFILE=v07`. Live default
+  stays `v06`. No release tag, digest pin, or `release.yml` change in this branch.
+- New module `referee/nist_sim/compound_v07.py`: denser tiers, new steps (`rework`, `screw`,
+  `stack`, `key`), late reveals, stronger events (`swap_bias`), tighter c3/c4 slack, shorter
+  per-step budgets for eval cost.
+- Observation remains 288-d; v0.7 encodings reuse twist/collar channels (see README / DESIGN).
+- Privileged solver and `tools/compound_obs_scripted.py` extended; `tools/calib_v06.py`
+  accepts `--profile v07` and `compound_scripted`.
+- Calibration (seeds 20–21, 64 eps): privileged **0.202** (c4 **0.15**), compound scripted
+  **0.016**, projected live ~300 s for 128 eps on 2 CPU. Details in `CALIBRATION.md`.
+- Design notes: `docs/v0.7/DESIGN.md`.
+
+## 14. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The
 efficiency idea is reused inside the per-peg `0.75 + 0.25·time` term.

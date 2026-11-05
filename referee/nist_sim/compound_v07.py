@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 
+import mujoco
 import numpy as np
 
 from . import conditions as C
@@ -49,7 +50,16 @@ from .compound import (
     wrap,
 )
 from .conditions import EpisodeConditions, sample_episodes, slot_world_xy
-from .env import BLOCK_H, MAX_PEGS, PEG_LEN, SEATED_HOLD, _yaw_quat
+from .env import (
+    BLOCK_H,
+    MAX_PEGS,
+    PEG_LEN,
+    SEATED_HOLD,
+    SPAWN_BOARD_MARGIN,
+    SPAWN_MAX_DRIFT,
+    SPAWN_MAX_SPEED,
+    _yaw_quat,
+)
 
 # ---- v0.7 vocabulary ----------------------------------------------------------------------------
 STEP_KINDS_V07 = ("insert", "collar", "twist", "rework", "screw", "stack", "key")
@@ -77,23 +87,23 @@ TIER_CFG_V07 = {
     # Hardness from new kinds + events + tight slack, not from unbounded step counts (eval cost).
     # key_frac is intentionally modest: each key adds a full step after insert.
     "c1": dict(
-        extra_pegs=0, collar_frac=0.30, twist_frac=0.30, screw_frac=0.15, rework_frac=0.15,
-        stack_frac=0.15, key_frac=0.12, waves=(1, 2), edge_p=0.10, event_p=0.20, slack=0.95,
-        reveal_p=0.15,
+        extra_pegs=0, collar_frac=0.30, twist_frac=0.25, screw_frac=0.10, rework_frac=0.10,
+        stack_frac=0.10, key_frac=0.10, waves=(1, 1), edge_p=0.05, event_p=0.10, slack=1.05,
+        reveal_p=0.05,
     ),
     "c2": dict(
-        extra_pegs=1, collar_frac=0.50, twist_frac=0.45, screw_frac=0.30, rework_frac=0.30,
-        stack_frac=0.30, key_frac=0.20, waves=(2, 3), edge_p=0.22, event_p=0.45, slack=0.78,
-        reveal_p=0.30,
+        extra_pegs=0, collar_frac=0.50, twist_frac=0.45, screw_frac=0.25, rework_frac=0.25,
+        stack_frac=0.25, key_frac=0.18, waves=(1, 2), edge_p=0.18, event_p=0.35, slack=0.88,
+        reveal_p=0.20,
     ),
     "c3": dict(
-        extra_pegs=2, collar_frac=0.70, twist_frac=0.55, screw_frac=0.45, rework_frac=0.45,
-        stack_frac=0.45, key_frac=0.28, waves=(2, 4), edge_p=0.35, event_p=0.70, slack=0.58,
-        reveal_p=0.45,
+        extra_pegs=1, collar_frac=0.70, twist_frac=0.55, screw_frac=0.40, rework_frac=0.40,
+        stack_frac=0.40, key_frac=0.25, waves=(2, 3), edge_p=0.30, event_p=0.60, slack=0.65,
+        reveal_p=0.40,
     ),
     "c4": dict(
-        extra_pegs=2, collar_frac=0.90, twist_frac=0.70, screw_frac=0.60, rework_frac=0.55,
-        stack_frac=0.55, key_frac=0.35, waves=(3, 5), edge_p=0.45, event_p=0.88, slack=0.45,
+        extra_pegs=2, collar_frac=0.90, twist_frac=0.70, screw_frac=0.55, rework_frac=0.55,
+        stack_frac=0.55, key_frac=0.35, waves=(3, 4), edge_p=0.42, event_p=0.85, slack=0.48,
         reveal_p=0.55,
     ),
 }
@@ -370,24 +380,73 @@ class AssemblyIIIEpisode(CompoundEpisode):
         self._key_hold = [0] * cond.n_pegs
         super().__init__(cond, rng)
 
+    def _seat_in_wrong_slot(self, i: int) -> None:
+        ws = self._rework_wrong[i]
+        spec = self.c.slots[ws]
+        hx, hy = slot_world_xy(self.c.board_xy, self.c.board_yaw, spec)
+        yaw = spec.yaw + self.c.board_yaw
+        self._set_free(
+            self.peg_qadr[i], self.peg_vadr[i],
+            [hx, hy, PEG_LEN / 2 + 1e-4],
+            _yaw_quat(yaw),
+        )
+
     def _place_peg(self, i: int, peg) -> None:
         if self.peg_parked[i]:
             self._set_free(self.peg_qadr[i], self.peg_vadr[i], self._park_pose(), [1.0, 0, 0, 0])
             return
         if i in self._rework_wrong:
-            # Seat upright in the wrong slot (board frame → world).
-            ws = self._rework_wrong[i]
-            spec = self.c.slots[ws]
-            hx, hy = slot_world_xy(self.c.board_xy, self.c.board_yaw, spec)
-            yaw = spec.yaw + self.c.board_yaw
-            # Bottom on the board plane inside the hole void (same as a successful seat).
-            self._set_free(
-                self.peg_qadr[i], self.peg_vadr[i],
-                [hx, hy, PEG_LEN / 2 + 1e-4],
-                _yaw_quat(yaw),
-            )
+            self._seat_in_wrong_slot(i)
             return
         super()._place_peg(i, peg)
+
+    def _pin_rework_pegs(self) -> None:
+        """Seat rework pegs in their wrong holes (spawn checks otherwise teleport them out)."""
+        if not self._rework_wrong:
+            return
+        for i in self._rework_wrong:
+            if self.peg_parked[i]:
+                continue
+            self._seat_in_wrong_slot(i)
+            self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 6] = 0
+        mujoco.mj_forward(self.model, self.data)
+
+    def _place_and_settle(self) -> None:
+        super()._place_and_settle()
+        self._pin_rework_pegs()
+
+    def _spawn_ok(self) -> bool:
+        # Rework pegs intentionally start inside a foreign hole, which trips the parent's
+        # contact-penetration gate. Validate drift against the wrong-slot target instead.
+        if not self._rework_wrong:
+            return super()._spawn_ok()
+        d = self.data
+        if not (np.all(np.isfinite(d.qpos)) and np.all(np.isfinite(d.qvel))):
+            return False
+        for i, peg in enumerate(self.c.pegs):
+            if self.peg_parked[i]:
+                continue
+            ppos, pquat = self.peg_pose(i)
+            pv = d.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 3]
+            if float(np.linalg.norm(pv)) > SPAWN_MAX_SPEED:
+                return False
+            if abs(ppos[0]) > SPAWN_BOARD_MARGIN or abs(ppos[1]) > SPAWN_BOARD_MARGIN or ppos[2] < -0.005:
+                return False
+            ix, iy = self._intended_peg_xy(peg)
+            if float(np.hypot(ppos[0] - ix, ppos[1] - iy)) > SPAWN_MAX_DRIFT:
+                return False
+            if peg.start_type != "lying" and i not in self._rework_wrong:
+                w, x, y, z = pquat
+                if abs(1.0 - 2.0 * (x * x + y * y)) < 0.85:
+                    return False
+        return True
+
+    def _reset(self) -> None:
+        super()._reset()
+        # Teleport fallback can still move rework pegs; pin them after the spawn loop.
+        self._pin_rework_pegs()
+        for i in self._rework_wrong:
+            self._extracted[i] = False
 
     def _intended_peg_xy(self, peg) -> tuple[float, float]:
         i = self.c.pegs.index(peg)

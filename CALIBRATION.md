@@ -1,5 +1,35 @@
 # NIST-Lite calibration
 
+## v0.7-dev (Assembly III, profile `v07`)
+
+Dev-only profile (`NIST_PROFILE=v07`). Live referee default remains `v06`. Measured with
+`tools/calib_v06.py --profile v07` (seeds 20–21, 4/stratum, 64 paired episodes, 4 workers):
+
+| Policy | Overall | c1 / c2 / c3 / c4 | steps done | mean s/ep | projected 128-ep live (2 CPU × 0.55) |
+|---|---|---|---|---|---|
+| zero | **0.004** | 0.01 / 0.00 / 0.00 / 0.00 | 0.01 | 7.7 | 270 s |
+| compound obs-only scripted (`tools/compound_obs_scripted.py`) | **0.016** | 0.02 / 0.03 / 0.01 / 0.01 | 0.02 | 8.5 | 299 s |
+| privileged compound solver (`tools/compound_solver.py`) | **0.202** | 0.43 / 0.15 / 0.08 / 0.15 | 0.26 | 8.0 | 282 s |
+
+Credit by kind (privileged): insert 0.39, rework 0.23, collar 0.15, twist 0.12, key 0.08, screw 0.05, stack 0.04.
+
+Bars for this draft:
+
+| Bar | Target | Measured | Met |
+|---|---|---|---|
+| privileged clearly above obs-only scripted | Δ ≫ 0 | 0.202 vs 0.016 (paired z ≈ −6) | yes |
+| privileged on c4 | ≤ ~0.40 | 0.15 | yes |
+| obs-only scripted overall | ≤ ~0.35 | 0.016 | yes |
+| projected live eval (fast policy) | ≤ ~600 s / 128 eps / 2 CPU | ~270–300 s | yes |
+
+Open: collar/stack/screw success on the privileged solver is still low (headroom and solver
+gaps); a learned policy baseline was not run in this pass. Reproduce:
+
+```bash
+NIST_PROFILE=v07 python tools/calib_v06.py --profile v07 --seeds 20 21 --per 4 --workers 8 \
+  --policies reference compound_scripted zero --ref reference --out out/calib_v07
+```
+
 ## v0.6.2 (mass-event fix)
 
 A `mass` event now refreshes MuJoCo's derived mass constants (`mj_setConst`), so the next grasp

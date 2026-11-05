@@ -1,4 +1,4 @@
-"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.3).
+"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.6.3 live / v0.7-dev).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the
@@ -8,10 +8,12 @@ action per episode.
 raw_score = mean of per-episode scores (fixed denominator). Since v0.6 every episode is a
 random compound task graph (inserts, collars, twist-locks, precedence, waves, hidden physics
 changes between subtasks; nist_sim.compound) and its score is the weighted per-step partial
-credit (compound_score). A fault (NaN / wrong shape / late) ends that episode; steps already
-done keep their credit if still done when it stops. The observation is 288-d; its first 184
-dims are the v0.5 layout, so 184-input policies keep running on the prefix (player/launch.py).
-Records use ``nist_lite_record/4`` (collars, full task graph, step_results, trajectory collars).
+credit (compound_score). With ``NIST_PROFILE=v07`` the referee uses Assembly III
+(nist_sim.compound_v07: rework / screw / stack / key, denser graphs). Default remains v06.
+A fault (NaN / wrong shape / late) ends that episode; steps already done keep their credit if
+still done when it stops. The observation is 288-d; its first 184 dims are the v0.5 layout, so
+184-input policies keep running on the prefix (player/launch.py). Records use
+``nist_lite_record/4`` (collars, full task graph, step_results, trajectory collars).
 """
 
 from __future__ import annotations
@@ -52,7 +54,9 @@ from nist_sim.conditions import episode_seed_sequence, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
 from nist_sim.scoring import episode_score, raw_score_from_episodes
 
-_PROFILE_NAME = _profile.ACTIVE.name
+# Read the env (not profile.ACTIVE): ACTIVE is fixed at first import of nist_sim.profile and
+# stays stale across NIST_PROFILE changes / importlib.reload in tests.
+_PROFILE_NAME = (os.environ.get("NIST_PROFILE") or "v06").strip().lower()
 COMPOUND = _PROFILE_NAME in ("v06", "v07")
 ASSEMBLY_III = _PROFILE_NAME == "v07"
 OBS_W = (OBS_DIM_V07 if ASSEMBLY_III else OBS_DIM_V06) if COMPOUND else OBS_DIM
