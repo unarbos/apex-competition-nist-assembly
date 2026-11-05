@@ -101,20 +101,32 @@ class CollarSpec:
     r_in: float
     offset_xy: tuple[float, float]  # board frame, absolute (not relative to a slot)
     wave: int = 0
+    # v0.7: "collar" seats on the slot block; "stack" seats on the peg top.
+    kind: str = "collar"
 
     @property
     def r_out(self) -> float:
         return self.r_in + COLLAR_T
 
+    @property
+    def is_stack(self) -> bool:
+        return self.kind == "stack"
+
 
 @dataclass
 class TaskStep:
     kind: str
-    part: int  # peg index (insert / twist) or collar index (collar)
+    part: int  # peg index (insert / twist / screw / rework / key) or collar index (collar / stack)
     peg: int  # peg the step belongs to
     prereq: list[int] = field(default_factory=list)
     twist_target: float = 0.0
     twist_dir: float = 1.0
+    # v0.7 extensions (defaults keep v0.6 graphs unchanged).
+    key_yaw: float = 0.0  # target peg yaw (world) for key-gated done checks; 0 = unused
+    key_tol: float = 0.0  # half-width (rad); 0 = no key gate
+    reveal_after: int | None = None  # hide twist/key params in obs until this step is done
+    wrong_slot: int | None = None  # rework: layout slot index where the peg starts seated
+    press: bool = False  # screw: yaw only accumulates while pressing down on the peg
 
 
 @dataclass
@@ -143,9 +155,18 @@ class CompoundSpec:
         steps = []
         for s in self.steps:
             row = {"kind": s.kind, "part": int(s.part), "peg": int(s.peg), "prereq": list(s.prereq)}
-            if s.kind == "twist":
+            if s.kind in ("twist", "screw"):
                 row["twist_target"] = round(float(s.twist_target), 6)
                 row["twist_dir"] = int(s.twist_dir)
+            if s.key_tol > 0:
+                row["key_yaw"] = round(float(s.key_yaw), 6)
+                row["key_tol"] = round(float(s.key_tol), 6)
+            if s.reveal_after is not None:
+                row["reveal_after"] = int(s.reveal_after)
+            if s.wrong_slot is not None:
+                row["wrong_slot"] = int(s.wrong_slot)
+            if s.press:
+                row["press"] = True
             steps.append(row)
         return {
             "tier": self.tier,
@@ -156,16 +177,20 @@ class CompoundSpec:
 
     def record_collars(self) -> list[dict]:
         """Public collar specs for ``conditions.collars`` in ``nist_lite_record/4``."""
-        return [
-            {
+        out = []
+        for c in self.collars:
+            row = {
                 "peg": int(c.peg),
                 "r_in": round(float(c.r_in), 6),
                 "r_out": round(float(c.r_out), 6),
                 "height": COLLAR_H,
                 "wave": int(c.wave),
             }
-            for c in self.collars
-        ]
+            # v0.6 collars omit kind (record schema lock). v0.7 stacks tag themselves.
+            if c.kind != "collar":
+                row["kind"] = c.kind
+            out.append(row)
+        return out
 
 
 # ---- generator ----------------------------------------------------------------------------------
@@ -236,8 +261,8 @@ def _extend_pegs(rng, cond: EpisodeConditions, n_extra: int) -> None:
 
 
 def _step_wave_of(s: TaskStep, peg_wave: list[int], collars: list[CollarSpec]) -> int:
-    """Wave index of the part a step acts on (collar wave, else peg wave)."""
-    if s.kind == "collar":
+    """Wave index of the part a step acts on (collar/stack wave, else peg wave)."""
+    if s.kind in ("collar", "stack"):
         return collars[s.part].wave
     return peg_wave[s.peg]
 
@@ -783,7 +808,7 @@ class CompoundEpisode(Episode):
             self.success_step = self.steps if self.success else None
 
     def _step_wave(self, s: TaskStep) -> int:
-        if s.kind == "collar":
+        if s.kind in ("collar", "stack"):
             return self.cs.collars[s.part].wave
         return self.cs.peg_wave[s.peg]
 
@@ -826,7 +851,7 @@ class CompoundEpisode(Episode):
                 task[b + 5] = 1.0
         col = np.zeros(MAX_COLLARS * COLLAR_FEAT)
         for k, s in enumerate(self.cs.steps):
-            if s.kind != "collar":
+            if s.kind not in ("collar", "stack"):
                 continue
             j, i = s.part, s.peg
             b = j * COLLAR_FEAT
@@ -844,8 +869,10 @@ class CompoundEpisode(Episode):
             hx_e = hx + self._slot_bias_xy[i][0] + self._glitch_slot[i][0] + float(noise_rng.normal(0, sn))
             hy_e = hy + self._slot_bias_xy[i][1] + self._glitch_slot[i][1] + float(noise_rng.normal(0, sn))
             c = self.cs.collars[j]
+            # present: 1 = collar (block seat), 2 = stack (peg-top seat). v0.6 only ever writes 1.
+            present = 2.0 if s.kind == "stack" else 1.0
             feat = np.array(
-                [1.0, (pn[0] - hx_e) * 10, (pn[1] - hy_e) * 10, (pn[2] - BLOCK_H) * 10,
+                [present, (pn[0] - hx_e) * 10, (pn[1] - hy_e) * 10, (pn[2] - BLOCK_H) * 10,
                  *qn, c.r_in * 100, c.r_out * 100, i / MAX_PEGS,
                  float(self.step_done[k]), float(self.step_blocked(k))],
                 dtype=np.float64,

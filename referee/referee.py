@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 
 # The live task is the v0.6 compound profile; set before nist_sim is imported (env.py reads it).
+# v0.7 Assembly III is opt-in via NIST_PROFILE=v07 (dev); releasing it is a separate step.
 os.environ.setdefault("NIST_PROFILE", "v06")
 
 from gym_v1.client import PlayerClient, PlayerError
@@ -36,17 +37,26 @@ from nist_sim import profile as _profile
 from nist_sim.compound import (
     OBS_DIM_V06,
     CompoundEpisode,
-    compound_score,
+    compound_score as compound_score_v06,
     record_events,
     sample_compound,
     step_results,
+)
+from nist_sim.compound_v07 import (
+    OBS_DIM_V07,
+    AssemblyIIIEpisode,
+    compound_score_v07,
+    sample_compound_v07,
 )
 from nist_sim.conditions import episode_seed_sequence, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
 from nist_sim.scoring import episode_score, raw_score_from_episodes
 
-COMPOUND = _profile.ACTIVE.name == "v06"
-OBS_W = OBS_DIM_V06 if COMPOUND else OBS_DIM
+_PROFILE_NAME = _profile.ACTIVE.name
+COMPOUND = _PROFILE_NAME in ("v06", "v07")
+ASSEMBLY_III = _PROFILE_NAME == "v07"
+OBS_W = (OBS_DIM_V07 if ASSEMBLY_III else OBS_DIM_V06) if COMPOUND else OBS_DIM
+compound_score = compound_score_v07 if ASSEMBLY_III else compound_score_v06
 # /4 = compound records with collars + full task + step_results (v0.6.1+).
 # /2 = v0.5 single-stage records. (/3 was the brief v0.6.0 layout; superseded.)
 RECORD_FORMAT = "nist_lite_record/4" if COMPOUND else "nist_lite_record/2"
@@ -61,7 +71,19 @@ DEFAULTS = {
 
 
 def _sample(seed: int, per_stratum: int, split: str):
-    return sample_compound(seed, per_stratum, split) if COMPOUND else sample_episodes(seed, per_stratum, split)
+    if ASSEMBLY_III:
+        return sample_compound_v07(seed, per_stratum, split)
+    if COMPOUND:
+        return sample_compound(seed, per_stratum, split)
+    return sample_episodes(seed, per_stratum, split)
+
+
+def _make_episode(cond, rng):
+    if ASSEMBLY_III:
+        return AssemblyIIIEpisode(cond, rng)
+    if COMPOUND:
+        return CompoundEpisode(cond, rng)
+    return Episode(cond, rng)
 
 
 def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, split: str):
@@ -72,7 +94,7 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
     for i in indices:
         ss = episode_seed_sequence(seed, i)
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
-        eps[i] = CompoundEpisode(conds[i], r1) if COMPOUND else Episode(conds[i], r1)
+        eps[i] = _make_episode(conds[i], r1)
         noise[i] = r2
         if stride and i % stride == 0:
             traj[i] = []

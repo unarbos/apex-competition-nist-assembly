@@ -65,6 +65,22 @@ PROFILES: dict[str, Profile] = {
         collars=True,
         held_out_families_per_round=2,
     ),
+    # v0.7 "Assembly III" (dev): denser compound graphs, new step kinds, tighter c3/c4 slack.
+    # Live referee stays on v06 until a separate release; set NIST_PROFILE=v07 to exercise this.
+    "v07": Profile(
+        name="v07",
+        physics_dt=0.002,
+        action_quant=0.0,
+        n_slots=12,
+        k_values=(4, 6, 8),
+        clearance=(0.00010, 0.00045),
+        steps_per_part=200,
+        episodes_per_round=128,
+        depth_patch=16,
+        policy_state_dim=256,
+        collars=True,
+        held_out_families_per_round=2,
+    ),
 }
 
 
