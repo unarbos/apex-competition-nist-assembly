@@ -34,6 +34,7 @@ from nist_sim.compound_v07 import (  # noqa: E402
     sample_compound_v07,
 )
 from nist_sim.env import ACT_DIM, DXYZ, DYAW, MAX_PEGS, PEG_FEAT, PROPRIO_DIM  # noqa: E402
+from miner_path_stack import MinerStackPlacer  # noqa: E402
 
 PEG0 = PROPRIO_DIM + ACT_DIM  # 21
 TASK0 = 184  # v0.5 prefix ends here
@@ -68,6 +69,7 @@ class CompoundObsScripted:
     mode: str = "insert"  # insert | collar | twist | stack
     timer: int = 0
     yaw0: float = 0.0
+    stack_placer: MinerStackPlacer | None = None
     # Screw dir magnitude 2 is visible; we treat |dir|>1.5 as screw but still only twist
     # (no reliable press from noisy force alone — deliberate weakness vs privileged).
 
@@ -76,6 +78,7 @@ class CompoundObsScripted:
         self.target = -1
         self.mode = "insert"
         self.timer = 0
+        self.stack_placer = None
 
     def _hand_xy(self, obs):
         return obs[0:2] / 10.0
@@ -236,18 +239,17 @@ class CompoundObsScripted:
         if c[0] < 0.5 or c[11] > 0.5:
             self.reset()
             return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
-        # Collar relative to hole estimate: c[1:3]; height c[3].
-        # Approximate collar world as hand + (unknown); steer to cancel rel to hole by moving
-        # opposite to the collar-hole residual projected through hand.
-        # Practical heuristic: move so that collar-hole XY residual shrinks; we treat residual
-        # as "collar is at hand, hole is hand - residual".
+        stack = c[0] > 1.5
+        if stack:
+            return self._act_stack(obs, j, c)
+        # Block-seat collar: residual c[1:3] is collar−hole (×10); peg slot anchors world.
         hand = self._hand_xy(obs)
         hz = self._hand_z(obs)
-        hole_est = hand - c[1:3] / 10.0  # if collar≈hand when gripped; before grasp, noisy
-        # Before grasp, move toward where we think the collar is: hole + residual.
-        collar_est = hole_est + c[1:3] / 10.0
+        peg_i = int(np.clip(int(round(float(c[10]) * MAX_PEGS)), 0, MAX_PEGS - 1))
+        slot_est = _peg(obs, peg_i)[13:15] / 10.0
+        residual = c[1:3] / 10.0
+        collar_est = slot_est + residual
         a = np.zeros(5)
-        stack = c[0] > 1.5
         if self.phase == "goto":
             err = collar_est - hand
             a[0:2] = np.clip(err / DXYZ, -1, 1)
@@ -271,17 +273,15 @@ class CompoundObsScripted:
                 self.phase = "place"
                 self.timer = 0
         elif self.phase == "place":
-            # Now collar≈hand; drive residual to 0.
-            a[0:2] = np.clip((-c[1:3] / 10.0) / DXYZ, -1, 1)
-            z_goal = 0.055 if stack else 0.035
-            a[2] = np.clip((z_goal - hz) / DXYZ, -1, 1)
+            a[0:2] = np.clip((-residual) / DXYZ, -1, 1)
+            a[2] = np.clip((0.035 - hz) / DXYZ, -1, 1)
             a[4] = -1.0
             if abs(float(c[1])) < 0.03 and abs(float(c[2])) < 0.03:
                 self.phase = "drop"
                 self.timer = 0
         else:
-            a[0:2] = np.clip((-c[1:3] / 10.0) / DXYZ, -0.4, 0.4)
-            a[2] = -0.35 if stack else -0.55
+            a[0:2] = np.clip((-residual) / DXYZ, -0.4, 0.4)
+            a[2] = -0.55
             a[4] = -1.0
             self.timer += 1
             if self.timer > 20:
@@ -289,6 +289,25 @@ class CompoundObsScripted:
                 a[2] = 0.5
             if self.timer > 35 or c[11] > 0.5:
                 self.reset()
+        return a
+
+    def _act_stack(self, obs: np.ndarray, j: int, c: np.ndarray) -> np.ndarray:
+        """Peg-top stack place via observe only (open jaws before rise)."""
+        peg_i = int(np.clip(int(round(float(c[10]) * MAX_PEGS)), 0, MAX_PEGS - 1))
+        if self.stack_placer is None or self.stack_placer.collar_j != j:
+            self.stack_placer = MinerStackPlacer(collar_j=j, peg_i=peg_i)
+        # Prefer peg seat: if peg not seated, fall back to insert on that peg.
+        if _peg(obs, peg_i)[16] < 0.5:
+            self.target = peg_i
+            self.mode = "insert"
+            self.phase = "goto"
+            self.stack_placer = None
+            return self._act_insert(obs)
+        a = self.stack_placer.act(obs)
+        if self.stack_placer.phase == "idle" and self.stack_placer.timer > 20:
+            self.reset()
+        elif c[11] > 0.5:
+            self.reset()
         return a
 
     def _act_twist(self, obs: np.ndarray) -> np.ndarray:

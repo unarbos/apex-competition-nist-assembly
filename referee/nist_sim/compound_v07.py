@@ -658,6 +658,10 @@ class AssemblyIIIEpisode(CompoundEpisode):
 
         Same latch for miners and honest privileged (``oracle=False``). Oracle snaps may
         still call ``_pin_stack_on_peg`` directly.
+
+        Note: a privileged v0.6-style block-seat collar on an interference stack ring can
+        still snag the peg tip and arm — that path uses true poses miners lack. Obs-only /
+        ONNX kings stay capped by key/rework weights and noise.
         """
         if not hasattr(self, "_stack_mate_run"):
             self._stack_mate_run = [0] * self.n_collars
