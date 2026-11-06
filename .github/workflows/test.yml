@@ -24,8 +24,37 @@ jobs:
         run: pip install -r referee/requirements.txt -r player/requirements.txt pytest
       - name: Build reference and test-set policies
         run: python tools/make_policies.py
+      - name: Assert Dockerfile text bakes v07
+        # Text check only; the referee-image job builds the image and asserts the runtime default.
+        run: |
+          grep -E 'ENV .+NIST_PROFILE=v07' referee/Dockerfile
+          ! grep -E 'NIST_PROFILE=v06' referee/Dockerfile
       - name: pytest
         env:
-          # Live task profile. Tests that exercise v0.5 / v0.6 behaviour select those profiles explicitly.
+          # Live task profile for in-process tests. Image default is asserted in referee-image job
+          # without this env (CI used to mask a baked-v06 bug by exporting NIST_PROFILE=v07 here).
+          # Tests that exercise v0.5 / v0.6 behaviour select those profiles explicitly.
           NIST_PROFILE: v07
         run: pytest -q tests/
+
+  # Build the real referee image and fail if the baked default is not Assembly III / v07.
+  # Intentionally does NOT set NIST_PROFILE in the container — that was the v0.7.0 blind spot.
+  referee-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build referee image
+        run: docker build -f referee/Dockerfile -t nist-assembly-referee:ci .
+      - name: Assert image default profile is v07 (no env override)
+        run: |
+          set -euo pipefail
+          # ENV baked into the image
+          docker image inspect nist-assembly-referee:ci \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^NIST_PROFILE=v07$'
+          # Runtime: unset any host NIST_PROFILE and import referee the way CMD does.
+          out=$(docker run --rm --entrypoint python nist-assembly-referee:ci -c \
+            'import os; os.environ.pop("NIST_PROFILE", None); import referee; print(referee._PROFILE_NAME, referee.ASSEMBLY_III)')
+          echo "runtime: $out"
+          echo "$out" | grep -E '^v07 True$'
+

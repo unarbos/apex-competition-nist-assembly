@@ -5,15 +5,17 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.7.0** ("Assembly III", profile `v07`) — denser graphs, new step kinds
+> Version: **v0.7.1** ("Assembly III", profile `v07`) — denser graphs, new step kinds
 > (`rework`, `screw`, `stack`, `key`), press-gated screws, **obs-indexed key yaw**, mis-seated
 > rework, stack rings, and residual noise so open-loop v0.6 controllers fail. Observation stays
-> `[B, 288]` with v0.6 encodings extended in-place. Referee default is `v07`. Eval caps:
-> 80 ms policy deadline, 550 s round wall, 18 s/episode wall, horizon 1000. Digests remain the
-> last v0.6.3 pins until the tag cut. Scores are **not** comparable with v0.6.x.
+> `[B, 288]` with v0.6 encodings extended in-place. Referee image bakes `NIST_PROFILE=v07`.
+> Cost is bounded by sim horizon only (no round/episode wall-clock caps). Policy deadline
+> 80 ms; horizon ≤ 1400. Digests stay at the last released pins until Apex cuts the tag.
+> Scores are **not** comparable with v0.6.x.
 >
 > Every episode is a random multi-step assembly graph. Four complexity tiers (c1–c4); weighted
-> partial credit per step. Records `nist_lite_record/4`.
+> partial credit per step (insert 0.45, collar/twist 0.60, screw 1.00, rework 1.50, stack 1.40,
+> key 1.80). Waves at most 2 on c4. Records `nist_lite_record/4` (include `nist_profile`).
 >
 > v0.5.1: harder pose estimates (5–11.5 mm peg-vs-hole offset, drift, glitch bursts) and more
 > lying starts. v0.5.0: board layout and peg shapes are drawn per episode.
@@ -45,53 +47,36 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.6.3)
+## The task (v0.7.1 Assembly III)
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions, slot yaw, and a cross-section per slot from continuous families
   (round, rectangle/square, regular 5/6/8-gon, D-flat; inscribed size 4–16 mm). The board pose
-  is jittered, and held-out families appear only on the reserved split.
-- **Parts:** 3–6 pegs by stratum, plus up to 2 extra on c3/c4 (at most 8). Pegs start loose
+  is jittered, and held-out families appear only on the reserved split. Radial clearance is
+  still drawn from the v0.5 range (0.25–0.8 mm); the v07 profile clearance field is not wired.
+- **Parts:** 3–6 pegs by stratum, plus up to 1 extra on c4 (at most 8). Pegs start loose
   upright, lying, in a tray, near their hole, or (at most one) pre-grasped. There are 0–3
   clutter blocks.
 - **Steps:**
   - **insert** puts a peg into its matching slot.
   - **collar** drops a ring (inner clearance 0.6–1.2 mm) over a peg that is already seated,
     so the ring rests on the slot block.
-  - **twist** turns a seated round peg by a random 1.2–2.0 rad in a given direction (a
-    bayonet-style lock); this can take several regrasps.
-- **Precedence:** a peg must be seated before its collar or twist. On top of that, random
-  cross-part edges are added, denser on harder tiers. Each step's blocked flag is in the
-  observation.
-- **Waves:** parts arrive in 1–4 waves. A wave arrives when the earlier waves are done or
-  at a random deadline. Parts that haven't arrived are off the board and zeroed in the
-  observation.
-- **Between-subtask changes:** after a step completes, a random event may fire: friction
-  or controller gain change, part mass changes, an actuation delay appears, pose estimates
-  re-bias, or a loose part is shoved. The policy is not told when this happens.
-- **Tiers** (15/30/30/25% of each stratum): c1 has one wave and few compound steps. c4 has
-  +2 pegs, 3–4 waves, a dense graph, events after most steps and the least time slack.
-  Every episode has at least one collar or twist.
-- **Horizon:** the sum of per-step budgets (insert 260, +140 for a lying peg, collar 200,
-  twist 130 control steps), times the tier slack (1.2 / 1.0 / 0.85 / 0.70), plus 40 per extra
-  wave. The mean is about 1,800 steps (72 s). The episode ends early once every step is done
-  and the gripper is clear.
-- **Hidden dynamics:** carried over from v0.5.1. Friction, mass, gain, backlash,
-  pose-estimate bias and drift, noise and dropout, and glitch bursts are all drawn per
-  episode; glitch bursts are softened to half rate on v0.6. Glitch bursts cover about 25% of
-  control steps on the live mix (easy 16%, medium 25%, hard 29%).
-- **Score:** each step `k` has weight `w_k`: insert 0.3, collar 1.5, twist 1.0.
-  - A step done in order and still done at the end earns `0.70 + 0.30 · (1 − t_done/T)`.
-  - A step done while its prerequisites were still open earns
-    `max(0.30, 0.15 × in-order credit)` (never less than unfinished partial).
-  - An unfinished step earns up to 0.30 for partial progress (grasp/lift, alignment,
-    partial insertion, collar around a seated peg, fraction twisted). Collar 0.20 / 0.30
-    tiers require that collar's peg in its hole.
-  - The episode score is `Σ w_k c_k / Σ w_k`; the round score is the mean over episodes.
-  - A lost part (off the board) no longer ends the episode. Its steps just can't finish.
-- **Round size:** 8 strata (K × clutter). The fixture uses 8 per stratum (64 episodes); the
-  live rounds' episode count is set by the platform round input (see `HANDOFF.md` §4). Timeout
-  1800 s.
+  - **twist** turns a seated round peg by a random angle in a given direction.
+  - **screw** (v0.7): press-gated multi-turn twist; yaw only counts while pressing the peg.
+  - **stack** (v0.7): ring that must rest on the *peg top*, not the block.
+  - **key** (v0.7): seated peg must hold a yaw window shown in obs (`sin/cos` + `key_tol`);
+    never co-assigned with twist/screw on the same peg.
+  - **rework** (v0.7): peg starts shallow in a wrong slot; extract, then insert for real.
+- **Precedence / waves:** DAG edges as in v0.6; waves 1–2 (c4 at most 2). Parts that haven't
+  arrived are off the board and zeroed in the observation.
+- **Between-subtask changes:** friction / gain / mass / delay / re-bias / shove, plus v0.7
+  `swap_bias`.
+- **Tiers** (~40/45/10/5% c1–c4): hardness is in keys / stacks / rework / screws, not wave count.
+- **Horizon:** per-step budgets × tier slack, hard-capped at 1000 control steps. No referee
+  wall-clock episode or round cut — scores are load-invariant.
+- **Score:** weights insert 0.45, collar 0.60, twist 0.60, screw 1.00, rework 1.50, stack 1.40,
+  key 1.80. Rubric otherwise as v0.6 (done = 0.70 + 0.30·time; unfinished ≤ 0.30).
+- **Round size:** 8 strata × 8 = 64 episodes (fixture). Timeout 1800 s.
 
 ## Policy interface
 
@@ -119,20 +104,21 @@ v0.5 layout); every other policy gets all 288.
    quaternion (4); size ×50.
 5. **Task table (8 × 6 = 48), one row per peg slot:** insert done, insert blocked, twist
    direction (±1, 0 = no twist), twist progress (0–1), twist blocked, has-collar flag.
-   **v0.7-dev:** screw uses twist channels with direction ±2; key packs `sin/cos` of the key
-   yaw into the twist slots when revealed; late-reveal steps zero those channels until the
-   gated prerequisite finishes; stack sets the collar-flag channel to 2.
+   **v0.7:** screw uses twist channels with direction ±2; key packs `sin/cos` of the key
+   yaw into the twist slots when revealed and `key_tol × 10` into the collar-flag slot when
+   that peg has no collar/stack; late-reveal steps zero those channels until the gated
+   prerequisite finishes; stack sets the collar-flag channel to 2.
 6. **Collar table (4 × 13 = 52):** presence (0 until it arrives); noisy collar position
    relative to the biased target-slot estimate ×10 (3) + quaternion (4); inner and outer
    radius ×100 (2); target peg row / 8; done; blocked.
-   **v0.7-dev:** presence = 2 marks a stack ring (seats on the peg top, not the block).
+   **v0.7:** presence = 2 marks a stack ring (seats on the peg top, not the block).
 7. **Globals (4):** elapsed fraction of the horizon, fraction of steps done, fraction of waves
    arrived, number of steps / 16.
 
 The batch dimension must be dynamic. Each control step is one call covering every episode
-still running, with a 500 ms deadline per call. A non-finite or wrong-shaped action ends
-that episode; done steps keep their credit. A call that errors or misses the deadline ends
-every episode still running the same way.
+still running, with an 80 ms live deadline per call (schema allows up to 2000 ms). A
+non-finite or wrong-shaped action ends that episode; done steps keep their credit. A call
+that errors or misses the deadline ends every episode still running the same way.
 
 ## Iterate locally
 

@@ -1,12 +1,13 @@
 """Task profile switch (``NIST_PROFILE``).
 
-``v06`` is the live v0.6 compound task: the referee (``referee.py``) selects it unless
-``NIST_PROFILE`` is set. ``v05`` is the library default and reproduces the v0.5.x
-single-stage task bit for bit; tests and tools that exercise v0.5 behaviour use it. Code reads
-the active profile through :data:`ACTIVE`.
+Live default is ``v07`` (Assembly III): the referee image bakes ``NIST_PROFILE=v07`` and
+``referee.py`` uses ``setdefault("NIST_PROFILE", "v07")``. ``v06`` remains selectable for
+A/B and regression. ``v05`` is the library default when nothing sets the env and reproduces
+the v0.5.x single-stage task bit for bit. Code reads the active profile through :data:`ACTIVE`.
 
-Only the ``wired`` fields change the simulator. The rest are design targets kept for the
-calibration tooling (see docs/v0.6/DESIGN.md).
+Wired fields: ``physics_dt``, ``action_quant``, and (as of v0.7.1) ``clearance`` via
+``conditions.active_ranges()``. ``n_slots``, ``k_values``, ``collars``, ``depth_patch`` remain
+design targets kept for docs/calibration — they are not yet read by ``conditions`` / ``env``.
 """
 
 from __future__ import annotations
@@ -57,7 +58,9 @@ PROFILES: dict[str, Profile] = {
         action_quant=0.0,  # off until the stateful-policy protocol lands (rounding alone breaks memoryless policies)
         n_slots=12,
         k_values=(4, 6, 8),
-        clearance=(0.00010, 0.00050),
+        # Hi stays off coarse midpoints (0.000325 / 0.0005 / 0.0007) so records never
+        # publish a coarse clearance that equals the exact episode value by clamp.
+        clearance=(0.00010, 0.00048),
         steps_per_part=240,
         episodes_per_round=96,
         depth_patch=16,
@@ -73,7 +76,8 @@ PROFILES: dict[str, Profile] = {
         n_slots=12,
         k_values=(4, 6, 8),
         # Slightly looser than v06 so privileged seating is reliable; hardness is in screw/key.
-        clearance=(0.00020, 0.00070),
+        # Hi 0.00068 stays below the loose coarse midpoint 0.0007 (record privacy).
+        clearance=(0.00020, 0.00068),
         steps_per_part=200,
         episodes_per_round=64,
         depth_patch=16,

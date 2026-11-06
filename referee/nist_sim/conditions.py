@@ -238,9 +238,11 @@ def _place_slots(rng: np.random.Generator, specs: list[SlotSpec], order: list[in
 
 
 # Live ranges. Continuous axes are LHS-drawn; discrete axes are mapped from LHS then rounded.
-# Clearance floor is 0.25 mm: sub-0.1 mm square fits were unstable under MuJoCo soft contact.
+# Clearance floor is 0.25 mm for the v05 library default: sub-0.1 mm square fits were
+# unstable under MuJoCo soft contact. Profile-aware clearance (v06/v07) is applied via
+# :func:`active_ranges` so ``Profile.clearance`` is wired into the simulator.
 RANGES = {
-    "clearance": (0.00025, 0.0008),  # 0.25–0.8 mm; needs wiggle on the tight end
+    "clearance": (0.00025, 0.0008),  # 0.25–0.8 mm; overridden by profile for v06/v07
     "friction": (0.3, 1.3),
     "peg_mass": (0.005, 0.05),
     "gain_scale": (0.6, 1.4),
@@ -261,6 +263,22 @@ RANGES = {
     "backlash": (0.00005, 0.0004),  # Cartesian command deadzone (m)
     "chamfer": (0.35, 1.0),  # entry funnel; still contact-rich at the low end
 }
+
+
+def active_ranges() -> dict[str, tuple[float, float]]:
+    """LHS ranges for the active ``NIST_PROFILE``.
+
+    Wires ``Profile.clearance`` (and keeps other axes from :data:`RANGES`) so v06/v07
+    clearance settings actually reach the simulator — Macrocosmos should-fix on #45.
+    """
+    from . import profile as _profile
+
+    out = {k: tuple(v) for k, v in RANGES.items()}
+    p = _profile.get()
+    if p.name in ("v06", "v07"):
+        out["clearance"] = tuple(p.clearance)
+    return out
+
 
 # Slot-yaw vs peg-yaw estimate residual (rad), scaled by tier. Not an LHS axis.
 PEG_YAW_DELTA = (0.05, 0.14)
@@ -482,7 +500,7 @@ def _map(u: np.ndarray, lo: float, hi: float, gap: list[float] | None, inside: b
 
 def _lhs(rng: np.random.Generator, k: int, reserved: dict, inside: bool) -> dict[str, np.ndarray]:
     out = {}
-    for name, (lo, hi) in RANGES.items():
+    for name, (lo, hi) in active_ranges().items():
         u = (rng.permutation(k) + rng.uniform(0, 1, k)) / k
         out[name] = _map(u, lo, hi, reserved.get(name), inside)
     return out
@@ -710,7 +728,8 @@ def sample_episodes(
     if inside and not reserved:
         raise RuntimeError("no reserved ranges in this build")
     rng = np.random.default_rng(np.random.SeedSequence([seed, 0x4E495354, *build_salt()]))
-    rc = {k: list(v) for k, v in RANGES.items()}
+    ranges = active_ranges()
+    rc = {k: list(v) for k, v in ranges.items()}
     eps: list[EpisodeConditions] = []
     for k_pegs, bucket in strata():
         lhs = _lhs(rng, episodes_per_stratum, reserved, inside)
@@ -786,7 +805,12 @@ def sample_episodes(
             dmag = float(lhs["peg_bias_delta"][j]) * delta_scale
             dang = _u(rng, 0, 2 * math.pi)
             peg_delta = (dmag * math.cos(dang), dmag * math.sin(dang))
-            clr = min(RANGES["clearance"][1], float(lhs["clearance"][j]) + clear_boost)
+            clr = min(ranges["clearance"][1], float(lhs["clearance"][j]) + clear_boost)
+            # Exact clearance must not land on a coarse midpoint (record privacy).
+            for _mid in CLEARANCE_CLASS_MIDPOINT.values():
+                if abs(clr - _mid) < 1e-12:
+                    clr = min(ranges["clearance"][1], _mid + 1e-6)
+                    break
             ch = max(chamfer_floor, float(lhs["chamfer"][j]))
             search_pitch = 0.00008 + 0.55 * clr + 0.00012 * ch
             lo_n, hi_n = RANGES["obs_noise"]

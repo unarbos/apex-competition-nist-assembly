@@ -16,7 +16,6 @@ Encodings in the 288-d observation (v0.6 prefix unchanged):
 from __future__ import annotations
 
 import math
-import time
 
 import mujoco
 import numpy as np
@@ -93,14 +92,16 @@ STEP_KINDS_V07 = ("insert", "collar", "twist", "rework", "screw", "stack", "key"
 # the ceiling gap comes from press-gated screws and yaw-index keys.
 # Keys / rework / stacks carry the ceiling: v0.6 kings clear insert/screw/collar/twist but
 # do not index keys, extract mis-seats, or stack on peg tops. Weight those gates hard.
+# Hard steps dominate so v0.6-style (insert/collar/twist only) stays ≤~0.30; honest privileged
+# that finishes keys/stacks/rework clears ≥~0.50.
 STEP_WEIGHT_V07 = {
-    "insert": 0.25,
-    "collar": 0.30,
-    "twist": 0.30,
-    "screw": 0.45,
-    "rework": 2.40,
-    "stack": 2.20,
-    "key": 3.20,
+    "insert": 0.45,
+    "collar": 0.60,
+    "twist": 0.60,
+    "screw": 1.00,
+    "rework": 1.50,
+    "stack": 1.40,
+    "key": 1.80,
 }
 # Short budgets + hard horizon keep slow ONNX kings inside the ~600 s / 64-ep / 2-CPU bar.
 STEP_BUDGET_V07 = {
@@ -113,30 +114,29 @@ STEP_BUDGET_V07 = {
     "key": 110,
 }
 REWORK_EXTRA = 30
-MAX_HORIZON_V07 = 1000  # hard cap — ~15–18 s/ep even for 50 ms ONNX policies
-# Per-episode wall clock (seconds). Hits first on slow policies; privileged finishes earlier.
-EPISODE_WALL_S_V07 = 18.0
+MAX_HORIZON_V07 = 1400  # hard sim-step cap; no wall-clock episode cut
 TIER_CFG_V07 = {
-    # Fewer but heavier key/rework/stack gates — solvable for privileged, fatal for v0.6 kings.
+    # Key/rework/stack still gate v0.6 kings; density tuned so honest privileged ≥~0.50.
     "c1": dict(
-        extra_pegs=0, collar_frac=0.28, twist_frac=0.08, screw_frac=0.35, rework_frac=0.20,
-        stack_frac=0.25, key_frac=0.45, waves=(1, 1), edge_p=0.00, event_p=0.05, slack=1.40,
-        reveal_p=0.30,
+        extra_pegs=0, collar_frac=0.22, twist_frac=0.08, screw_frac=0.22, rework_frac=0.12,
+        stack_frac=0.15, key_frac=0.25, waves=(1, 1), edge_p=0.00, event_p=0.03, slack=1.60,
+        reveal_p=0.20,
     ),
     "c2": dict(
-        extra_pegs=0, collar_frac=0.28, twist_frac=0.08, screw_frac=0.40, rework_frac=0.25,
-        stack_frac=0.30, key_frac=0.55, waves=(1, 1), edge_p=0.02, event_p=0.08, slack=1.25,
-        reveal_p=0.40,
+        extra_pegs=0, collar_frac=0.22, twist_frac=0.08, screw_frac=0.26, rework_frac=0.15,
+        stack_frac=0.18, key_frac=0.32, waves=(1, 1), edge_p=0.02, event_p=0.05, slack=1.45,
+        reveal_p=0.30,
     ),
     "c3": dict(
-        extra_pegs=0, collar_frac=0.25, twist_frac=0.06, screw_frac=0.45, rework_frac=0.30,
-        stack_frac=0.35, key_frac=0.65, waves=(1, 2), edge_p=0.04, event_p=0.12, slack=1.10,
-        reveal_p=0.50,
+        extra_pegs=0, collar_frac=0.20, twist_frac=0.06, screw_frac=0.30, rework_frac=0.18,
+        stack_frac=0.22, key_frac=0.40, waves=(1, 2), edge_p=0.03, event_p=0.08, slack=1.25,
+        reveal_p=0.40,
     ),
     "c4": dict(
-        extra_pegs=1, collar_frac=0.22, twist_frac=0.05, screw_frac=0.50, rework_frac=0.35,
-        stack_frac=0.40, key_frac=0.75, waves=(2, 2), edge_p=0.08, event_p=0.22, slack=0.90,
-        reveal_p=0.65,
+        # waves=(2, 2): at most 2 waves on c4 (docs previously claimed "up to 5"; code wins).
+        extra_pegs=1, collar_frac=0.18, twist_frac=0.05, screw_frac=0.34, rework_frac=0.22,
+        stack_frac=0.24, key_frac=0.48, waves=(2, 2), edge_p=0.05, event_p=0.12, slack=1.10,
+        reveal_p=0.50,
     ),
 }
 # Residuals stay large enough that open-loop trajectories miss; privileged uses true state.
@@ -144,7 +144,9 @@ NOISE_SCALE_V07 = dict(slot_bias=0.45, peg_delta=0.40, glitch=0.40, drift=0.45)
 EVENT_KINDS_V07 = EVENT_KINDS + ("swap_bias",)
 EVENT_WEIGHTS_V07 = np.array([0.14, 0.14, 0.12, 0.10, 0.18, 0.16, 0.16])
 # Multi-turn press-twists; pitch drawn per step and shown in obs when revealed.
-SCREW_TARGET = (0.35, 0.70)
+# Kept short enough that a press+yaw privileged controller can finish without oracle snaps
+# (MuJoCo soft contacts rarely rotate the peg itself under palm press).
+SCREW_TARGET = (0.25, 0.45)
 KEY_TOL = (0.10, 0.16)  # yaw-index; observable via sin/cos in the task channels
 STACK_SEAT_XY = 0.0045
 STACK_SEAT_Z_CLEAR = 0.0040
@@ -152,6 +154,10 @@ STACK_SEAT_Z_CLEAR = 0.0040
 PRESS_PALM_MARGIN = 0.001
 # Rework pegs sit only this deep in the wrong hole so a grip+yank can extract them.
 REWORK_SEAT_DEPTH = 0.0015
+# Stack rings are clearance-fit; free physics drops them to the block. A successful place
+# in the peg-top zone mates (pins) the ring so hold-counting is achievable.
+STACK_MATE_XY = 0.0055
+STACK_MATE_Z = 0.0055
 
 OBS_DIM_V07 = OBS_DIM_V06  # 288; encodings reuse v0.6 channels
 
@@ -263,23 +269,36 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
         n_tw = min(n_tw, len(left))
         twist_pegs = rng.choice(left, size=n_tw, replace=False).tolist() if n_tw else []
 
-    # --- key gates on a subset of non-round inserts (and some round) ---------------------------
-    key_cands = [i for i in range(K) if i not in rework_pegs]
+    # --- key gates ---------------------------------------------------------------------------
+    # Keys share the twist obs channels, so never put a key on a twist/screw peg (those would
+    # overwrite key sin/cos). Prefer non-rework pegs; round pegs may use any yaw, non-round
+    # pegs must index near a seated symmetry of the slot.
+    twist_or_screw = set(twist_pegs) | set(screw_pegs)
+    key_cands = [i for i in range(K) if i not in rework_pegs and i not in twist_or_screw]
     n_key = min(len(key_cands), int(round(cfg["key_frac"] * K)))
     key_pegs = set(rng.choice(key_cands, size=n_key, replace=False).tolist() if n_key else [])
 
     # Guarantee every episode has a key gate — the main anti-king lever (obs-only yaw index).
     if not key_pegs and key_cands:
-        key_pegs.add(int(rng.choice(list(key_cands))))
+        key_pegs.add(int(rng.choice(key_cands)))
     # Also keep at least one screw/rework/stack so v0.6 insert/collar scripts stay capped.
     if not screw_pegs and not rework_pegs and not any(k == "stack" for _, k in ring_pegs):
         if rounds_easy:
             pick = int(rng.choice(rounds_easy))
-            if pick not in screw_pegs:
+            if pick not in screw_pegs and pick not in key_pegs:
                 screw_pegs.append(pick)
                 twist_pegs = [i for i in twist_pegs if i != pick]
+            elif pick not in screw_pegs and not screw_pegs:
+                # Prefer a non-key round if possible; otherwise drop the key on that peg.
+                alt = [i for i in rounds_easy if i not in key_pegs]
+                use = int(rng.choice(alt)) if alt else pick
+                screw_pegs.append(use)
+                twist_pegs = [i for i in twist_pegs if i != use]
+                key_pegs.discard(use)
         elif rounds:
-            screw_pegs.append(int(rounds[0]))
+            use = int(rounds[0])
+            screw_pegs.append(use)
+            key_pegs.discard(use)
     # Guarantee every episode is compound (collar/twist fallback if somehow still bare).
     if not collars and not twist_pegs and not screw_pegs and not rework_pegs and not key_pegs:
         if cands:
@@ -292,6 +311,21 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
         elif free_slots and rework_cands:
             rework_pegs[int(rework_cands[0])] = int(free_slots[0])
 
+    def _sample_key_yaw(peg_i: int) -> float:
+        """World-frame yaw window centre that a seated peg can actually reach."""
+        peg = cond.pegs[peg_i]
+        spec = peg.spec
+        slot_yaw = float(spec.yaw + cond.board_yaw)
+        if spec.shape == "round" or spec.symmetry() == 0:
+            return float(rng.uniform(-math.pi, math.pi))
+        # Discrete seated yaws: slot_yaw + 2π k / n for rotational symmetry n.
+        n = max(1, int(spec.symmetry()))
+        k_sym = int(rng.integers(0, n))
+        # Small jitter inside the key window so the target is not exactly the slot yaw
+        # (obs must still be read), but stays reachable while seated.
+        jitter = float(rng.uniform(-0.04, 0.04))
+        return float(wrap(slot_yaw + (2.0 * math.pi * k_sym) / n + jitter))
+
     # --- build steps --------------------------------------------------------------------------
     steps: list[TaskStep] = []
     edges: set[tuple[int, int]] = set()
@@ -303,14 +337,12 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
             steps.append(TaskStep("insert", i, i))
         insert_idx[i] = len(steps) - 1
         if i in key_pegs:
-            # Key yaw is drawn freely — only recoverable from obs (sin/cos), not from slot yaw.
-            ky = float(rng.uniform(-math.pi, math.pi))
             steps.append(
                 TaskStep(
                     "key",
                     i,
                     i,
-                    key_yaw=ky,
+                    key_yaw=_sample_key_yaw(i),
                     key_tol=float(rng.uniform(*KEY_TOL)),
                 )
             )
@@ -430,9 +462,8 @@ class AssemblyIIIEpisode(CompoundEpisode):
         }
         self._extracted = {i: False for i in self._rework_wrong}
         self._key_hold = [0] * cond.n_pegs
-        # Start the wall clock on the first control step (not during MuJoCo/ONNX setup).
-        self._wall0: float | None = None
-        self._wall_limit_s = float(EPISODE_WALL_S_V07)
+        self._stack_mated = [False] * len(cond.compound.collars)
+        self._screw_hand_prev: dict[int, float | None] = {}
         super().__init__(cond, rng)
 
     def _seat_in_wrong_slot(self, i: int) -> None:
@@ -505,6 +536,9 @@ class AssemblyIIIEpisode(CompoundEpisode):
         self._pin_rework_pegs()
         for i in self._rework_wrong:
             self._extracted[i] = False
+        self._stack_mated = [False] * self.n_collars
+        self._screw_hand_prev = {}
+        self._key_hold = [0] * self.n_pegs
 
     def _intended_peg_xy(self, peg) -> tuple[float, float]:
         i = self.c.pegs.index(peg)
@@ -529,12 +563,56 @@ class AssemblyIIIEpisode(CompoundEpisode):
         palm_z = float(self.data.qpos[2] + PAD_CENTRE_Z)
         return palm_z <= peg_top - PRESS_PALM_MARGIN + 1e-4
 
+    def _stack_in_mate_zone(self, j: int) -> bool:
+        """Geometric peg-top place zone (gripper may still be holding)."""
+        if self.collar_parked[j]:
+            return False
+        col = self.cs.collars[j]
+        if not col.is_stack:
+            return False
+        if not (self.seated_now[col.peg] or self._peg_in_hole(col.peg)):
+            return False
+        p, q = self.collar_pose(j)
+        hx, hy = self.slot_xy[col.peg]
+        peg_p, _ = self.peg_pose(col.peg)
+        peg_top = peg_p[2] + PEG_LEN / 2
+        bottom = p[2] - COLLAR_H / 2
+        return (
+            float(np.hypot(p[0] - hx, p[1] - hy)) <= STACK_MATE_XY
+            and abs(bottom - peg_top) <= STACK_MATE_Z
+            and bottom > BLOCK_H + 0.015
+            and self._upright(q)
+        )
+
+    def _pin_stack_on_peg(self, j: int) -> None:
+        """Mate a stack ring to the peg top (clearance-fit rings otherwise fall to the block)."""
+        col = self.cs.collars[j]
+        hx, hy = self.slot_xy[col.peg]
+        peg_p, _ = self.peg_pose(col.peg)
+        peg_top = peg_p[2] + PEG_LEN / 2
+        z = peg_top + COLLAR_H / 2
+        self._set_free(self.collar_qadr[j], self.collar_vadr[j], [hx, hy, z], _yaw_quat(0.0))
+        self.data.qvel[self.collar_vadr[j] : self.collar_vadr[j] + 6] = 0.0
+        self._stack_mated[j] = True
+        mujoco.mj_forward(self.model, self.data)
+
+    def _maybe_mate_stacks(self) -> None:
+        for j, col in enumerate(self.cs.collars):
+            if not col.is_stack or self.collar_parked[j] or self._stack_mated[j]:
+                continue
+            if self._stack_in_mate_zone(j):
+                self._pin_stack_on_peg(j)
+
     def _stack_seated_now(self, j: int) -> bool:
         if self.collar_parked[j]:
             return False
         col = self.cs.collars[j]
         if not col.is_stack:
             return False
+        if self._stack_mated[j]:
+            return bool(self.seated_now[col.peg] or self._peg_in_hole(col.peg)) and (
+                not self._gripper_touching(self.collar_body[j])
+            )
         p, q = self.collar_pose(j)
         hx, hy = self.slot_xy[col.peg]
         peg_p, _ = self.peg_pose(col.peg)
@@ -657,19 +735,12 @@ class AssemblyIIIEpisode(CompoundEpisode):
     def step(self, action: np.ndarray) -> None:
         if self.done:
             return
-        # Episode wall clock: stop slow policies before they burn the live eval budget.
-        # Timer starts on the first control step so MuJoCo/ONNX setup is not charged.
-        if self._wall0 is None:
-            self._wall0 = time.perf_counter()
-        elif (time.perf_counter() - self._wall0) >= self._wall_limit_s:
-            self.done = True
-            self.terminal_reason = "time_limit"
-            return
         # Screw yaw must not free-spin: clear prev so the parent skip-accumulates, then apply
         # a press-gated delta *before* we re-evaluate screw step completion.
+        # Parent skips bookkeeping for screw/key/stack/rework so this is the sole completion path
+        # (avoids done_at flicker and double key-hold increments).
         twist_before = list(self.twist_acc)
         screw_pegs = {s.peg for s in self.cs.steps if s.kind == "screw"}
-        saved_prev = {i: self._twist_prev[i] for i in screw_pegs}
         for i in screw_pegs:
             self._twist_prev[i] = None
         super().step(action)
@@ -677,31 +748,35 @@ class AssemblyIIIEpisode(CompoundEpisode):
             self.done and self.terminal_reason not in ("assembled", "time_limit")
         ):
             return
+        # Screw progress: hand yaw while pressing (MuJoCo soft contacts rarely spin the peg).
+        # Open-grip free-twists still accumulate 0. Peg yaw tracking is kept for obs continuity.
+        hand_yaw = float(self.data.qpos[3])
         for i in screw_pegs:
-            y = quat_yaw(self.peg_pose(i)[1])
-            prev = saved_prev[i]
-            # Do not count yaw during the seating insert — palm is low then and would
-            # let a free-twist script bank progress for free. Gate on seat-step done.
             seat_done = any(
                 self.step_done[sk]
                 for sk, ss in enumerate(self.cs.steps)
                 if ss.kind in ("insert", "rework") and ss.peg == i
             )
+            prev_h = self._screw_hand_prev.get(i)
             if (
                 seat_done
-                and prev is not None
+                and prev_h is not None
                 and self._peg_in_hole(i)
                 and self._pressing_on_peg(i)
             ):
-                self.twist_acc[i] = twist_before[i] + wrap(y - prev)
+                self.twist_acc[i] = twist_before[i] + wrap(hand_yaw - prev_h)
             else:
-                # Freeze (and clear pre-seat drift) until the seat step is done.
                 self.twist_acc[i] = twist_before[i] if seat_done else 0.0
-            self._twist_prev[i] = y
+            self._screw_hand_prev[i] = hand_yaw
+            self._twist_prev[i] = quat_yaw(self.peg_pose(i)[1])
+        self._maybe_mate_stacks()
         for j, col in enumerate(self.cs.collars):
-            if col.is_stack:
+            if col.is_stack and not self.collar_parked[j]:
+                # Re-pin mated stacks each step so they stay on the peg top.
+                if self._stack_mated[j]:
+                    self._pin_stack_on_peg(j)
                 self.collar_run[j] = self.collar_run[j] + 1 if self._stack_seated_now(j) else 0
-        # Re-evaluate screw / stack / key completion with the corrected accumulators.
+        # Sole bookkeeping path for v0.7 hard steps (parent skipped them).
         for k, s in enumerate(self.cs.steps):
             if s.kind not in ("screw", "stack", "key", "rework"):
                 continue
@@ -716,10 +791,8 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 if ev is not None:
                     self._fire_event(ev)
             elif not done and self.step_done[k]:
-                # Screws/keys/stacks latch once completed — brief flickers must not wipe them.
-                if s.kind in ("screw", "key", "stack", "rework"):
-                    continue
-                self.step_done[k] = False
+                # Latch: brief flickers must not wipe completion or redo time bonus.
+                continue
         if all(self.step_done) and all(self.wave_arrived) and not self.done:
             self.done = True
             self.success = True
@@ -756,13 +829,14 @@ class AssemblyIIIEpisode(CompoundEpisode):
                     o[b + 3] = 0.0
                 o[b + 4] = float(self.step_blocked(k))
             elif s.kind == "key":
+                # Keys are never co-assigned with twist/screw, so these channels stay free.
                 if revealed:
                     o[b + 2] = math.sin(s.key_yaw)
                     o[b + 3] = math.cos(s.key_yaw)
                     o[b + 4] = float(self.step_blocked(k))
-                    # Pack tol into the collar-flag slot when unused.
+                    # Pack tol into the collar-flag slot when that peg has no collar/stack.
                     if o[b + 5] == 0.0:
-                        o[b + 5] = s.key_tol * 10.0
+                        o[b + 5] = float(s.key_tol) * 10.0
                 else:
                     o[b + 2] = 0.0
                     o[b + 3] = 0.0

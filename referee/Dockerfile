@@ -22,5 +22,5 @@ RUN --mount=type=secret,id=heldout_seed,required=false \
     fi
 
 USER 1000
-ENV OMP_NUM_THREADS=1 MUJOCO_GL=disable NIST_PROFILE=v06
+ENV OMP_NUM_THREADS=1 MUJOCO_GL=disable NIST_PROFILE=v07
 CMD ["python", "/app/referee.py"]
