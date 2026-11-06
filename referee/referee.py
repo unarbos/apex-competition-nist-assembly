@@ -1,4 +1,4 @@
-"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.7.0 Assembly III).
+"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.7.1 Assembly III).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the
@@ -12,6 +12,9 @@ selects the previous Assembly II compound task. A fault (NaN / wrong shape / lat
 that episode; steps already done keep their credit if still done when it stops. The
 observation is 288-d; its first 184 dims are the v0.5 layout, so 184-input policies keep
 running on the prefix (player/launch.py). Records use ``nist_lite_record/4``.
+
+Cost is bounded by sim horizon only (no wall-clock round/episode caps). Same policy +
+same seed must score the same on any machine load.
 """
 
 from __future__ import annotations
@@ -21,7 +24,6 @@ import json
 import multiprocessing as mp
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -70,9 +72,8 @@ DEFAULTS = {
     # Per-batch policy budget. Kings are ~40–60 ms/call; 80 ms leaves headroom but
     # stops a runaway ONNX from burning the platform timeout.
     "deadline_ms": 80,
-    # Whole-round wall budget (seconds). Stops the lockstep loop once exceeded so a
-    # slow policy cannot approach the 1800 s platform timeout on 2 CPU.
-    "round_wall_s": 550,
+    # No wall-clock round cap: cost is bounded by sim horizon (max_steps) only so
+    # scores stay load-invariant. Platform input schema has no wall-clock override.
     "workers": 2,
     "record_stride": 8,
     "records_enabled": True,
@@ -220,7 +221,6 @@ class NistLiteReferee(Referee):
         cfg = {**DEFAULTS, **(ctx.config or {})}
         per = int(cfg["episodes_per_stratum"])
         deadline_ms = int(cfg["deadline_ms"])
-        round_wall_s = float(cfg.get("round_wall_s", 550))
         stride = int(cfg["record_stride"]) if cfg["records_enabled"] else 0
         split = os.environ.get("NIST_SPLIT", "live")
         round_ranges, conds = _sample(ctx.seed, per, split)
@@ -253,13 +253,8 @@ class NistLiteReferee(Referee):
             player_fault = f"reset failed: {type(e).__name__}"
 
         calls = 0
-        round_t0 = time.perf_counter()
-        hit_round_wall = False
         for _ in range(max_steps):
             if player_fault:
-                break
-            if (time.perf_counter() - round_t0) >= round_wall_s:
-                hit_round_wall = True
                 break
             for c in conns:
                 c.send(("obs",))
@@ -287,11 +282,7 @@ class NistLiteReferee(Referee):
             for c in conns:
                 c.recv()
 
-        reason = (
-            "player_fault"
-            if player_fault
-            else ("round_wall" if hit_round_wall else "time_limit")
-        )
+        reason = "player_fault" if player_fault else "time_limit"
         for c in conns:
             c.send(("fail_all", reason))
         for c in conns:
@@ -354,6 +345,8 @@ class NistLiteReferee(Referee):
 
         metadata = {
             "schema_version": 1,
+            "nist_profile": _PROFILE_NAME,
+            "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
             "summary": summary,
             "units": [
                 {
@@ -395,6 +388,8 @@ class NistLiteReferee(Referee):
             },
             "details": {
                 "format": RECORD_FORMAT,
+                "nist_profile": _PROFILE_NAME,
+                "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
                 "round_condition_ranges": round_ranges,
                 "player_calls": calls,
                 "player_fault": player_fault,
@@ -405,6 +400,13 @@ class NistLiteReferee(Referee):
                 },
             },
         }
+        # Always print the active profile so image/preview logs prove v07 bake.
+        print(
+            f"nist_lite profile={_PROFILE_NAME} assembly="
+            f"{'III' if ASSEMBLY_III else ('II' if COMPOUND else 'I')} "
+            f"episodes={n} raw_score={raw_score:.4f}",
+            flush=True,
+        )
         return GameResult(
             raw_scores=[raw_score],
             winner=0 if successes else -1,
@@ -446,13 +448,17 @@ class NistLiteReferee(Referee):
                         {
                             "format": RECORD_FORMAT,
                             "kind": "round",
+                            "nist_profile": _PROFILE_NAME,
+                            "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
                             "round_condition_ranges": round_ranges,
                         }
                     )
                     + "\n"
                 )
                 for r in rows:
-                    f.write(json.dumps(r) + "\n")
+                    row = dict(r)
+                    row["nist_profile"] = _PROFILE_NAME
+                    f.write(json.dumps(row) + "\n")
             for i, steps in traj.items():
                 (HISTORY_DIR / f"traj_{i:05d}.json").write_text(
                     json.dumps(

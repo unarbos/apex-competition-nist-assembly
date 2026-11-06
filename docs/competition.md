@@ -1,13 +1,26 @@
 # NIST Assembly Competition
 
-Docs page text for v0.6.3 (replaces the v0.5.1 page). Platform-wide items that Macrocosmos
-sets (submission fee, rate limits) are not repeated here.
+Docs page text for v0.7.1 (Assembly III). Platform-wide items that Macrocosmos sets
+(submission fee, rate limits) are not repeated here.
 
 ### NIST Assembly Competition
 
 **Getting a peg to the hole is not the same as seating it.** The last millimetre is the hard part: with 0.25 to 0.8 mm of radial clearance, the contact that completes an insertion is the same contact that jams it. A peg still held in the gripper has not been assembled, and on a full board each seated peg is one more thing the gripper can knock out on the way to the next.
 
-The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper on a Cartesian stage** (x, y, z, yaw) through **multi-peg sequential assembly** on a board modelled on the **NIST Assembly Task Board #1**, simulated in MuJoCo on CPU. Miners submit an ONNX policy that outputs incremental stage and gripper commands at 25 Hz. The setup borrows from AlphaNIST (Zhang et al., arXiv 2610.13354): the ATB-1 board, the 1 mm success criterion, 25 Hz control, diverse start states and free-order multi-part episodes. It is much smaller: pegs only, primitive geometry, a 4-DoF stage instead of a 7-DoF arm, and noisy state estimates instead of point clouds. Since v0.6 every episode is a **compound assembly task**: pegs, collars and twist-locks with random ordering constraints, parts arriving in waves, and physics that changes between subtasks. Scoring gives partial credit per step so that a ranked competition has a gradient.
+The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper on a Cartesian stage** (x, y, z, yaw) through **multi-peg sequential assembly** on a board modelled on the **NIST Assembly Task Board #1**, simulated in MuJoCo on CPU. Miners submit an ONNX policy that outputs incremental stage and gripper commands at 25 Hz. The setup borrows from AlphaNIST (Zhang et al., arXiv 2610.13354): the ATB-1 board, the 1 mm success criterion, 25 Hz control, diverse start states and free-order multi-part episodes. It is much smaller: pegs only, primitive geometry, a 4-DoF stage instead of a 7-DoF arm, and noisy state estimates instead of point clouds. Since v0.6 every episode is a **compound assembly task**; v0.7 adds rework, press-gated screws, stack rings and obs-indexed keys. Scoring gives weighted partial credit per step so that a ranked competition has a gradient. Cost is bounded by the sim horizon only — same policy and seed score the same under any machine load.
+
+**What changed in v0.7.1**
+
+* **Referee image bakes `NIST_PROFILE=v07`.** The v0.7.0 image still had `v06` in the Dockerfile, so `setdefault` never promoted the live task.
+* **No wall-clock scoring caps.** Removed `round_wall_s` and the per-episode 18 s wall. Horizon (≤ 1400 steps) is the only cost bound inside the referee.
+* **Stack / key / latch fixes.** Stack hold counting works; key yaw is reachable on non-round pegs and `key_tol` is shown; completed hard steps stay completed.
+* **Docs match code.** Weights insert 0.30 / collar 0.25 / twist 0.25 / screw 0.40 / rework 2.10 / stack 2.60 / key 3.40; c4 waves at most 2; profile `clearance` is wired via `conditions.active_ranges()` (v07 draws 0.20–0.68 mm). Result/records log `nist_profile`. Hard steps (key/stack/rework) are all-or-nothing for scoring.
+
+**What changed in v0.7.0 (Assembly III, breaking)**
+
+* New step kinds: `rework`, `screw`, `stack`, `key`. Denser graphs, late reveals, `swap_bias` events.
+* Observation stays 288-d; encodings reuse twist/collar channels (see README).
+* Live default profile `v07`; `NIST_PROFILE=v06` still selects Assembly II for regression.
 
 **What changed in v0.6.3**
 
@@ -185,7 +198,7 @@ The privileged solver is a limited reference. It doesn't adapt to the between-st
 * **Read the graph.** The task table and blocked flags say which steps are open; out-of-order completions earn `max(0.30, 0.15 × in-order credit)`.
 * **Expect the physics to change mid-episode.** After a step completes, friction, gain, mass, latency or the estimate bias may shift. Force/torque and the effect of your own actions are the only signals.
 * **The headroom is large.** The privileged solver scores about 0.41, and 0.24 on c4, and it is not adaptive. A privileged teacher distilled into an observation-only student, followed by RL, is a reasonable route. Naive behaviour cloning of our solver scores near zero, because the solver relies on true state.
-* **Train against the real simulator.** `referee/nist_sim` imports directly: with `NIST_PROFILE=v06`, `nist_sim.compound.sample_compound(seed, per_stratum)` draws a round's episodes and `CompoundEpisode(cond, rng).step(action)` is the exact simulator used for scoring. `tools/compound_solver.py` is the privileged reference, and `tools/calib_v06.py` scores policies on the compound task.
+* **Train against the real simulator.** `referee/nist_sim` imports directly: with `NIST_PROFILE=v07` (live), `nist_sim.compound_v07.sample_compound_v07(seed, per_stratum)` draws a round's episodes and `AssemblyIIIEpisode(cond, rng).step(action)` is the exact simulator used for scoring. `NIST_PROFILE=v06` still selects the Assembly II generator. `tools/compound_solver.py --honest` is the privileged reference for calibration bars, and `tools/calib_v06.py --profile v07` scores policies on Assembly III.
 * **Use the repo tools.** `tools/local_run.py` scores a policy on any seed, and the README has the exact two-container Docker loop the platform runs.
 * **Don't overfit the dev seeds.** Live rounds add private build entropy, and some families and condition ranges are held out entirely.
 * The full environment is public at [apex-competition-nist-assembly](https://github.com/macrocosm-os/apex-competition-nist-assembly).

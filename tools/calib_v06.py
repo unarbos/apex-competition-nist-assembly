@@ -50,13 +50,14 @@ BARS = {
 SCRIPTED = {"baseline", "obs_scripted", "compound_scripted", "v06_style", "refport"}
 # v0.7 Assembly III bars (success criteria from the v0.7-dev brief).
 BARS_V07 = {
+    # Honest privileged (no step_done / collar_run / _key_hold snaps). Image-calib bars.
     "privileged_min_compound": 0.50,
-    "c4_privileged_max": 0.50,  # c4 still below privileged mean; headroom vs kings
-    "scripted_max": 0.30,  # v0.6-style / revealed-king ceiling on v0.7
+    "c4_privileged_max": 0.70,
+    "scripted_max": 0.25,  # v0.6-style / revealed-king ceiling on v0.7.1
     "obs_scripted_max": 0.15,
-    "scripted_ratio_max": 0.70,
+    "scripted_ratio_max": 0.55,
     "reroll_identical_min": 0.95,
-    "projected_live_s_max": 600.0,  # 64-ep live on 2 CPU
+    "projected_live_s_max": 600.0,  # target; hard ceiling remains platform 1800 s
 }
 
 
@@ -146,7 +147,13 @@ def run_compound(job: tuple) -> dict:
     if base == "reference":
         from compound_solver import solve_compound
 
-        r = solve_compound(e)
+        # v0.7 calibration bar must be honest (no oracle step_done / hold snaps).
+        # Pass oracle=True only via the legacy ``reference_oracle`` spec.
+        r = solve_compound(e, oracle=False if v07 else True)
+    elif base == "reference_oracle":
+        from compound_solver import solve_compound
+
+        r = solve_compound(e, oracle=True)
     elif base == "v06_style":
         from v06_style_scripted import solve_v06_style
 

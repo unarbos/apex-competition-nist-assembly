@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.0 (Assembly III)
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.1 (Assembly III)
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -17,8 +17,8 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.0` | ☑ |
-| `spec.yaml` version `0.7.0` with v0.7.0 digests; `apex-dev preflight` passes (stage + prod) | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.1` (pending Apex cut) | ☐ |
+| `spec.yaml` version `0.7.1`; digests pinned after Apex release | `spec.yaml` | ☐ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:f8a6650f3e6f1beab956f601cf1a78f10a929dec57b88d4140d6ad28ef568bc4` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:5bb01fad9698cfa0cba152a31259f196fa7cf2e363b376ec5a3fa24a4b6168bd` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -206,20 +206,24 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   `body_conaffinity` are the only fields it changes besides the mass-derived constants.
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
-## 13. v0.7.0 (Assembly III, live)
-- Profile `v07` is the live referee default (`referee.py` sets `NIST_PROFILE=v07`).
-  Spec version `0.7.0`. Digests pinned from release run 42108807434.
+## 13. v0.7.1 (Assembly III, live)
+- Profile `v07` is the live referee default. Image Dockerfile bakes `NIST_PROFILE=v07`;
+  `referee.py` uses `setdefault("NIST_PROFILE", "v07")`. Spec version `0.7.1`.
 - Module `referee/nist_sim/compound_v07.py`: denser tiers, `rework` / `screw` / `stack` / `key`,
-  press-gated screws, obs-indexed key yaw, late reveals, `swap_bias` events. Weight lands on
-  key/rework/stack so open-loop v0.6 controllers cannot clear the mean.
-- Eval caps: `deadline_ms=80`, `round_wall_s=550`, episode wall 18 s, `MAX_HORIZON=1000`.
+  press-gated screws, reachable obs-indexed key yaw, late reveals, `swap_bias` events.
+  Weights: insert 0.45, collar 0.60, twist 0.60, screw 1.00, rework 1.50, stack 1.40, key 1.80.
+  Results and records carry `nist_profile` so preview runs can verify the image bake.
+- Eval bounds: `deadline_ms=80`, `MAX_HORIZON=1400`. **No** `round_wall_s` / episode wall clock
+  (scores are load-invariant). c4 waves at most 2. Profile `clearance` is not wired.
 - Observation remains 288-d; v0.7 encodings reuse twist/collar channels (see README / DESIGN).
-- Privileged solver (`tools/compound_solver.py`), v0.6-style port (`tools/v06_style_scripted.py`),
-  and `tools/compound_obs_scripted.py`; `tools/calib_v06.py --profile v07`.
-- Calibration (seed 7, 8/stratum, 64 eps): privileged **0.577** (c4 **0.497**), v0.6-style
-  **0.126**, obs-only **0.016**, zero **0.003**; projected live ≤159 s. Details in
-  `CALIBRATION.md`.
-- Design notes: `docs/v0.7/DESIGN.md`.
+- Privileged solver must use `--honest` / `oracle=False` for the calibration bar.
+  Also `tools/v06_style_scripted.py`, `tools/compound_obs_scripted.py`,
+  `tools/calib_v06.py --profile v07`.
+- Design notes: `docs/v0.7/DESIGN.md`. See `CALIBRATION.md` for measured bars.
+
+## 13b. v0.7.0 (superseded)
+- Spec `0.7.0`, digests from release run 42108807434. Preview blocked by Macrocosmos:
+  image baked `v06`, wall-clock caps, stack/key/latch bugs, oracle-inflated privileged bar.
 
 ## 14. Supersedes
 PR #6 (`v0.1.6` efficiency-on-single-peg) is superseded by this multi-peg redesign. The

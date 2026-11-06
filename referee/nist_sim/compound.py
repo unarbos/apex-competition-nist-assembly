@@ -772,9 +772,18 @@ class CompoundEpisode(Episode):
                 self.twist_acc[i] += wrap(y - self._twist_prev[i])
             self._twist_prev[i] = y
         for j in range(self.n_collars):
+            # Stack rings seat on the peg top; AssemblyIIIEpisode updates their hold
+            # counters. Resetting them from the block-seat test would pin the run at 0/1.
+            if self.cs.collars[j].is_stack:
+                continue
             self.collar_run[j] = self.collar_run[j] + 1 if self._collar_seated_now(j) else 0
         # Step bookkeeping.
         for k, s in enumerate(self.cs.steps):
+            # v0.7 hard steps: AssemblyIIIEpisode re-evaluates after correcting screw /
+            # stack / key state. Do not un-mark or fire their completion here — that
+            # would flicker done_at (and double-count key hold via _step_state).
+            if s.kind in ("screw", "key", "stack", "rework"):
+                continue
             done, prog = self._step_state(k)
             self.step_progress[k] = max(self.step_progress[k], prog)
             if done and not self.step_done[k]:
@@ -847,8 +856,10 @@ class CompoundEpisode(Episode):
                 task[b + 2] = s.twist_dir
                 task[b + 3] = float(np.clip(self.twist_acc[s.peg] * s.twist_dir / s.twist_target, 0.0, 1.0))
                 task[b + 4] = float(self.step_blocked(k))
-            else:
-                task[b + 5] = 1.0
+            elif s.kind in ("collar", "stack"):
+                # Collar flag only — do not write 1.0 for key/screw/rework (those reuse
+                # twist channels; key_tol packs into b+5 when this flag is unused).
+                task[b + 5] = 1.0 if s.kind == "collar" else 2.0
         col = np.zeros(MAX_COLLARS * COLLAR_FEAT)
         for k, s in enumerate(self.cs.steps):
             if s.kind not in ("collar", "stack"):
