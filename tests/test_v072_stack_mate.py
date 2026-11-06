@@ -110,7 +110,7 @@ def test_twist_screw_bernoulli_appear_on_live_draw():
 
 
 def test_scripted_ungripped_hold_mates_stack():
-    """Interference rest: ≥4 released steps in zone must pin via `_maybe_mate_stacks`."""
+    """Armed ring + ≥STACK_MATE_HOLD released frames in zone pins via `_maybe_mate_stacks`."""
     ep, sk, _ = _first_stack_ep()
     s = ep.cs.steps[sk]
     j, i = s.part, s.peg
@@ -126,9 +126,12 @@ def test_scripted_ungripped_hold_mates_stack():
     ep.data.qpos[0:3] = [hx + 0.06, hy + 0.06, 0.14]
     ep.data.qpos[4] = 0.012
     mujoco.mj_forward(ep.model, ep.data)
+    # Seed arm as a prior deliberate closed-grasp place would (contact-free teleport
+    # does not create pad touch, so we cannot arm through physics here).
+    ep._stack_mate_arm[j] = 2
     assert ep._stack_in_mate_zone(j)
     assert ep._stack_release_clear(j)
-    for _ in range(STACK_MATE_HOLD + SEATED_HOLD + 4):
+    for _ in range(STACK_MATE_HOLD + SEATED_HOLD + 6):
         ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
         if ep.step_done[sk]:
             break

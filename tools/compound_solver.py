@@ -34,6 +34,7 @@ from nist_sim.compound import (  # noqa: E402
     wrap,
 )
 from nist_sim.compound_v07 import (  # noqa: E402
+    STACK_MATE_HOLD,
     AssemblyIIIEpisode,
     compound_score_v07,
     sample_compound_v07,
@@ -300,16 +301,17 @@ def collar_routine(ep: CompoundEpisode, j: int, stack: bool = False) -> Iterator
             # Release: open jaws first at place height (radial grasp gone; latch may count
             # via open-gripper clear), then rise so pads leave. Do not lift while closed —
             # that drags an interference-fit ring off the peg.
-            yield from ctl.wait(6, grip=1.0)
+            yield from ctl.wait(8, grip=1.0)
             peg_p, _ = ep.peg_pose(col.peg)
             peg_top = peg_p[2] + PEG_LEN / 2
             clear_z = peg_top + COLLAR_H / 2 - PAD_CENTRE_Z + 0.022
-            for _ in range(45):
-                yield ctl.act([hx, hy, clear_z], None, 1.0, speed=0.40)
+            for _ in range(50):
+                yield ctl.act([hx, hy, clear_z], None, 1.0, speed=0.35)
                 if float(ep.data.qpos[2]) >= clear_z - 0.0015:
                     break
-            # Idle above the peg so `_maybe_mate_stacks` can finish the ungripped hold.
-            yield from ctl.wait(max(14, SEATED_HOLD_WAIT()), grip=1.0)
+            # Idle above the peg so `_maybe_mate_stacks` can finish the ungripped hold
+            # (STACK_MATE_HOLD may be 5+ frames under the hardened latch).
+            yield from ctl.wait(max(18, SEATED_HOLD_WAIT(), STACK_MATE_HOLD + 8), grip=1.0)
             yield from ctl.goto([hx + 0.05, hy + 0.05, 0.12], None, 1.0, max_n=35)
             yield from ctl.wait(6, grip=1.0)
         else:

@@ -133,12 +133,13 @@ class MinerStackPlacer:
             a[2] = np.clip((place_z - hz) / DXYZ, -0.25, 0.25)
             a[4] = -1.0
             self.timer += 1
-            aligned = float(np.hypot(*residual)) < 0.0015 and abs(hz - place_z) < 0.005
+            # Tighter mate zone (STACK_MATE_XY≈2.8 mm): demand smaller residual before hold.
+            aligned = float(np.hypot(*residual)) < 0.0010 and abs(hz - place_z) < 0.004
             # Do not open on the first aligned frame — enter ``hold`` so the latch can arm.
-            if aligned and self.timer > 20:
+            if aligned and self.timer > 25:
                 self.phase = "hold"
                 self.timer = 0
-            elif self.timer > 120:
+            elif self.timer > 140:
                 self.phase = "hold"
                 self.timer = 0
         elif self.phase == "hold":
@@ -147,25 +148,25 @@ class MinerStackPlacer:
             a[2] = np.clip((place_z - hz) / DXYZ, -0.15, 0.15)
             a[4] = -1.0
             self.timer += 1
-            if self.timer > 12:
+            if self.timer > 14:
                 self.phase = "open"
                 self.timer = 0
         elif self.phase == "open":
             # Open jaws in place first — do not lift while closed (drags interference ring).
-            a[0:2] = np.clip((-residual) / DXYZ, -0.12, 0.12)
+            a[0:2] = np.clip((-residual) / DXYZ, -0.10, 0.10)
             a[2] = 0.0
             a[4] = 1.0
             self.timer += 1
-            if self.timer > 14:
+            if self.timer > 16:
                 self.phase = "rise"
                 self.timer = 0
         elif self.phase == "rise":
-            # Slow rise while holding XY; latch counts released frames in zone / armed settle.
-            a[0:2] = np.clip((-residual) / DXYZ, -0.08, 0.08)
-            a[2] = 0.18
+            # Slow rise while holding XY; latch counts released frames (STACK_MATE_HOLD=6).
+            a[0:2] = np.clip((-residual) / DXYZ, -0.06, 0.06)
+            a[2] = 0.15
             a[4] = 1.0
             self.timer += 1
-            if self.timer > 55:
+            if self.timer > 70:
                 self.phase = "idle"
                 self.timer = 0
         else:
