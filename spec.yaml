@@ -15,7 +15,7 @@ resources:
 # Digests remain v0.7.0 until Apex cuts the v0.7.1 release and pin PR.
 image:
   ref: ghcr.io/unarbos/apex-competition-nist-assembly-player
-  digest: sha256:f8a6650f3e6f1beab956f601cf1a78f10a929dec57b88d4140d6ad28ef568bc4
+  digest: sha256:ec8d617e10e5bde4504e5c9b331d51c614d624219b61c284ff9d9e03ca1c0bf0
 
 submission:
   artifact_type: onnx
@@ -56,7 +56,7 @@ referee:
   image:
     # Private package; built with reserved.json from the NIST_HELDOUT_SEED build secret.
     ref: ghcr.io/unarbos/apex-competition-nist-assembly-referee
-    digest: sha256:5bb01fad9698cfa0cba152a31259f196fa7cf2e363b376ec5a3fa24a4b6168bd
+    digest: sha256:a14fa69a77005d832f139a512d2d81a3845f1f83bc336cb715fb69f17fbd1d91
   timeout_s: 1800
 
 signature:
