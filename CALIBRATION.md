@@ -24,12 +24,23 @@ NIST_PROFILE=v07 python tools/calib_v06.py --profile v07 --seeds 7 --per 8 --wor
 
 | Policy | mean (seed 7, 8/stratum, 64 eps) | wall_s | notes |
 |---|---|---|---|
-| privileged reference (honest) | **0.503** | ~702 | true-state; normal predicates |
-| v0.6-style scripted | **0.273** | (same harness) | insert/collar/twist only |
-| obs-only compound_scripted | **0.033** | (same harness) | in-process |
-| zero (built images) | **0.006** | **144** | `nist_profile=v07` in result/records |
+| privileged reference (honest) | **0.533** | in-process | true-state; normal predicates |
+| v0.6-style scripted | **0.162** | in-process | insert/collar/twist only |
+| 5CfGwv (images) | **0.176** | **250** | through built images |
+| 5GHgWv (images) | **0.221** | **256** | through built images |
+| 5Gj14m (images) | **0.203** | **216** | through built images |
+| zero (images) | **0.002** | **146** | `nist_profile=v07` |
+| obs-only compound_scripted | **0.005** | in-process | low |
 
-64-ep zero through referee+player images: **144 s ≪ 1800 s**. Platform timeout is a non-scoring abort only.
+King ONNX files are **never** committed. 64-ep image walls **256 s ≪ 600 s** target (≪ 1800 s platform). Determinism: identical scores across 2 image runs.
+
+Reproduce ONNX-through-images (pass your own paths; no ONNX is shipped):
+
+```bash
+DOCKER_BUILDKIT=1 docker build -f referee/Dockerfile -t nist-assembly-referee:v071 .
+DOCKER_BUILDKIT=1 docker build -f player/Dockerfile -t nist-assembly-player:v071 .
+python tools/image_eval_onnx.py --seed 7 --full /path/to/policy.onnx
+```
 
 ## v0.7.0 (superseded — oracle-inflated privileged bar)
 

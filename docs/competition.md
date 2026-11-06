@@ -14,7 +14,7 @@ The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper
 * **Referee image bakes `NIST_PROFILE=v07`.** The v0.7.0 image still had `v06` in the Dockerfile, so `setdefault` never promoted the live task.
 * **No wall-clock scoring caps.** Removed `round_wall_s` and the per-episode 18 s wall. Horizon (≤ 1400 steps) is the only cost bound inside the referee.
 * **Stack / key / latch fixes.** Stack hold counting works; key yaw is reachable on non-round pegs and `key_tol` is shown; completed hard steps stay completed.
-* **Docs match code.** Weights insert 0.45 / collar 0.60 / twist 0.60 / screw 1.00 / rework 1.50 / stack 1.40 / key 1.80; c4 waves at most 2; profile `clearance` is wired via `conditions.active_ranges()` (v07 draws 0.20–0.68 mm). Result/records log `nist_profile`.
+* **Docs match code.** Weights insert 0.30 / collar 0.25 / twist 0.25 / screw 0.40 / rework 2.10 / stack 2.60 / key 3.40; c4 waves at most 2; profile `clearance` is wired via `conditions.active_ranges()` (v07 draws 0.20–0.68 mm). Result/records log `nist_profile`. Hard steps (key/stack/rework) are all-or-nothing for scoring.
 
 **What changed in v0.7.0 (Assembly III, breaking)**
 

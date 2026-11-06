@@ -37,13 +37,13 @@ Same rubric family as v0.6 (done = 0.70 + 0.30·time; out-of-order floored at pa
 
 | kind | weight |
 |---|---|
-| insert | 0.45 |
-| collar | 0.60 |
-| twist | 0.60 |
-| screw | 1.00 |
-| rework | 1.50 |
-| stack | 1.40 |
-| key | 1.80 |
+| insert | 0.30 |
+| collar | 0.25 |
+| twist | 0.25 |
+| screw | 0.40 |
+| rework | 2.10 |
+| stack | 2.60 |
+| key | 3.40 |
 
 ## Release bars (calibration, honest privileged)
 
@@ -51,9 +51,10 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
 (no helpers that set `step_done` / `collar_run` / `_key_hold` directly).
 
 - Privileged (honest) ≥ ~0.50 overall.
-- v0.6-style scripted ≤ ~0.30.
+- v0.6-style / revealed v0.6 kings ≤ ~0.25 (through built images).
 - Obs-only / zero low (≤ ~0.15).
-- 64-ep live eval well under the 1800 s platform timeout (no referee wall-clock score cuts).
+- 64-ep live eval well under the 1800 s platform timeout (target ≤ ~600 s for slow kings);
+  no referee wall-clock score cuts — platform timeout is a non-scoring abort only.
 
 ## v0.7.1 fixes (Macrocosmos preview blockers)
 

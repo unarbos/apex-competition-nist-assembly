@@ -94,70 +94,71 @@ STEP_KINDS_V07 = ("insert", "collar", "twist", "rework", "screw", "stack", "key"
 # do not index keys, extract mis-seats, or stack on peg tops. Weight those gates hard.
 # Hard steps dominate so v0.6-style (insert/collar/twist only) stays ≤~0.30; honest privileged
 # that finishes keys/stacks/rework clears ≥~0.50.
+# Hard adaptive steps dominate total weight so v0.6 kings (insert/collar/twist/screw) stay
+# ≤~0.25 even when they clear those kinds at ~0.9. Honest privileged clears keys/stacks/rework.
 STEP_WEIGHT_V07 = {
-    "insert": 0.45,
-    "collar": 0.60,
-    "twist": 0.60,
-    "screw": 1.00,
-    "rework": 1.50,
-    "stack": 1.40,
-    "key": 1.80,
+    "insert": 0.30,
+    "collar": 0.25,
+    "twist": 0.25,
+    "screw": 0.40,
+    "rework": 2.10,
+    "stack": 2.60,
+    "key": 3.40,
 }
 # Short budgets + hard horizon keep slow ONNX kings inside the ~600 s / 64-ep / 2-CPU bar.
 STEP_BUDGET_V07 = {
-    "insert": 160,
-    "collar": 120,
-    "twist": 90,
-    "rework": 200,
-    "screw": 180,
-    "stack": 150,
-    "key": 110,
+    "insert": 140,
+    "collar": 100,
+    "twist": 80,
+    "rework": 220,
+    "screw": 160,
+    "stack": 160,
+    "key": 130,
 }
-REWORK_EXTRA = 30
+REWORK_EXTRA = 40
 MAX_HORIZON_V07 = 1400  # hard sim-step cap; no wall-clock episode cut
 TIER_CFG_V07 = {
-    # Key/rework/stack still gate v0.6 kings; density tuned so honest privileged ≥~0.50.
+    # Density: keys dominate; stacks require precise mate; reworks are secondary.
+    # edge_p / event_p / reveal_p force obs-conditioned adaptation; slack keeps privileged room.
     "c1": dict(
-        extra_pegs=0, collar_frac=0.22, twist_frac=0.08, screw_frac=0.22, rework_frac=0.12,
-        stack_frac=0.15, key_frac=0.25, waves=(1, 1), edge_p=0.00, event_p=0.03, slack=1.60,
-        reveal_p=0.20,
+        extra_pegs=0, collar_frac=0.12, twist_frac=0.04, screw_frac=0.08, rework_frac=0.22,
+        stack_frac=0.28, key_frac=0.28, waves=(1, 1), edge_p=0.10, event_p=0.14, slack=1.60,
+        reveal_p=0.35, max_keys=1,
     ),
     "c2": dict(
-        extra_pegs=0, collar_frac=0.22, twist_frac=0.08, screw_frac=0.26, rework_frac=0.15,
-        stack_frac=0.18, key_frac=0.32, waves=(1, 1), edge_p=0.02, event_p=0.05, slack=1.45,
-        reveal_p=0.30,
+        extra_pegs=0, collar_frac=0.12, twist_frac=0.04, screw_frac=0.10, rework_frac=0.26,
+        stack_frac=0.32, key_frac=0.32, waves=(1, 2), edge_p=0.14, event_p=0.20, slack=1.45,
+        reveal_p=0.45, max_keys=1,
     ),
     "c3": dict(
-        extra_pegs=0, collar_frac=0.20, twist_frac=0.06, screw_frac=0.30, rework_frac=0.18,
-        stack_frac=0.22, key_frac=0.40, waves=(1, 2), edge_p=0.03, event_p=0.08, slack=1.25,
-        reveal_p=0.40,
+        extra_pegs=1, collar_frac=0.10, twist_frac=0.03, screw_frac=0.10, rework_frac=0.26,
+        stack_frac=0.30, key_frac=0.36, waves=(1, 2), edge_p=0.14, event_p=0.20, slack=1.40,
+        reveal_p=0.45, max_keys=2,
     ),
     "c4": dict(
         # waves=(2, 2): at most 2 waves on c4 (docs previously claimed "up to 5"; code wins).
-        extra_pegs=1, collar_frac=0.18, twist_frac=0.05, screw_frac=0.34, rework_frac=0.22,
-        stack_frac=0.24, key_frac=0.48, waves=(2, 2), edge_p=0.05, event_p=0.12, slack=1.10,
-        reveal_p=0.50,
+        extra_pegs=1, collar_frac=0.10, twist_frac=0.02, screw_frac=0.08, rework_frac=0.28,
+        stack_frac=0.32, key_frac=0.40, waves=(2, 2), edge_p=0.16, event_p=0.24, slack=1.28,
+        reveal_p=0.50, max_keys=2,
     ),
 }
-# Residuals stay large enough that open-loop trajectories miss; privileged uses true state.
-NOISE_SCALE_V07 = dict(slot_bias=0.45, peg_delta=0.40, glitch=0.40, drift=0.45)
-EVENT_KINDS_V07 = EVENT_KINDS + ("swap_bias",)
-EVENT_WEIGHTS_V07 = np.array([0.14, 0.14, 0.12, 0.10, 0.18, 0.16, 0.16])
+# Residuals large enough that open-loop / hard-coded trajectories miss; privileged uses true state.
+NOISE_SCALE_V07 = dict(slot_bias=0.45, peg_delta=0.42, glitch=0.40, drift=0.42)
+EVENT_KINDS_V07 = EVENT_KINDS + ("swap_bias", "misseat")
+EVENT_WEIGHTS_V07 = np.array([0.13, 0.13, 0.11, 0.09, 0.15, 0.13, 0.14, 0.12])
 # Multi-turn press-twists; pitch drawn per step and shown in obs when revealed.
-# Kept short enough that a press+yaw privileged controller can finish without oracle snaps
-# (MuJoCo soft contacts rarely rotate the peg itself under palm press).
-SCREW_TARGET = (0.25, 0.45)
-KEY_TOL = (0.10, 0.16)  # yaw-index; observable via sin/cos in the task channels
-STACK_SEAT_XY = 0.0045
-STACK_SEAT_Z_CLEAR = 0.0040
+SCREW_TARGET = (0.30, 0.55)
+KEY_TOL = (0.08, 0.13)  # yaw-index; still reachable for privileged true-state nudge
+STACK_SEAT_XY = 0.0038
+STACK_SEAT_Z_CLEAR = 0.0032
 # Screw press: palm must be on the peg (touch). Free-twist open-grip scripts still get 0.
 PRESS_PALM_MARGIN = 0.001
-# Rework pegs sit only this deep in the wrong hole so a grip+yank can extract them.
-REWORK_SEAT_DEPTH = 0.0015
-# Stack rings are clearance-fit; free physics drops them to the block. A successful place
-# in the peg-top zone mates (pins) the ring so hold-counting is achievable.
-STACK_MATE_XY = 0.0055
-STACK_MATE_Z = 0.0055
+# Rework pegs sit deep enough that casual yanks miss; privileged extract_routine still clears.
+REWORK_SEAT_DEPTH = 0.0030
+# Stack rings are clearance-fit; free physics drops them to the block. Mate zone is tight so
+# accidental near-peg placements by v0.6 kings do not auto-pin.
+STACK_MATE_XY = 0.0040
+STACK_MATE_Z = 0.0040
 
 OBS_DIM_V07 = OBS_DIM_V06  # 288; encodings reuse v0.6 channels
 
@@ -178,18 +179,21 @@ def _soften_noise_v07(cond: EpisodeConditions) -> None:
 def _draw_event_v07(rng: np.random.Generator) -> dict:
     kind = str(rng.choice(EVENT_KINDS_V07, p=EVENT_WEIGHTS_V07 / EVENT_WEIGHTS_V07.sum()))
     if kind == "friction":
-        return dict(kind=kind, scale=float(rng.uniform(0.40, 1.9)))
+        return dict(kind=kind, scale=float(rng.uniform(0.30, 2.2)))
     if kind == "gain":
-        return dict(kind=kind, scale=float(rng.uniform(0.45, 1.55)))
+        return dict(kind=kind, scale=float(rng.uniform(0.35, 1.75)))
     if kind == "mass":
-        return dict(kind=kind, scale=float(rng.uniform(0.55, 2.4)))
+        return dict(kind=kind, scale=float(rng.uniform(0.45, 2.6)))
     if kind == "delay":
-        return dict(kind=kind, steps=int(rng.integers(0, 4)))
+        return dict(kind=kind, steps=int(rng.integers(0, 5)))
     if kind == "rebias":
-        return dict(kind=kind, mag=float(rng.uniform(0.0015, 0.006)), ang=float(rng.uniform(0, 2 * math.pi)))
+        return dict(kind=kind, mag=float(rng.uniform(0.0020, 0.008)), ang=float(rng.uniform(0, 2 * math.pi)))
     if kind == "swap_bias":
         return dict(kind=kind)  # reshuffle peg-vs-slot residuals (handled in episode)
-    return dict(kind=kind, sigma=float(rng.uniform(0.12, 0.28)))
+    if kind == "misseat":
+        # Lift a seated peg partially out — must be re-detected from obs and re-seated.
+        return dict(kind=kind, lift=float(rng.uniform(0.006, 0.014)))
+    return dict(kind=kind, sigma=float(rng.uniform(0.14, 0.32)))
 
 
 def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: str) -> CompoundSpec:
@@ -275,30 +279,29 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
     # pegs must index near a seated symmetry of the slot.
     twist_or_screw = set(twist_pegs) | set(screw_pegs)
     key_cands = [i for i in range(K) if i not in rework_pegs and i not in twist_or_screw]
-    n_key = min(len(key_cands), int(round(cfg["key_frac"] * K)))
-    key_pegs = set(rng.choice(key_cands, size=n_key, replace=False).tolist() if n_key else [])
+    max_keys = int(cfg.get("max_keys", 2))
+    n_key = min(len(key_cands), max_keys, max(1, int(round(cfg["key_frac"] * K))))
+    key_pegs = set(rng.choice(key_cands, size=n_key, replace=False).tolist() if n_key and key_cands else [])
 
     # Guarantee every episode has a key gate — the main anti-king lever (obs-only yaw index).
     if not key_pegs and key_cands:
         key_pegs.add(int(rng.choice(key_cands)))
-    # Also keep at least one screw/rework/stack so v0.6 insert/collar scripts stay capped.
-    if not screw_pegs and not rework_pegs and not any(k == "stack" for _, k in ring_pegs):
-        if rounds_easy:
-            pick = int(rng.choice(rounds_easy))
-            if pick not in screw_pegs and pick not in key_pegs:
-                screw_pegs.append(pick)
-                twist_pegs = [i for i in twist_pegs if i != pick]
-            elif pick not in screw_pegs and not screw_pegs:
-                # Prefer a non-key round if possible; otherwise drop the key on that peg.
-                alt = [i for i in rounds_easy if i not in key_pegs]
-                use = int(rng.choice(alt)) if alt else pick
-                screw_pegs.append(use)
-                twist_pegs = [i for i in twist_pegs if i != use]
-                key_pegs.discard(use)
-        elif rounds:
-            use = int(rounds[0])
-            screw_pegs.append(use)
-            key_pegs.discard(use)
+    if len(key_pegs) > max_keys:
+        key_pegs = set(list(key_pegs)[:max_keys])
+    # Guarantee at least one stack or rework so insert/collar/screw-only kings stay capped.
+    if not rework_pegs and not any(k == "stack" for _, k in ring_pegs):
+        if remain or [i for i in cands if i not in {p for p, _ in ring_pegs}]:
+            pool = [i for i in cands if i not in {p for p, _ in ring_pegs}] or list(cands)
+            peg_i = int(rng.choice(pool))
+            if len(collars) < MAX_COLLARS:
+                r_in = cond.pegs[peg_i].spec.outer_radius() + float(rng.uniform(0.0006, 0.0012))
+                spot = _collar_spot(rng, cond, r_in + COLLAR_T, taken)
+                taken.append(spot)
+                w = int(rng.integers(peg_wave[peg_i], W))
+                collars.append(CollarSpec(peg=peg_i, r_in=r_in, offset_xy=spot, wave=w, kind="stack"))
+                ring_pegs.append((peg_i, "stack"))
+        elif free_slots and rework_cands:
+            rework_pegs[int(rework_cands[0])] = int(free_slots[0])
     # Guarantee every episode is compound (collar/twist fallback if somehow still bare).
     if not collars and not twist_pegs and not screw_pegs and not rework_pegs and not key_pegs:
         if cands:
@@ -463,6 +466,7 @@ class AssemblyIIIEpisode(CompoundEpisode):
         self._extracted = {i: False for i in self._rework_wrong}
         self._key_hold = [0] * cond.n_pegs
         self._stack_mated = [False] * len(cond.compound.collars)
+        self._stack_mate_run = [0] * len(cond.compound.collars)
         self._screw_hand_prev: dict[int, float | None] = {}
         super().__init__(cond, rng)
 
@@ -537,6 +541,7 @@ class AssemblyIIIEpisode(CompoundEpisode):
         for i in self._rework_wrong:
             self._extracted[i] = False
         self._stack_mated = [False] * self.n_collars
+        self._stack_mate_run = [0] * self.n_collars
         self._screw_hand_prev = {}
         self._key_hold = [0] * self.n_pegs
 
@@ -597,10 +602,23 @@ class AssemblyIIIEpisode(CompoundEpisode):
         mujoco.mj_forward(self.model, self.data)
 
     def _maybe_mate_stacks(self) -> None:
+        """Auto-mate only after a sustained hold in the mate zone (anti-king).
+
+        A single frame of near-peg contact is not enough — open-loop v0.6 kings that
+        sweep a ring past the peg top must not get a free pin. Privileged solvers call
+        ``_pin_stack_on_peg`` explicitly after a deliberate place.
+        """
+        if not hasattr(self, "_stack_mate_run"):
+            self._stack_mate_run = [0] * self.n_collars
         for j, col in enumerate(self.cs.collars):
             if not col.is_stack or self.collar_parked[j] or self._stack_mated[j]:
+                self._stack_mate_run[j] = 0
                 continue
-            if self._stack_in_mate_zone(j):
+            if self._stack_in_mate_zone(j) and not self._gripper_touching(self.collar_body[j]):
+                self._stack_mate_run[j] += 1
+            else:
+                self._stack_mate_run[j] = 0
+            if self._stack_mate_run[j] >= 4:
                 self._pin_stack_on_peg(j)
 
     def _stack_seated_now(self, j: int) -> bool:
@@ -659,6 +677,27 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 smag = float(np.linalg.norm(self._slot_bias_xy[i]))
                 sang = float(self.rng.uniform(0, 2 * math.pi))
                 self._slot_bias_xy[i] = np.array([smag * math.cos(sang), smag * math.sin(sang)])
+            self.events_fired.append(dict(ev, step=self.steps))
+            return
+        if ev["kind"] == "misseat":
+            # Partial unseat of a currently seated peg — insert/key/screw credit can drop.
+            seated = [i for i in range(self.n_pegs) if self.seated_now[i] and not self.peg_parked[i]]
+            if seated:
+                i = int(seated[int(self.rng.integers(0, len(seated)))])
+                p, q = self.peg_pose(i)
+                lift = float(ev.get("lift", 0.010))
+                self._set_free(
+                    self.peg_qadr[i], self.peg_vadr[i],
+                    [p[0], p[1], p[2] + lift], q,
+                )
+                self.seated_now[i] = False
+                self.seated_run[i] = 0
+                # Drop latch on insert/rework for this peg so credit must be re-earned.
+                for k, s in enumerate(self.cs.steps):
+                    if s.kind in ("insert", "rework") and s.peg == i:
+                        self.step_done[k] = False
+                        self.step_done_at[k] = -1
+                mujoco.mj_forward(self.model, self.data)
             self.events_fired.append(dict(ev, step=self.steps))
             return
         super()._fire_event(ev)
@@ -859,14 +898,23 @@ class AssemblyIIIEpisode(CompoundEpisode):
 
 
 def compound_score_v07(ep: AssemblyIIIEpisode | CompoundEpisode) -> dict:
-    """Weighted per-step score using v0.7 weights when new kinds are present."""
+    """Weighted per-step score using v0.7 weights when new kinds are present.
+
+    Key / stack / rework are all-or-nothing for scoring: near-miss partials do not
+    count. That keeps open-loop v0.6 kings from farming partial credit on adaptive
+    gates they never finish, while honest privileged still earns full weight on done.
+    """
     kinds = {s.kind for s in ep.cs.steps}
     if kinds <= {"insert", "collar", "twist"}:
         return _compound_score_v06(ep)
+    hard = {"key", "stack", "rework"}
     total = wsum = 0.0
     per_kind: dict[str, list[float]] = {k: [] for k in STEP_KINDS_V07}
     for k, s in enumerate(ep.cs.steps):
-        cr = step_credit(ep.step_done[k], ep.step_in_order[k], ep.step_done_at[k], ep.c.max_steps, ep.step_progress[k])
+        prog = ep.step_progress[k]
+        if s.kind in hard and not ep.step_done[k]:
+            prog = 0.0
+        cr = step_credit(ep.step_done[k], ep.step_in_order[k], ep.step_done_at[k], ep.c.max_steps, prog)
         w = STEP_WEIGHT_V07.get(s.kind, 1.0)
         total += w * cr
         wsum += w

@@ -52,12 +52,12 @@ SCRIPTED = {"baseline", "obs_scripted", "compound_scripted", "v06_style", "refpo
 BARS_V07 = {
     # Honest privileged (no step_done / collar_run / _key_hold snaps). Image-calib bars.
     "privileged_min_compound": 0.50,
-    "c4_privileged_max": 0.60,
-    "scripted_max": 0.30,  # v0.6-style / revealed-king ceiling on v0.7
+    "c4_privileged_max": 0.70,
+    "scripted_max": 0.25,  # v0.6-style / revealed-king ceiling on v0.7.1
     "obs_scripted_max": 0.15,
-    "scripted_ratio_max": 0.70,
+    "scripted_ratio_max": 0.55,
     "reroll_identical_min": 0.95,
-    "projected_live_s_max": 1800.0,  # must stay under platform timeout
+    "projected_live_s_max": 600.0,  # target; hard ceiling remains platform 1800 s
 }
 
 
