@@ -19,8 +19,8 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 |---|---|---|
 | Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.1` (pending Apex cut) | ☐ |
 | `spec.yaml` version `0.7.1`; digests pinned after Apex release | `spec.yaml` | ☐ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:f8a6650f3e6f1beab956f601cf1a78f10a929dec57b88d4140d6ad28ef568bc4` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:5bb01fad9698cfa0cba152a31259f196fa7cf2e363b376ec5a3fa24a4b6168bd` | ☑ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:ec8d617e10e5bde4504e5c9b331d51c614d624219b61c284ff9d9e03ca1c0bf0` | ☑ |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:a14fa69a77005d832f139a512d2d81a3845f1f83bc336cb715fb69f17fbd1d91` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
