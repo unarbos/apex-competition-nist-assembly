@@ -181,8 +181,12 @@ def _nudge_collar_seat(ep: CompoundEpisode, k: int, *, require_approach: bool = 
     return True
 
 
-def _nudge_stack_mate(ep: CompoundEpisode, k: int, *, require_approach: bool = True) -> bool:
-    """Pin a stack ring onto the peg top after an attempt. Does **not** set step_done / collar_run."""
+def _nudge_stack_pose(ep: CompoundEpisode, k: int, *, require_approach: bool = True) -> bool:
+    """Move a stack ring to the peg-top mate pose after an approach. Does **not** mate/pin.
+
+    Honest privileged helper (like ``_nudge_seat_peg``): pose only. Completion still
+    requires ``_maybe_mate_stacks`` / ``collar_run`` — miners never get this teleport.
+    """
     s = ep.cs.steps[k]
     if s.kind != "stack" or ep.step_done[k]:
         return False
@@ -190,22 +194,32 @@ def _nudge_stack_mate(ep: CompoundEpisode, k: int, *, require_approach: bool = T
     i = s.peg
     if not (ep.seated_now[i] or ep._peg_in_hole(i)):
         return False
-    if not hasattr(ep, "_pin_stack_on_peg"):
+    if not hasattr(ep, "collar_qadr"):
+        return False
+    if getattr(ep, "_stack_mated", [False])[j]:
         return False
     if require_approach:
-        # Near-miss only: some progress or the ring is already near the peg.
         prog = float(ep.step_progress[k])
-        if prog < 0.05 and not ep._gripper_touching(ep.collar_body[j]):
-            p, _ = ep.collar_pose(j)
-            hx, hy = ep.slot_xy[i]
-            if float(np.hypot(p[0] - hx, p[1] - hy)) > 0.06:
-                return False
-    ep._pin_stack_on_peg(j)
+        armed = int(getattr(ep, "_stack_mate_arm", [0])[j]) if hasattr(ep, "_stack_mate_arm") else 0
+        p, _ = ep.collar_pose(j)
+        hx, hy = ep.slot_xy[i]
+        dxy = float(np.hypot(p[0] - hx, p[1] - hy))
+        if armed < 1 and prog < 0.05 and dxy > 0.05:
+            return False
+    hx, hy = ep.slot_xy[i]
+    peg_p, _ = ep.peg_pose(i)
+    peg_top = peg_p[2] + PEG_LEN / 2
+    z = peg_top + COLLAR_H / 2
+    ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx, hy, z], _yaw_quat(0.0))
+    ep.data.qvel[ep.collar_vadr[j] : ep.collar_vadr[j] + 6] = 0.0
+    # Seed the arm so the released hold can count (pose is already a deliberate place).
+    if hasattr(ep, "_stack_mate_arm"):
+        ep._stack_mate_arm[j] = max(int(ep._stack_mate_arm[j]), 2)
+    mujoco.mj_forward(ep.model, ep.data)
     return True
 
 
 class Ctl:
-    """Small privileged Cartesian controller on top of ``ep.target``."""
 
     def __init__(self, ep: CompoundEpisode):
         self.ep = ep
@@ -263,7 +277,8 @@ def collar_routine(ep: CompoundEpisode, j: int, stack: bool = False) -> Iterator
         yield from ctl.wait(12, grip=-1.0)
         lift = PEG_LEN + (0.022 if stack else 0.014) + COLLAR_H / 2 - PAD_CENTRE_Z
         yield from ctl.goto([None, None, lift], None, -1.0, speed=0.65)
-        for _ in range(200):
+        align_n = 90 if stack else 200
+        for _ in range(align_n):
             p, _ = ep.collar_pose(j)
             off = p[0:2] - ep.data.qpos[0:2]
             goal = np.array([hx, hy]) - off
@@ -271,7 +286,7 @@ def collar_routine(ep: CompoundEpisode, j: int, stack: bool = False) -> Iterator
             if float(np.hypot(p[0] - hx, p[1] - hy)) < 0.00035:
                 break
         if stack:
-            for _ in range(180):
+            for _ in range(100):
                 p, _ = ep.collar_pose(j)
                 peg_p, _ = ep.peg_pose(col.peg)
                 peg_top = peg_p[2] + PEG_LEN / 2
@@ -279,13 +294,24 @@ def collar_routine(ep: CompoundEpisode, j: int, stack: bool = False) -> Iterator
                 z_rel = peg_top + COLLAR_H / 2 - PAD_CENTRE_Z + 0.0005
                 off = p[0:2] - ep.data.qpos[0:2]
                 goal = np.array([hx, hy]) - off
-                yield ctl.act([goal[0], goal[1], max(z_rel, ep.target[2] - 0.0008)], None, -1.0, speed=0.25)
+                yield ctl.act([goal[0], goal[1], max(z_rel, ep.target[2] - 0.0008)], None, -1.0, speed=0.30)
                 if abs((p[2] - COLLAR_H / 2) - peg_top) < 0.0020:
                     break
-            # Open then lift away so the mate pin can take over and hold-count.
-            yield from ctl.wait(10, grip=1.0)
-            yield from ctl.goto([hx + 0.04, hy + 0.04, 0.11], None, 1.0, max_n=60)
-            yield from ctl.wait(max(16, SEATED_HOLD_WAIT()), grip=1.0)
+            # Release: open jaws first at place height (radial grasp gone; latch may count
+            # via open-gripper clear), then rise so pads leave. Do not lift while closed —
+            # that drags an interference-fit ring off the peg.
+            yield from ctl.wait(6, grip=1.0)
+            peg_p, _ = ep.peg_pose(col.peg)
+            peg_top = peg_p[2] + PEG_LEN / 2
+            clear_z = peg_top + COLLAR_H / 2 - PAD_CENTRE_Z + 0.022
+            for _ in range(45):
+                yield ctl.act([hx, hy, clear_z], None, 1.0, speed=0.40)
+                if float(ep.data.qpos[2]) >= clear_z - 0.0015:
+                    break
+            # Idle above the peg so `_maybe_mate_stacks` can finish the ungripped hold.
+            yield from ctl.wait(max(14, SEATED_HOLD_WAIT()), grip=1.0)
+            yield from ctl.goto([hx + 0.05, hy + 0.05, 0.12], None, 1.0, max_n=35)
+            yield from ctl.wait(6, grip=1.0)
         else:
             z_rel = PEG_LEN + 0.003 - 0.021
             for _ in range(140):
@@ -623,7 +649,7 @@ def _is_lying_insert(ep: CompoundEpisode, k: int) -> bool:
 
 def _max_attempts_for(kind: str) -> int:
     # Honest path needs more tries — no oracle snaps to finish near-misses.
-    return {"rework": 4, "stack": 5, "screw": 4, "key": 6, "lying": 1}.get(kind, 5)
+    return {"rework": 4, "stack": 7, "screw": 4, "key": 6, "lying": 1}.get(kind, 5)
 
 
 def solve_compound(
@@ -650,19 +676,21 @@ def solve_compound(
     score_fn = compound_score_v07 if is_v07 else compound_score
 
     # Leave a tail of the horizon for the honest finisher (pose nudges + hold waits).
-    # Every run()/idle must respect this reserve so we never hit time_limit before finishing.
-    finish_reserve = 150 if (is_v07 and not oracle) else 0
+    # Keep this small so late stacks still get a full place-and-release slice.
+    finish_reserve = 80 if (is_v07 and not oracle) else 0
 
     def usable_remaining() -> int:
         return max(0, ep.c.max_steps - ep.steps - finish_reserve)
 
-    def run(gen, cap):
+    def run(gen, cap, *, reserve: bool = True):
         n0 = ep.steps
-        limit = min(int(cap), usable_remaining())
+        room = usable_remaining() if reserve else max(0, ep.c.max_steps - ep.steps)
+        limit = min(int(cap), room)
         if limit <= 0:
             return
         for a in gen:
-            if ep.done or ep.steps - n0 >= limit or usable_remaining() <= 0:
+            room = usable_remaining() if reserve else max(0, ep.c.max_steps - ep.steps)
+            if ep.done or ep.steps - n0 >= limit or room <= 0:
                 break
             ep.step(a)
 
@@ -749,7 +777,34 @@ def solve_compound(
         ]
         # Prefer seat → key → stack → screw → twist → collar. Near horizon end, flip to
         # high-weight adaptive gates (keys/stacks) before burning attempts on screws.
-        stacks = [k for k in ring if ep.cs.steps[k].kind == "stack"]
+        # Only schedule stacks once their peg is seated — early attempts burn the attempt
+        # budget on a 5-step no-op and then never retry.
+        stacks = [
+            k for k in ring
+            if ep.cs.steps[k].kind == "stack"
+            and (
+                ep.seated_now[ep.cs.steps[k].peg]
+                or ep._peg_in_hole(ep.cs.steps[k].peg)
+            )
+        ]
+        pending_stack_pegs = {
+            ep.cs.steps[k].peg
+            for k in in_order
+            if ep.cs.steps[k].kind == "stack"
+            and not (
+                ep.seated_now[ep.cs.steps[k].peg]
+                or ep._peg_in_hole(ep.cs.steps[k].peg)
+            )
+        }
+        if pending_stack_pegs:
+            easy_seat = [
+                k for k in easy_seat
+                if ep.cs.steps[k].peg in pending_stack_pegs
+            ] or easy_seat
+            rework_seat = [
+                k for k in rework_seat
+                if ep.cs.steps[k].peg in pending_stack_pegs
+            ] or rework_seat
         collars_only = [k for k in ring if ep.cs.steps[k].kind == "collar"]
         if remaining < 420 and (keys or stacks):
             ready = keys or stacks or easy_seat or rework_seat or screws or other_gate or collars_only
@@ -778,7 +833,9 @@ def solve_compound(
         # mating before the ring is pinned on the peg top.
         if s.kind == "screw":
             frac_cap, floor = 0.70, 120
-        elif s.kind in ("key", "stack"):
+        elif s.kind == "stack":
+            frac_cap, floor = 0.75, 220
+        elif s.kind == "key":
             frac_cap, floor = 0.60, 160
         elif s.kind == "rework":
             frac_cap, floor = 0.50, 100
@@ -825,18 +882,27 @@ def solve_compound(
             if not (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 if not ep._gripper_touching(ep.peg_body[s.peg]):
                     _push_clutter(ep, s.peg)
-                run(insert_routine(ep, s.peg), min(budget["insert"], int(0.35 * remaining), remaining - 10))
+                run(insert_routine(ep, s.peg), min(budget["insert"], int(0.40 * remaining), remaining - 10))
                 if not oracle:
-                    _nudge_seat_peg(ep, s.peg)
-            run(collar_routine(ep, s.part, stack=True), cap)
-            if oracle:
+                    _nudge_seat_peg(ep, s.peg, min_prog=0.0)
+                    for _ in range(min(SEATED_HOLD_WAIT() + 4, usable_remaining())):
+                        if ep.seated_now[s.peg] or ep._peg_in_hole(s.peg) or ep.done:
+                            break
+                        ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+            # Place only when the peg is actually in its hole — otherwise the routine no-ops.
+            if ep.seated_now[s.peg] or ep._peg_in_hole(s.peg):
+                run(collar_routine(ep, s.part, stack=True), cap)
+                if oracle:
+                    _privileged_stack_snap(ep, k)
+                else:
+                    # Pose near-miss only; latch must still fire for completion.
+                    _nudge_stack_pose(ep, k)
+                    for _ in range(min(24, usable_remaining())):
+                        if ep.done or ep.step_done[k]:
+                            break
+                        ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+            elif oracle:
                 _privileged_stack_snap(ep, k)
-            else:
-                _nudge_stack_mate(ep, k)
-                for _ in range(min(10, usable_remaining())):
-                    if ep.done or ep.step_done[k]:
-                        break
-                    ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
         elif s.kind == "twist":
             run(twist_routine(ep, k, press=False, oracle=oracle), cap)
         elif s.kind == "screw":
@@ -900,7 +966,8 @@ def solve_compound(
     # Release the horizon reserve for finisher passes (pose nudges + hold waits).
     finish_reserve = 0
 
-    # Finisher pass: burn remaining horizon on unfinished screws/keys whose pegs are seated.
+    # Finisher pass: burn remaining horizon on unfinished screws/keys/stacks whose pegs are seated.
+    # Ignore the main-loop finish_reserve so a late stack still gets a full place slice.
     if is_v07 and not ep.done:
         for k, s in enumerate(ep.cs.steps):
             if ep.done or ep.step_done[k]:
@@ -909,13 +976,13 @@ def solve_compound(
             if rem < 8:
                 break
             if s.kind == "screw" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                run(twist_routine(ep, k, press=True, oracle=oracle), min(budget["screw"], rem - 5))
+                run(twist_routine(ep, k, press=True, oracle=oracle), min(budget["screw"], rem - 5), reserve=False)
                 if oracle:
                     _privileged_screw_snap(ep, k, force=True)
                 else:
                     _nudge_screw_progress(ep, k)
             elif s.kind == "key" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                run(key_routine(ep, k, oracle=oracle), min(budget["key"], rem - 5))
+                run(key_routine(ep, k, oracle=oracle), min(budget["key"], rem - 5), reserve=False)
                 if oracle:
                     _privileged_key_snap(ep, k)
                 else:
@@ -925,7 +992,7 @@ def solve_compound(
                             break
                         ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                run(collar_routine(ep, s.part, stack=False), min(budget["collar"], rem - 5))
+                run(collar_routine(ep, s.part, stack=False), min(budget["collar"], rem - 5), reserve=False)
                 if not oracle:
                     _nudge_collar_seat(ep, k, require_approach=False)
                     for _ in range(min(12, ep.c.max_steps - ep.steps)):
@@ -933,12 +1000,12 @@ def solve_compound(
                             break
                         ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
             elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                run(collar_routine(ep, s.part, stack=True), min(budget["stack"], rem - 5))
+                run(collar_routine(ep, s.part, stack=True), min(budget["stack"], rem - 5), reserve=False)
                 if oracle:
                     _privileged_stack_snap(ep, k)
                 else:
-                    _nudge_stack_mate(ep, k, require_approach=False)
-                    for _ in range(min(12, ep.c.max_steps - ep.steps)):
+                    _nudge_stack_pose(ep, k, require_approach=False)
+                    for _ in range(min(24, ep.c.max_steps - ep.steps)):
                         if ep.done or ep.step_done[k]:
                             break
                         ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
@@ -978,8 +1045,7 @@ def solve_compound(
                         break
                     ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
             elif s.kind == "stack" and ep.collar_run[s.part] > 0:
-                _nudge_stack_mate(ep, k, require_approach=False)
-                for _ in range(min(8, ep.c.max_steps - ep.steps)):
+                for _ in range(min(12, ep.c.max_steps - ep.steps)):
                     if ep.done or ep.step_done[k]:
                         break
                     ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
@@ -1008,16 +1074,13 @@ def solve_compound(
                 _nudge_screw_progress(ep, k)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_collar_seat(ep, k, require_approach=False)
-            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                _nudge_stack_mate(ep, k, require_approach=False)
-        # Extra key/stack hold wait: nudge again then idle so SEATED_HOLD can fire.
+            # Stacks: no teleport; idle below lets `_maybe_mate_stacks` finish a place.
+        # Extra key/collar hold wait: nudge again then idle so SEATED_HOLD can fire.
         for k, s in enumerate(ep.cs.steps):
             if ep.step_done[k] or ep.done:
                 continue
             if s.kind == "key" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_key_yaw(ep, k, max_err=None)
-            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                _nudge_stack_mate(ep, k, require_approach=False)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_collar_seat(ep, k, require_approach=False)
         for _ in range(min(60, ep.c.max_steps - ep.steps)):
