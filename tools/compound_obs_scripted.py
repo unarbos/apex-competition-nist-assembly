@@ -99,21 +99,42 @@ class CompoundObsScripted:
             if f[0] < 0.5:
                 continue
             if t[0] < 0.5 and t[1] < 0.5 and f[16] < 0.5:
-                # Relative peg→slot is in f[1:3] (×10) plus slot is f[13:15] (×10) — use rel.
-                rel = f[1:3] / 10.0
-                d = float(np.hypot(*(rel))) + 0.15 * float(np.hypot(*(f[1:3] / 10.0 - (hand - f[13:15] / 10.0))))
-                # Prefer near-hand pegs.
-                peg_xy_est = hand + f[1:3] / 10.0  # rough: rel is peg-slot, not peg-hand
                 # Peg relative to hand: from proprio we only have slot and rel-to-slot.
                 slot = f[13:15] / 10.0
                 peg_est = slot + f[1:3] / 10.0
                 d = float(np.hypot(*(peg_est - hand)))
+                # Rework cue: extracted flag packed in twist_progress when no twist/screw.
+                mode = "rework" if (abs(float(t[2])) < 0.05 and float(t[3]) < 0.5 and f[16] > 0.5) else "insert"
+                # Mis-seated rework still shows seated=1 in wrong hole — treat as rework extract.
+                if f[16] > 0.5 and t[0] < 0.5 and abs(float(t[2])) < 0.05 and abs(float(t[5])) < 0.5:
+                    # Seated but insert/rework not done and no key/collar flag → likely rework.
+                    mode = "rework"
+                    d -= 0.15  # prefer extracting mis-seats (high weight)
                 if d < best_d:
-                    best, best_d, best_mode = i, d, "insert"
+                    best, best_d, best_mode = i, d, mode
+            # Key: sin/cos of key_yaw (+ optional tol in t[5]). Insert-done on same peg sets t[0]=1.
+            # Twist: t[2]=±1 and t[3]∈[0,1] progress. Screw: |t[2]|≈2.
+            s2, s3, s5 = float(t[2]), float(t[3]), float(t[5])
+            is_screw = abs(s2) > 1.4
+            is_twist = (not is_screw) and abs(abs(s2) - 1.0) < 0.12 and 0.0 <= s3 <= 1.0 + 1e-3
+            is_key = (
+                f[16] > 0.5
+                and t[4] < 0.5
+                and not is_screw
+                and not is_twist
+                and (s5 > 0.15 or (s2 * s2 + s3 * s3) > 0.7)
+            )
+            if is_key:
+                slot = f[13:15] / 10.0
+                d = float(np.hypot(*(slot - hand))) - 0.30  # keys dominate score
+                if d < best_d:
+                    best, best_d, best_mode = i, d, "key"
             # Twist / screw available: dir nonzero, not blocked, peg seated.
-            if abs(float(t[2])) > 0.5 and t[4] < 0.5 and f[16] > 0.5 and float(t[3]) < 0.95:
+            if (is_twist or is_screw) and t[4] < 0.5 and f[16] > 0.5 and s3 < 0.95:
                 slot = f[13:15] / 10.0
                 d = float(np.hypot(*(slot - hand))) + 0.05
+                if is_screw:
+                    d -= 0.02
                 if d < best_d:
                     best, best_d, best_mode = i, d, "twist"
         # Collars / stacks.
@@ -151,10 +172,12 @@ class CompoundObsScripted:
                 a[2] = 0.3
                 a[4] = 1.0
                 return a
-        if self.mode in ("insert",):
+        if self.mode in ("insert", "rework"):
             return self._act_insert(obs)
         if self.mode in ("collar", "stack"):
             return self._act_collar(obs)
+        if self.mode == "key":
+            return self._act_key(obs)
         return self._act_twist(obs)
 
     def _insert_only(self, obs: np.ndarray) -> np.ndarray:
@@ -308,6 +331,64 @@ class CompoundObsScripted:
             self.reset()
         elif c[11] > 0.5:
             self.reset()
+        return a
+
+    def _act_key(self, obs: np.ndarray) -> np.ndarray:
+        """Yaw-index a seated peg using key sin/cos channels (obs-only)."""
+        i = self.target
+        f = _peg(obs, i)
+        t = _task(obs, i)
+        if f[0] < 0.5 or f[16] < 0.5:
+            self.reset()
+            return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
+        # Drop key mode if channels look like twist/screw again or became blocked.
+        s2, s3 = float(t[2]), float(t[3])
+        if abs(s2) > 1.4 or t[4] > 0.5:
+            self.reset()
+            return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
+        slot = f[13:15] / 10.0
+        hand = self._hand_xy(obs)
+        hz = self._hand_z(obs)
+        key_yaw = math.atan2(s2, s3)
+        # Peg quat is f[4:8] (wxyz); use estimated peg yaw vs key target.
+        qw, qx, qy, qz = (float(f[4 + k]) for k in range(4))
+        peg_yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+        err = _wrap(key_yaw - peg_yaw)
+        a = np.zeros(5)
+        if self.phase in ("pick", "goto"):
+            self.phase = "goto"
+            e = slot - hand
+            a[0:2] = np.clip(e / DXYZ, -1, 1)
+            a[2] = np.clip((0.05 - hz) / DXYZ, -1, 1)
+            a[4] = 1.0
+            if float(np.hypot(*e)) < 0.006:
+                self.phase = "press"
+                self.timer = 0
+        elif self.phase == "press":
+            e = slot - hand
+            a[0:2] = np.clip(e / DXYZ, -0.4, 0.4)
+            a[2] = np.clip((0.028 - hz) / DXYZ, -0.6, 0.6)
+            a[4] = -1.0
+            self.timer += 1
+            if self.timer > 10:
+                self.phase = "turn"
+                self.timer = 0
+        elif self.phase == "turn":
+            e = slot - hand
+            a[0:2] = np.clip(e / DXYZ, -0.3, 0.3)
+            a[2] = -0.1
+            a[3] = float(np.clip(err / 0.35, -1, 1))
+            a[4] = -1.0
+            self.timer += 1
+            if abs(err) < 0.08 or self.timer > 45:
+                self.phase = "release"
+                self.timer = 0
+        else:
+            a[2] = 0.55
+            a[4] = 1.0
+            self.timer += 1
+            if self.timer > 20:
+                self.reset()
         return a
 
     def _act_twist(self, obs: np.ndarray) -> np.ndarray:
