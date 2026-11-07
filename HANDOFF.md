@@ -18,9 +18,9 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 | Item | Where | Done |
 |---|---|---|
 | Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.2` (draft; do not tag/ship yet) | ☐ |
-| `spec.yaml` version `0.7.2`; digests remain v0.7.1 until later ship | `spec.yaml` | ☐ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:ec8d617e10e5bde4504e5c9b331d51c614d624219b61c284ff9d9e03ca1c0bf0` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:a14fa69a77005d832f139a512d2d81a3845f1f83bc336cb715fb69f17fbd1d91` | ☑ |
+| `spec.yaml` version `0.7.2`; digests pinned from release v0.7.2 | `spec.yaml` | ☑ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:4716bc8397dfb85ef57e942c433b548a466fab34f77b5b98162a7a5db53d6bdc` | ☑ |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:121f08d6f91926c0a10b2abffcf5a9c7b9d50320947e71bba88ea078e0d08ad0` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
@@ -208,8 +208,8 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 
 ## 13. v0.7.2 (Assembly III)
 - Profile `v07` is the live referee default. Image Dockerfile bakes `NIST_PROFILE=v07`;
-  `referee.py` uses `setdefault("NIST_PROFILE", "v07")`. Spec version `0.7.2` (digests stay
-  at v0.7.1 until a later ship decision — do not pin in this PR).
+  `referee.py` uses `setdefault("NIST_PROFILE", "v07")`. Spec version `0.7.2`; digests pinned
+  from release v0.7.2 (release.yml run 42376890191).
 - Module `referee/nist_sim/compound_v07.py`: denser tiers, `rework` / `screw` / `stack` / `key`,
   press-gated screws, reachable obs-indexed key yaw, late reveals, `swap_bias` events.
   Stack rings are interference-fit; completion via `_maybe_mate_stacks` (arm + released hold).
