@@ -777,10 +777,9 @@ def solve_compound(
             k for k in in_order
             if k not in lying and ep.cs.steps[k].kind in ("collar", "stack")
         ]
-        # Prefer seat → key → stack → screw → twist → collar. Near horizon end, flip to
-        # high-weight adaptive gates (keys/stacks) before burning attempts on screws.
-        # Only schedule stacks once their peg is seated — early attempts burn the attempt
-        # budget on a 5-step no-op and then never retry.
+        # Prefer seat → stack → key → screw → twist → collar. v0.7.3 graphs put
+        # stack-before-key edges and zero out-of-order key credit, so stacks must
+        # run before keys. Only schedule stacks once their peg is seated.
         stacks = [
             k for k in ring
             if ep.cs.steps[k].kind == "stack"
@@ -808,10 +807,10 @@ def solve_compound(
                 if ep.cs.steps[k].peg in pending_stack_pegs
             ] or rework_seat
         collars_only = [k for k in ring if ep.cs.steps[k].kind == "collar"]
-        if remaining < 420 and (keys or stacks):
-            ready = keys or stacks or easy_seat or rework_seat or screws or other_gate or collars_only
+        if remaining < 420 and (stacks or keys):
+            ready = stacks or keys or easy_seat or rework_seat or screws or other_gate or collars_only
         else:
-            ready = easy_seat or keys or stacks or screws or other_gate or rework_seat or collars_only
+            ready = easy_seat or stacks or keys or screws or other_gate or rework_seat or collars_only
         if not ready and not all(ep.wave_arrived) and remaining > 80:
             if usable_remaining() > 0:
                 ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))

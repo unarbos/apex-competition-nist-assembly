@@ -125,6 +125,8 @@ class TaskStep:
     key_yaw: float = 0.0  # target peg yaw (world) for key-gated done checks; 0 = unused
     key_tol: float = 0.0  # half-width (rad); 0 = no key gate
     reveal_after: int | None = None  # hide twist/key params in obs until this step is done
+    # v0.7.3: also hide key/twist params until the gripper has touched the peg (interaction).
+    touch_reveal: bool = False
     wrong_slot: int | None = None  # rework: layout slot index where the peg starts seated
     press: bool = False  # screw: yaw only accumulates while pressing down on the peg
 
@@ -163,6 +165,8 @@ class CompoundSpec:
                 row["key_tol"] = round(float(s.key_tol), 6)
             if s.reveal_after is not None:
                 row["reveal_after"] = int(s.reveal_after)
+            if s.touch_reveal:
+                row["touch_reveal"] = True
             if s.wrong_slot is not None:
                 row["wrong_slot"] = int(s.wrong_slot)
             if s.press:

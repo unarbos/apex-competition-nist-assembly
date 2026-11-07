@@ -1,6 +1,6 @@
 # NIST Assembly Competition
 
-Docs page text for v0.7.2 (Assembly III). Platform-wide items that Macrocosmos sets
+Docs page text for v0.7.3 (Assembly III). Platform-wide items that Macrocosmos sets
 (submission fee, rate limits) are not repeated here.
 
 ### NIST Assembly Competition
@@ -8,6 +8,14 @@ Docs page text for v0.7.2 (Assembly III). Platform-wide items that Macrocosmos s
 **Getting a peg to the hole is not the same as seating it.** The last millimetre is the hard part: with 0.25 to 0.8 mm of radial clearance, the contact that completes an insertion is the same contact that jams it. A peg still held in the gripper has not been assembled, and on a full board each seated peg is one more thing the gripper can knock out on the way to the next.
 
 The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper on a Cartesian stage** (x, y, z, yaw) through **multi-peg sequential assembly** on a board modelled on the **NIST Assembly Task Board #1**, simulated in MuJoCo on CPU. Miners submit an ONNX policy that outputs incremental stage and gripper commands at 25 Hz. The setup borrows from AlphaNIST (Zhang et al., arXiv 2610.13354): the ATB-1 board, the 1 mm success criterion, 25 Hz control, diverse start states and free-order multi-part episodes. It is much smaller: pegs only, primitive geometry, a 4-DoF stage instead of a 7-DoF arm, and noisy state estimates instead of point clouds. Since v0.6 every episode is a **compound assembly task**; v0.7 adds rework, press-gated screws, stack rings and obs-indexed keys. Scoring gives weighted partial credit per step so that a ranked competition has a gradient. Cost is bounded by the sim horizon only — same policy and seed score the same under any machine load.
+
+**What changed in v0.7.3**
+
+* Adaptive mid-episode structure against v0.7.1-trained policies: `retarget` / `reorder` /
+  `flip_twist` events, post-insert key retarget, touch-gated reveals, stack-before-key
+  precedence, keys complete only after prerequisites, out-of-order keys score 0. Weights
+  shift onto stacks (insert/collar/twist 0.04, screw 0.06, rework 1.60, stack 5.00, key 2.60).
+  Physics stays action-only solvable; digests not re-pinned.
 
 **What changed in v0.7.2**
 
