@@ -103,26 +103,39 @@ class CompoundObsScripted:
                 slot = f[13:15] / 10.0
                 peg_est = slot + f[1:3] / 10.0
                 d = float(np.hypot(*(peg_est - hand)))
-                # Rework cue: extracted flag packed in twist_progress when no twist/screw.
-                mode = "rework" if (abs(float(t[2])) < 0.05 and float(t[3]) < 0.5 and f[16] > 0.5) else "insert"
-                # Mis-seated rework still shows seated=1 in wrong hole — treat as rework extract.
-                if f[16] > 0.5 and t[0] < 0.5 and abs(float(t[2])) < 0.05 and abs(float(t[5])) < 0.5:
-                    # Seated but insert/rework not done and no key/collar flag → likely rework.
-                    mode = "rework"
-                    d -= 0.15  # prefer extracting mis-seats (high weight)
+                mode = "insert"
+                # Prefer seating pegs that already reveal a key tol (unlocks high-weight key).
+                if 0.25 < float(t[5]) < 0.95:
+                    d -= 0.35
                 if d < best_d:
                     best, best_d, best_mode = i, d, mode
-            # Key: sin/cos of key_yaw (+ optional tol in t[5]). Insert-done on same peg sets t[0]=1.
-            # Twist: t[2]=±1 and t[3]∈[0,1] progress. Screw: |t[2]|≈2.
+            # Mis-seated rework: seated but insert/rework not done, no key/collar flag.
+            if (
+                f[16] > 0.5
+                and t[0] < 0.5
+                and t[1] < 0.5
+                and abs(float(t[2])) < 0.05
+                and abs(float(t[5])) < 0.25
+            ):
+                slot = f[13:15] / 10.0
+                d = float(np.hypot(*(slot - hand))) - 0.20
+                if d < best_d:
+                    best, best_d, best_mode = i, d, "rework"
+            # Key tol packs into t[5] as tol*10 ∈ ~[0.5, 0.9] when no collar flag (1 or 2).
+            # When collar/stack owns t[5]∈{1,2}, fall back to unit-circle sin/cos with cos<0
+            # (twist progress is always ≥0, so negative cos cannot be twist).
             s2, s3, s5 = float(t[2]), float(t[3]), float(t[5])
             is_screw = abs(s2) > 1.4
-            is_twist = (not is_screw) and abs(abs(s2) - 1.0) < 0.12 and 0.0 <= s3 <= 1.0 + 1e-3
-            is_key = (
-                f[16] > 0.5
-                and t[4] < 0.5
-                and not is_screw
-                and not is_twist
-                and (s5 > 0.15 or (s2 * s2 + s3 * s3) > 0.7)
+            unit = s2 * s2 + s3 * s3
+            is_key = f[16] > 0.5 and t[4] < 0.5 and (
+                0.25 < s5 < 0.95
+                or (s5 >= 0.95 and unit > 0.7 and abs(s2) <= 1.05 and s3 < -0.05)
+            )
+            is_twist = (
+                (not is_screw)
+                and (not is_key)
+                and abs(abs(s2) - 1.0) < 0.12
+                and 0.0 <= s3 <= 1.0 + 1e-3
             )
             if is_key:
                 slot = f[13:15] / 10.0
@@ -338,10 +351,15 @@ class CompoundObsScripted:
         i = self.target
         f = _peg(obs, i)
         t = _task(obs, i)
-        if f[0] < 0.5 or f[16] < 0.5:
+        if f[0] < 0.5:
             self.reset()
             return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
-        # Drop key mode if channels look like twist/screw again or became blocked.
+        # If the peg pops out, re-seat via insert rather than abandoning forever.
+        if f[16] < 0.5:
+            self.mode = "insert"
+            self.phase = "goto"
+            self.timer = 0
+            return self._act_insert(obs)
         s2, s3 = float(t[2]), float(t[3])
         if abs(s2) > 1.4 or t[4] > 0.5:
             self.reset()
@@ -354,41 +372,50 @@ class CompoundObsScripted:
         qw, qx, qy, qz = (float(f[4 + k]) for k in range(4))
         peg_yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
         err = _wrap(key_yaw - peg_yaw)
+        tol = float(t[5]) / 10.0 if 0.25 < float(t[5]) < 0.95 else 0.08
         a = np.zeros(5)
         if self.phase in ("pick", "goto"):
             self.phase = "goto"
             e = slot - hand
             a[0:2] = np.clip(e / DXYZ, -1, 1)
-            a[2] = np.clip((0.05 - hz) / DXYZ, -1, 1)
+            a[2] = np.clip((0.048 - hz) / DXYZ, -1, 1)
             a[4] = 1.0
-            if float(np.hypot(*e)) < 0.006:
+            if float(np.hypot(*e)) < 0.005:
                 self.phase = "press"
                 self.timer = 0
         elif self.phase == "press":
             e = slot - hand
-            a[0:2] = np.clip(e / DXYZ, -0.4, 0.4)
-            a[2] = np.clip((0.028 - hz) / DXYZ, -0.6, 0.6)
+            a[0:2] = np.clip(e / DXYZ, -0.35, 0.35)
+            # Light rim touch — hard press unseats the peg under noise.
+            a[2] = np.clip((0.032 - hz) / DXYZ, -0.45, 0.45)
             a[4] = -1.0
             self.timer += 1
-            if self.timer > 10:
+            if self.timer > 12:
                 self.phase = "turn"
                 self.timer = 0
         elif self.phase == "turn":
             e = slot - hand
-            a[0:2] = np.clip(e / DXYZ, -0.3, 0.3)
-            a[2] = -0.1
-            a[3] = float(np.clip(err / 0.35, -1, 1))
+            a[0:2] = np.clip(e / DXYZ, -0.25, 0.25)
+            a[2] = np.clip((0.030 - hz) / DXYZ, -0.25, 0.25)
+            a[3] = float(np.clip(err / 0.30, -1, 1))
             a[4] = -1.0
             self.timer += 1
-            if abs(err) < 0.08 or self.timer > 45:
+            if abs(err) < tol * 0.85 or self.timer > 55:
                 self.phase = "release"
                 self.timer = 0
         else:
-            a[2] = 0.55
+            # Retreat laterally so hold can count without yanking the peg.
+            a[0] = 0.35
+            a[1] = 0.35
+            a[2] = 0.6
             a[4] = 1.0
             self.timer += 1
-            if self.timer > 20:
-                self.reset()
+            if self.timer > 22:
+                if abs(err) > tol:
+                    self.phase = "goto"
+                    self.timer = 0
+                else:
+                    self.reset()
         return a
 
     def _act_twist(self, obs: np.ndarray) -> np.ndarray:
