@@ -73,12 +73,40 @@ def key_alignment_bonus(o: np.ndarray) -> float:
     return best
 
 OBS_DIM = OBS_DIM_V07
-RESIDUAL_SCALE = 0.55
-INIT_LOG_STD = -1.6
-STD_MAX = 0.40
+# Keep residual small and gated so PPO cannot destroy insert/rework seating.
+RESIDUAL_SCALE = 0.35
+INIT_LOG_STD = -2.0
+STD_MAX = 0.25
 HID = 256
 GAMMA = 0.995
 LAM = 0.95
+
+
+def hard_gate(o: np.ndarray) -> float:
+    """1 on hard-step cues or near-hole insert fine-align — else 0 (pure scripted)."""
+    o = np.asarray(o, dtype=np.float64).reshape(-1)
+    for i in range(MAX_PEGS):
+        f = o[PEG0 + i * PEG_FEAT : PEG0 + (i + 1) * PEG_FEAT]
+        t = o[TASK0 + i * TASK_FEAT : TASK0 + (i + 1) * TASK_FEAT]
+        if f[0] < 0.5:
+            continue
+        # Near-hole insert assist (unlocks later keys/stacks).
+        if f[16] < 0.5 and t[0] < 0.5:
+            rel = float(np.hypot(f[1] / 10.0, f[2] / 10.0))
+            if rel < 0.018:
+                return 1.0
+        if f[16] < 0.5:
+            continue
+        s5 = float(t[5])
+        if 0.25 < s5 < 0.95:  # key tol
+            return 1.0
+        if s5 >= 0.95:  # collar/stack flag on seated peg
+            return 1.0
+    for j in range(MAX_COLLARS):
+        c = o[COL0 + j * COL_FEAT : COL0 + (j + 1) * COL_FEAT]
+        if c[0] > 0.5 and c[11] < 0.5 and c[12] < 0.5:
+            return 1.0
+    return 0.0
 
 
 class ResidGRU(nn.Module):
@@ -115,7 +143,9 @@ class ResidGRU(nn.Module):
             return a.clamp(-1, 1).numpy(), float(logp), float(v.item()), h_n
 
 
-def _combine(base: np.ndarray, resid: np.ndarray) -> np.ndarray:
+def _combine(base: np.ndarray, resid: np.ndarray, gate: float) -> np.ndarray:
+    if gate < 0.5:
+        return np.clip(base, -1.0, 1.0)
     return np.clip(base + RESIDUAL_SCALE * resid, -1.0, 1.0)
 
 
@@ -138,8 +168,9 @@ def eval_fused(net: ResidGRU, seeds, per) -> dict:
             while not ep.done:
                 o = np.round(ep.observe(r2), 6).astype(np.float32)
                 base = np.clip(pol.act(o.astype(np.float64)), -1, 1)
+                gate = hard_gate(o)
                 resid, _, _, h = net.act_np(o, h, deterministic=True)
-                ep.step(_combine(base, resid))
+                ep.step(_combine(base, resid, gate))
             r = compound_score_v07(ep)
             scores.append(float(r["score"]))
             for k, s in enumerate(c.compound.steps):
@@ -180,29 +211,40 @@ def collect(net, seeds, per, n_steps, seed0):
         prev = obs_progress_features(o)
         while not ep.done and steps < n_steps:
             base = np.clip(pol.act(o.astype(np.float64)), -1, 1)
+            gate = hard_gate(o)
             resid, logp, val, h = net.act_np(o, h, deterministic=False)
-            a = _combine(base, resid)
+            a = _combine(base, resid, gate)
             ep.step(a)
             o2 = np.round(ep.observe(r2), 6).astype(np.float32) if not ep.done else o
             feat = obs_progress_features(o2)
             term = float(compound_score_v07(ep)["score"]) if ep.done else None
             if ep.done:
                 ep_scores.append(term)
-            # Extra bonus for observable key/stack/rework-ish progress (collar done / seated).
-            r = dense_reward(prev, feat, float(np.sum(resid**2)), term)
-            # Curriculum bonus: seating unlocks hard steps.
-            r += 1.0 * float(np.sum(np.clip(feat[0:8] - prev[0:8], 0, 1)))
-            # Observable key yaw alignment potential (no privileged writes).
-            ka = key_alignment_bonus(o2)
-            r += 4.0 * max(0.0, ka - key_alignment_bonus(o))
-            obs_l.append(o)
-            act_l.append(resid.astype(np.float32))
-            logp_l.append(logp)
-            rew_l.append(r)
-            val_l.append(val)
-            done_l.append(bool(ep.done))
+            # Only learn from gated hard-step states; elsewhere residual is ignored.
+            if gate >= 0.5:
+                r = dense_reward(prev, feat, 0.02 * float(np.sum(resid**2)), term)
+                r += 1.0 * float(np.sum(np.clip(feat[0:8] - prev[0:8], 0, 1)))
+                ka = key_alignment_bonus(o2)
+                r += 6.0 * max(0.0, ka - key_alignment_bonus(o))
+                r += 8.0 * float(np.sum(np.clip(feat[24:28] - prev[24:28], 0, 1)))  # collar/stack done
+                obs_l.append(o)
+                act_l.append(resid.astype(np.float32))
+                logp_l.append(logp)
+                rew_l.append(r)
+                val_l.append(val)
+                done_l.append(bool(ep.done))
             o, prev = o2, feat
             steps += 1
+    if not obs_l:
+        return {
+            "obs": np.zeros((1, OBS_DIM), np.float32),
+            "act": np.zeros((1, ACT_DIM), np.float32),
+            "logp": np.zeros(1, np.float32),
+            "adv": np.zeros(1, np.float32),
+            "ret": np.zeros(1, np.float32),
+            "ep_scores": ep_scores,
+            "steps": steps,
+        }
     rew = np.asarray(rew_l, np.float32)
     val = np.asarray(val_l, np.float32)
     done = np.asarray(done_l, np.bool_)
@@ -278,8 +320,9 @@ def export_onnx(net: ResidGRU, path: Path, seeds=(100, 101, 102)):
             while not ep.done:
                 o = np.round(ep.observe(r2), 6).astype(np.float32)
                 base = np.clip(pol.act(o.astype(np.float64)), -1, 1)
+                gate = hard_gate(o)
                 resid, _, _, h = net.act_np(o, h, True)
-                a = _combine(base, resid)
+                a = _combine(base, resid, gate)
                 xs.append(o)
                 ys.append(a.astype(np.float32))
                 ep.step(a)
@@ -296,15 +339,27 @@ def export_onnx(net: ResidGRU, path: Path, seeds=(100, 101, 102)):
         opt.step()
     deploy.eval()
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
-        deploy,
-        torch.zeros(1, OBS_DIM),
-        str(path),
-        input_names=["obs"],
-        output_names=["actions"],
-        dynamic_axes={"obs": {0: "B"}, "actions": {0: "B"}},
-        opset_version=17,
-    )
+    try:
+        torch.onnx.export(
+            deploy,
+            torch.zeros(1, OBS_DIM),
+            str(path),
+            input_names=["obs"],
+            output_names=["actions"],
+            dynamic_axes={"obs": {0: "B"}, "actions": {0: "B"}},
+            opset_version=17,
+            dynamo=False,
+        )
+    except TypeError:
+        torch.onnx.export(
+            deploy,
+            torch.zeros(1, OBS_DIM),
+            str(path),
+            input_names=["obs"],
+            output_names=["actions"],
+            dynamic_axes={"obs": {0: "B"}, "actions": {0: "B"}},
+            opset_version=17,
+        )
     print(f"exported {path}", flush=True)
 
 
