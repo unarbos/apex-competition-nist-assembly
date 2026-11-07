@@ -1,4 +1,4 @@
-# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.2)
+# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.3)
 
 ## Goal
 
@@ -32,26 +32,27 @@ must score the same on any machine load.
 
 ## Scoring
 
-Same rubric family as v0.6 (done = 0.70 + 0.30·time; out-of-order floored at partial; unfinished
-≤ 0.30). Weights (code `STEP_WEIGHT_V07`):
+Same rubric family as v0.6 (done = 0.70 + 0.30·time; unfinished ≤ 0.30). In v0.7.3, **keys**
+finished out of order score **0** (stack/rework keep the out-of-order floor). Weights (code
+`STEP_WEIGHT_V07`, v0.7.3):
 
 | kind | weight |
 |---|---|
-| insert | 0.30 |
-| collar | 0.25 |
-| twist | 0.25 |
-| screw | 0.40 |
-| rework | 2.10 |
-| stack | 2.60 |
-| key | 3.40 |
+| insert | 0.04 |
+| collar | 0.04 |
+| twist | 0.04 |
+| screw | 0.06 |
+| rework | 1.60 |
+| stack | 5.00 |
+| key | 2.60 |
 
 ## Release bars (calibration, honest privileged)
 
 Privileged reference must run with `oracle=False` / `tools/compound_solver.py --honest`
 (no helpers that set `step_done` / `collar_run` / `_key_hold` directly).
 
-- Privileged (honest) ≥ ~0.50 overall.
-- v0.6-style / revealed v0.6 kings ≤ ~0.25 (through built images).
+- Privileged (honest) ≥ ~0.45 overall.
+- v0.7.1-era / v0.6-style kings ≤ ~0.25 (through built images / same code path).
 - Obs-only / zero low (≤ ~0.15).
 - 64-ep live eval well under the 1800 s platform timeout (target ≤ ~600 s for slow kings);
   no referee wall-clock score cuts — platform timeout is a non-scoring abort only.
@@ -63,6 +64,12 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
 - Stack hold counting no longer fights the parent collar-on-block reset.
 - Key yaw sampling + `key_tol` obs packing; latch so completed hard steps stay completed.
 
+## v0.7.3 adaptive harden (vs v0.7.1-trained kings)
+
+- Mid-episode `retarget` / `reorder` / `flip_twist` events + post-insert key retarget.
+- Touch-gated key/twist reveals; stack-before-key edges; keys complete only after prereqs.
+- Do not manufacture difficulty via unreachable physics; miner-path stack latch stays sealed.
+
 ## v0.7.2 fixes (stack action-mate + twist/screw draw)
 
 - Stack rings use a slight interference fit so a deliberate peg-top place can rest in the
@@ -72,3 +79,4 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
   completion uses the same latch miners use (pose nudges only).
 - Twist/screw: per-eligible-peg Bernoulli(`twist_frac` / `screw_frac`) instead of
   `round(frac * n)` (which was almost always 0 on live-sized graphs).
+- King gate was calibrated only on v0.6-era kings — insufficient for Round 22 (see v0.7.3).

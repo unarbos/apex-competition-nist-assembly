@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.2 (Assembly III)
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.3 (Assembly III)
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -17,8 +17,8 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.2` (draft; do not tag/ship yet) | ☐ |
-| `spec.yaml` version `0.7.2`; digests pinned from release v0.7.2 | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.3` (RC; do not tag/ship yet) | ☐ |
+| `spec.yaml` version `0.7.3`; digests remain at released v0.7.2 until later ship | `spec.yaml` | ☐ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:4716bc8397dfb85ef57e942c433b548a466fab34f77b5b98162a7a5db53d6bdc` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:121f08d6f91926c0a10b2abffcf5a9c7b9d50320947e71bba88ea078e0d08ad0` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -206,15 +206,25 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   `body_conaffinity` are the only fields it changes besides the mass-derived constants.
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
-## 13. v0.7.2 (Assembly III)
+## 13. v0.7.3 (adaptive compound harden)
+- Spec `0.7.3`; digests remain at released v0.7.2 until a later ship (do **not** pin/tag from
+  this PR). Profile bake stays `NIST_PROFILE=v07`.
+- Defeats v0.7.1-trained Round 22 kings that still scored ~0.43 on v0.7.2: mid-episode
+  `retarget` / `reorder` / `flip_twist` events, post-insert key retarget, touch-gated reveals,
+  stack-before-key precedence, keys complete only after prerequisites, out-of-order keys score 0.
+  Weights: insert/collar/twist 0.04, screw 0.06, rework 1.60, stack 5.00, key 2.60.
+- Physics unchanged in spirit: every subtask remains action-only completable; miner-path stack
+  latch tests kept/extended; honest privileged ≥~0.45; kings ≤~0.25. See `CALIBRATION.md`.
+
+## 13a. v0.7.2 (Assembly III)
 - Profile `v07` is the live referee default. Image Dockerfile bakes `NIST_PROFILE=v07`;
   `referee.py` uses `setdefault("NIST_PROFILE", "v07")`. Spec version `0.7.2`; digests pinned
   from release v0.7.2 (release.yml run 42376890191).
 - Module `referee/nist_sim/compound_v07.py`: denser tiers, `rework` / `screw` / `stack` / `key`,
   press-gated screws, reachable obs-indexed key yaw, late reveals, `swap_bias` events.
   Stack rings are interference-fit; completion via `_maybe_mate_stacks` (arm + released hold).
-  Twist/screw: per-peg Bernoulli draws. Weights: insert 0.30, collar/twist 0.25, screw 0.40,
-  rework 2.10, stack 2.60, key 3.40. Records stay `nist_lite_record/4` with `nist_profile`.
+  Twist/screw: per-peg Bernoulli draws. King gate was calibrated on v0.6-era kings only — that
+  was the Round 22 mistake (v0.7.1 policies stayed near saturation). Superseded by v0.7.3.
 - Eval bounds: `deadline_ms=80`, `MAX_HORIZON=1400`. **No** wall-clock score cuts.
 - Privileged solver must use `--honest` / `oracle=False` for the calibration bar (pose nudges
   only; no stack pin teleports). See `CALIBRATION.md` / `docs/v0.7/DESIGN.md`.

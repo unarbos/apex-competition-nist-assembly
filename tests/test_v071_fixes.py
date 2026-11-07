@@ -127,16 +127,20 @@ def test_key_yaw_reachable_and_obs_packs_tol():
             continue
         e = _ep(13, i, per=8)
         r = np.random.default_rng(0)
-        # Reveal any late-hidden keys by marking their gate done if needed.
+        # Reveal any late-hidden / touch-gated keys so obs packing can be checked.
         for s in e.cs.steps:
             if s.kind == "key" and s.reveal_after is not None:
                 e.step_done[s.reveal_after] = True
+            if s.kind == "key" and getattr(s, "touch_reveal", False):
+                e._peg_touched[s.peg] = True
         o = e.observe(r)
         task0 = OBS_DIM
         for s in e.cs.steps:
             if s.kind != "key":
                 continue
             if s.reveal_after is not None and not e.step_done[s.reveal_after]:
+                continue
+            if getattr(s, "touch_reveal", False) and not e._peg_touched[s.peg]:
                 continue
             b = task0 + s.peg * TASK_PEG_FEAT
             assert abs(o[b + 2] - math.sin(s.key_yaw)) < 1e-5
@@ -186,6 +190,9 @@ def test_key_hold_increments_once_per_step():
     e = _ep(17, idx, per=8)
     sk = next(k for k, s in enumerate(e.cs.steps) if s.kind == "key")
     peg = e.cs.steps[sk].peg
+    # v0.7.3: key hold only accumulates after prerequisites (e.g. stack-before-key).
+    for p in e.cs.steps[sk].prereq:
+        e.step_done[p] = True
     e._key_aligned = lambda s: True  # type: ignore[method-assign]
     e._gripper_touching = lambda _b: False  # type: ignore[method-assign]
     e.seated_now[peg] = True
