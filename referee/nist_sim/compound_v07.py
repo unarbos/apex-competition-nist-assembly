@@ -94,16 +94,17 @@ STEP_KINDS_V07 = ("insert", "collar", "twist", "rework", "screw", "stack", "key"
 # do not index keys, extract mis-seats, or stack on peg tops. Weight those gates hard.
 # Hard steps dominate so v0.6-style (insert/collar/twist only) stays ≤~0.30; honest privileged
 # that finishes keys/stacks/rework clears ≥~0.50.
-# Hard adaptive steps dominate total weight so v0.6 kings (insert/collar/twist/screw) stay
-# ≤~0.25 even when they clear those kinds at ~0.9. Honest privileged clears keys/stacks/rework.
+# Hard adaptive steps dominate total weight. Image-eval of revealed v0.6 kings on the
+# prior weights still scored ~0.37 via inserts + stacks + some reworks — so insert/screw
+# share is cut again and key/rework/stack carry more of the ceiling.
 STEP_WEIGHT_V07 = {
-    "insert": 0.30,
-    "collar": 0.25,
-    "twist": 0.25,
-    "screw": 0.40,
-    "rework": 2.10,
-    "stack": 2.60,
-    "key": 3.40,
+    "insert": 0.07,
+    "collar": 0.07,
+    "twist": 0.07,
+    "screw": 0.10,
+    "rework": 3.60,
+    "stack": 1.70,
+    "key": 5.20,
 }
 # Short budgets + hard horizon keep slow ONNX kings inside the ~600 s / 64-ep / 2-CPU bar.
 STEP_BUDGET_V07 = {
@@ -121,25 +122,25 @@ TIER_CFG_V07 = {
     # Density: keys dominate; stacks require precise mate; reworks are secondary.
     # edge_p / event_p / reveal_p force obs-conditioned adaptation; slack keeps privileged room.
     "c1": dict(
-        extra_pegs=0, collar_frac=0.12, twist_frac=0.04, screw_frac=0.08, rework_frac=0.22,
-        stack_frac=0.28, key_frac=0.28, waves=(1, 1), edge_p=0.10, event_p=0.14, slack=1.60,
-        reveal_p=0.35, max_keys=1,
+        extra_pegs=0, collar_frac=0.10, twist_frac=0.03, screw_frac=0.06, rework_frac=0.28,
+        stack_frac=0.32, key_frac=0.34, waves=(1, 1), edge_p=0.12, event_p=0.18, slack=1.55,
+        reveal_p=0.40, max_keys=1,
     ),
     "c2": dict(
-        extra_pegs=0, collar_frac=0.12, twist_frac=0.04, screw_frac=0.10, rework_frac=0.26,
-        stack_frac=0.32, key_frac=0.32, waves=(1, 2), edge_p=0.14, event_p=0.20, slack=1.45,
-        reveal_p=0.45, max_keys=1,
+        extra_pegs=0, collar_frac=0.10, twist_frac=0.03, screw_frac=0.08, rework_frac=0.30,
+        stack_frac=0.34, key_frac=0.36, waves=(1, 2), edge_p=0.16, event_p=0.22, slack=1.40,
+        reveal_p=0.50, max_keys=2,
     ),
     "c3": dict(
-        extra_pegs=1, collar_frac=0.10, twist_frac=0.03, screw_frac=0.10, rework_frac=0.26,
-        stack_frac=0.30, key_frac=0.36, waves=(1, 2), edge_p=0.14, event_p=0.20, slack=1.40,
-        reveal_p=0.45, max_keys=2,
+        extra_pegs=1, collar_frac=0.08, twist_frac=0.02, screw_frac=0.08, rework_frac=0.32,
+        stack_frac=0.34, key_frac=0.40, waves=(1, 2), edge_p=0.16, event_p=0.24, slack=1.35,
+        reveal_p=0.55, max_keys=2,
     ),
     "c4": dict(
         # waves=(2, 2): at most 2 waves on c4 (docs previously claimed "up to 5"; code wins).
-        extra_pegs=1, collar_frac=0.10, twist_frac=0.02, screw_frac=0.08, rework_frac=0.28,
-        stack_frac=0.32, key_frac=0.40, waves=(2, 2), edge_p=0.16, event_p=0.24, slack=1.28,
-        reveal_p=0.50, max_keys=2,
+        extra_pegs=1, collar_frac=0.08, twist_frac=0.02, screw_frac=0.06, rework_frac=0.34,
+        stack_frac=0.36, key_frac=0.44, waves=(2, 2), edge_p=0.18, event_p=0.28, slack=1.25,
+        reveal_p=0.60, max_keys=2,
     ),
 }
 # Residuals large enough that open-loop / hard-coded trajectories miss; privileged uses true state.
@@ -148,17 +149,21 @@ EVENT_KINDS_V07 = EVENT_KINDS + ("swap_bias", "misseat")
 EVENT_WEIGHTS_V07 = np.array([0.13, 0.13, 0.11, 0.09, 0.15, 0.13, 0.14, 0.12])
 # Multi-turn press-twists; pitch drawn per step and shown in obs when revealed.
 SCREW_TARGET = (0.30, 0.55)
-KEY_TOL = (0.08, 0.13)  # yaw-index; still reachable for privileged true-state nudge
-STACK_SEAT_XY = 0.0038
-STACK_SEAT_Z_CLEAR = 0.0032
+KEY_TOL = (0.05, 0.09)  # tighter yaw-index; privileged true-state nudge still reaches
+STACK_SEAT_XY = 0.0030
+STACK_SEAT_Z_CLEAR = 0.0028
 # Screw press: palm must be on the peg (touch). Free-twist open-grip scripts still get 0.
 PRESS_PALM_MARGIN = 0.001
 # Rework pegs sit deep enough that casual yanks miss; privileged extract_routine still clears.
-REWORK_SEAT_DEPTH = 0.0030
-# Stack rings are clearance-fit; free physics drops them to the block. Mate zone is tight so
-# accidental near-peg placements by v0.6 kings do not auto-pin.
-STACK_MATE_XY = 0.0040
-STACK_MATE_Z = 0.0040
+REWORK_SEAT_DEPTH = 0.0045
+# Stack rings use a slight interference fit so a deliberate peg-top place can rest in the
+# mate zone (clearance-fit rings free-fall ~4 mm in <1 control frame and can never hold).
+# Mate zone + hold tightened after image-eval showed revealed kings completing ~half of stacks.
+STACK_MATE_XY = 0.0030
+STACK_MATE_Z = 0.0030
+STACK_MATE_HOLD = 5  # ungripped frames in zone before pin (anti-king single-frame sweep)
+# Inner radius = peg_outer - this amount (metres). Soft contacts settle the ring on the top.
+STACK_INTERFERENCE = (0.00012, 0.00028)
 
 OBS_DIM_V07 = OBS_DIM_V06  # 288; encodings reuse v0.6 channels
 
@@ -235,7 +240,12 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
     collars: list[CollarSpec] = []
     taken: list[tuple[float, float]] = []
     for peg_i, kind in ring_pegs:
-        r_in = cond.pegs[peg_i].spec.outer_radius() + float(rng.uniform(0.0006, 0.0012))
+        outer = cond.pegs[peg_i].spec.outer_radius()
+        if kind == "stack":
+            # Interference so the ring can rest on the peg top under free physics.
+            r_in = max(0.0010, outer - float(rng.uniform(*STACK_INTERFERENCE)))
+        else:
+            r_in = outer + float(rng.uniform(0.0006, 0.0012))
         spot = _collar_spot(rng, cond, r_in + COLLAR_T, taken)
         taken.append(spot)
         w = int(rng.integers(peg_wave[peg_i], W))
@@ -256,22 +266,18 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
 
     # --- twists / screws on round pegs ---------------------------------------------------------
     # Prefer upright, early-wave rounds so the privileged press-twist can actually run.
+    # Per-peg Bernoulli(frac): ``round(frac * n)`` with small fracs and n≲5 is almost always 0,
+    # so twist/screw never appeared on live-sized 64-ep draws.
     rounds = [i for i, p in enumerate(cond.pegs) if p.spec.shape == "round"]
     rounds_easy = [
         i for i in rounds
         if peg_wave[i] == 0 and cond.pegs[i].start_type not in ("lying",)
     ] or rounds
-    n_tw = int(round(cfg["twist_frac"] * max(1, len(rounds))))
-    n_sc = int(round(cfg["screw_frac"] * max(1, len(rounds_easy))))
-    twist_pegs: list[int] = []
-    screw_pegs: list[int] = []
-    if rounds_easy:
-        # Prefer disjoint sets; screws take priority on hard tiers for ceiling.
-        n_sc = min(n_sc, len(rounds_easy))
-        screw_pegs = rng.choice(rounds_easy, size=n_sc, replace=False).tolist() if n_sc else []
-        left = [i for i in rounds if i not in screw_pegs]
-        n_tw = min(n_tw, len(left))
-        twist_pegs = rng.choice(left, size=n_tw, replace=False).tolist() if n_tw else []
+    screw_pegs = [int(i) for i in rounds_easy if rng.random() < cfg["screw_frac"]]
+    twist_pegs = [
+        int(i) for i in rounds
+        if i not in screw_pegs and rng.random() < cfg["twist_frac"]
+    ]
 
     # --- key gates ---------------------------------------------------------------------------
     # Keys share the twist obs channels, so never put a key on a twist/screw peg (those would
@@ -294,7 +300,8 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
             pool = [i for i in cands if i not in {p for p, _ in ring_pegs}] or list(cands)
             peg_i = int(rng.choice(pool))
             if len(collars) < MAX_COLLARS:
-                r_in = cond.pegs[peg_i].spec.outer_radius() + float(rng.uniform(0.0006, 0.0012))
+                outer = cond.pegs[peg_i].spec.outer_radius()
+                r_in = max(0.0010, outer - float(rng.uniform(*STACK_INTERFERENCE)))
                 spot = _collar_spot(rng, cond, r_in + COLLAR_T, taken)
                 taken.append(spot)
                 w = int(rng.integers(peg_wave[peg_i], W))
@@ -467,6 +474,7 @@ class AssemblyIIIEpisode(CompoundEpisode):
         self._key_hold = [0] * cond.n_pegs
         self._stack_mated = [False] * len(cond.compound.collars)
         self._stack_mate_run = [0] * len(cond.compound.collars)
+        self._stack_mate_arm = [0] * len(cond.compound.collars)
         self._screw_hand_prev: dict[int, float | None] = {}
         super().__init__(cond, rng)
 
@@ -542,6 +550,7 @@ class AssemblyIIIEpisode(CompoundEpisode):
             self._extracted[i] = False
         self._stack_mated = [False] * self.n_collars
         self._stack_mate_run = [0] * self.n_collars
+        self._stack_mate_arm = [0] * self.n_collars
         self._screw_hand_prev = {}
         self._key_hold = [0] * self.n_pegs
 
@@ -568,6 +577,11 @@ class AssemblyIIIEpisode(CompoundEpisode):
         palm_z = float(self.data.qpos[2] + PAD_CENTRE_Z)
         return palm_z <= peg_top - PRESS_PALM_MARGIN + 1e-4
 
+    def _stack_ring_upright(self, q) -> bool:
+        """Looser than seat upright — soft contacts tip interference rings ~10–20°."""
+        w, x, y, z = q
+        return abs(1.0 - 2.0 * (x * x + y * y)) >= math.cos(math.radians(28.0))
+
     def _stack_in_mate_zone(self, j: int) -> bool:
         """Geometric peg-top place zone (gripper may still be holding)."""
         if self.collar_parked[j]:
@@ -586,11 +600,27 @@ class AssemblyIIIEpisode(CompoundEpisode):
             float(np.hypot(p[0] - hx, p[1] - hy)) <= STACK_MATE_XY
             and abs(bottom - peg_top) <= STACK_MATE_Z
             and bottom > BLOCK_H + 0.015
-            and self._upright(q)
+            and self._stack_ring_upright(q)
         )
 
+    def _stack_release_clear(self, j: int) -> bool:
+        """True when the gripper has released the ring for the mate hold to count.
+
+        Fully clear contact is ideal. Soft pad brushes often linger after the jaws open;
+        an open gripper (``qpos[4]`` near max) means the radial grasp is gone, so the hold
+        may count while the hand rises clear. Closed-grip contact still blocks (anti-king).
+        """
+        if not self._gripper_touching(self.collar_body[j]):
+            return True
+        # MAX_OPEN is 0.012; treat ≥8 mm opening as released.
+        if float(self.data.qpos[4]) >= 0.008:
+            return True
+        p, _ = self.collar_pose(j)
+        palm_z = float(self.data.qpos[2] + PAD_CENTRE_Z)
+        return palm_z >= float(p[2] + COLLAR_H / 2 + 0.010)
+
     def _pin_stack_on_peg(self, j: int) -> None:
-        """Mate a stack ring to the peg top (clearance-fit rings otherwise fall to the block)."""
+        """Mate a stack ring to the peg top (latches the interference-fit place)."""
         col = self.cs.collars[j]
         hx, hy = self.slot_xy[col.peg]
         peg_p, _ = self.peg_pose(col.peg)
@@ -601,24 +631,77 @@ class AssemblyIIIEpisode(CompoundEpisode):
         self._stack_mated[j] = True
         mujoco.mj_forward(self.model, self.data)
 
-    def _maybe_mate_stacks(self) -> None:
-        """Auto-mate only after a sustained hold in the mate zone (anti-king).
+    def _settle_stack_ring(self, j: int) -> None:
+        """Hold an armed ring on the peg-top seat while the release hold counts.
 
-        A single frame of near-peg contact is not enough — open-loop v0.6 kings that
-        sweep a ring past the peg top must not get a free pin. Privileged solvers call
-        ``_pin_stack_on_peg`` explicitly after a deliberate place.
+        Pose is the peg-top mate pose (same as the final pin) but ``_stack_mated`` stays
+        false until ``STACK_MATE_HOLD`` released frames elapse — anti-king sweeps never
+        arm, so they never reach this settle.
+        """
+        col = self.cs.collars[j]
+        hx, hy = self.slot_xy[col.peg]
+        peg_p, _ = self.peg_pose(col.peg)
+        peg_top = float(peg_p[2] + PEG_LEN / 2)
+        z = peg_top + COLLAR_H / 2
+        self._set_free(self.collar_qadr[j], self.collar_vadr[j], [hx, hy, z], _yaw_quat(0.0))
+        self.data.qvel[self.collar_vadr[j] : self.collar_vadr[j] + 6] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+
+    def _maybe_mate_stacks(self) -> None:
+        """Auto-mate after a deliberate place-and-release in the mate zone (anti-king).
+
+        Flow:
+        1. **Arm** while the ring is in the mate zone under a closed grasp (≥2 frames).
+           Open-loop sweeps never arm.
+        2. **Count** ungripped / open-jaw frames still in zone; settle pose gently so
+           soft contacts do not eject the ring before ``STACK_MATE_HOLD``.
+        3. **Pin** once the hold completes.
+
+        Same latch for miners and honest privileged (``oracle=False``). Oracle snaps may
+        still call ``_pin_stack_on_peg`` directly.
+
+        Note: a privileged v0.6-style block-seat collar on an interference stack ring can
+        still snag the peg tip and arm — that path uses true poses miners lack. Obs-only /
+        ONNX kings stay capped by key/rework weights and noise.
         """
         if not hasattr(self, "_stack_mate_run"):
             self._stack_mate_run = [0] * self.n_collars
+        if not hasattr(self, "_stack_mate_arm"):
+            self._stack_mate_arm = [0] * self.n_collars
         for j, col in enumerate(self.cs.collars):
             if not col.is_stack or self.collar_parked[j] or self._stack_mated[j]:
                 self._stack_mate_run[j] = 0
+                self._stack_mate_arm[j] = 0
                 continue
-            if self._stack_in_mate_zone(j) and not self._gripper_touching(self.collar_body[j]):
+            in_zone = self._stack_in_mate_zone(j)
+            released = self._stack_release_clear(j)
+            if in_zone and not released:
+                # Closed grasp in zone — arm the latch (deliberate place).
+                self._stack_mate_arm[j] = min(self._stack_mate_arm[j] + 1, 8)
+                self._stack_mate_run[j] = 0
+            elif released and (in_zone or self._stack_mate_arm[j] >= 2):
+                # Two completable paths (both need sustained released frames):
+                # 1) Unarmed: interference-fit ring rests in zone — keep upright (soft
+                #    contacts otherwise tip the ring out of `_upright` within 1–2 frames).
+                # 2) Armed: settle back to the peg-top seat after a place-and-release.
+                if self._stack_mate_arm[j] >= 2:
+                    self._settle_stack_ring(j)
+                else:
+                    p, _ = self.collar_pose(j)
+                    self._set_free(
+                        self.collar_qadr[j],
+                        self.collar_vadr[j],
+                        [float(p[0]), float(p[1]), float(p[2])],
+                        _yaw_quat(0.0),
+                    )
+                    self.data.qvel[self.collar_vadr[j] : self.collar_vadr[j] + 6] = 0.0
+                    mujoco.mj_forward(self.model, self.data)
                 self._stack_mate_run[j] += 1
             else:
+                if not in_zone:
+                    self._stack_mate_arm[j] = 0
                 self._stack_mate_run[j] = 0
-            if self._stack_mate_run[j] >= 4:
+            if self._stack_mate_run[j] >= STACK_MATE_HOLD:
                 self._pin_stack_on_peg(j)
 
     def _stack_seated_now(self, j: int) -> bool:
@@ -750,7 +833,10 @@ class AssemblyIIIEpisode(CompoundEpisode):
             j = s.part
             if self.collar_parked[j]:
                 return False, 0.0
-            done = self.collar_run[j] >= SEATED_HOLD or (
+            # Latch mate is the completion gate (arm + STACK_MATE_HOLD released frames).
+            # Do not also require SEATED_HOLD via collar_run — that double-hold burned the
+            # last horizon frames after pin (honest seed7 saw ~16/78 mated-but-not-done).
+            done = bool(self._stack_mated[j]) or self.collar_run[j] >= SEATED_HOLD or (
                 self.step_done[k] and self._stack_seated_now(j)
             )
             p, _ = self.collar_pose(j)

@@ -5,7 +5,7 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.7.1** ("Assembly III", profile `v07`) — denser graphs, new step kinds
+> Version: **v0.7.2** ("Assembly III", profile `v07`) — denser graphs, new step kinds
 > (`rework`, `screw`, `stack`, `key`), press-gated screws, **obs-indexed key yaw**, mis-seated
 > rework, stack rings, and residual noise so open-loop v0.6 controllers fail. Observation stays
 > `[B, 288]` with v0.6 encodings extended in-place. Referee image bakes `NIST_PROFILE=v07`.
@@ -47,7 +47,7 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.7.1 Assembly III)
+## The task (v0.7.2 Assembly III)
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions, slot yaw, and a cross-section per slot from continuous families

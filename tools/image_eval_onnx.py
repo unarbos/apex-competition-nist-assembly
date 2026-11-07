@@ -42,8 +42,8 @@ def docker_eval(
     seed: int,
     per: int,
     *,
-    referee_image: str = "nist-assembly-referee:v071",
-    player_image: str = "nist-assembly-player:v071",
+    referee_image: str = "nist-assembly-referee:v072",
+    player_image: str = "nist-assembly-player:v072",
     deadline_ms: int = 80,
     workers: int = 2,
 ) -> dict:
@@ -137,8 +137,8 @@ def main() -> int:
     ap.add_argument("--per", type=int, default=2, help="episodes per stratum (8 strata)")
     ap.add_argument("--full", action="store_true", help="8/stratum = 64 episodes")
     ap.add_argument("--out", type=Path, default=ROOT / "out" / "image_eval_onnx")
-    ap.add_argument("--referee-image", default="nist-assembly-referee:v071")
-    ap.add_argument("--player-image", default="nist-assembly-player:v071")
+    ap.add_argument("--referee-image", default="nist-assembly-referee:v072")
+    ap.add_argument("--player-image", default="nist-assembly-player:v072")
     ap.add_argument("--twice", action="store_true", help="run each policy twice (determinism check)")
     a = ap.parse_args()
     if a.full:

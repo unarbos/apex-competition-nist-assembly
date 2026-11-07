@@ -1,4 +1,4 @@
-# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0 / 0.7.1)
+# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.2)
 
 ## Goal
 
@@ -62,3 +62,13 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
 - Removed `round_wall_s` and per-episode `EPISODE_WALL_S_V07` wall-clock cuts.
 - Stack hold counting no longer fights the parent collar-on-block reset.
 - Key yaw sampling + `key_tol` obs packing; latch so completed hard steps stay completed.
+
+## v0.7.2 fixes (stack action-mate + twist/screw draw)
+
+- Stack rings use a slight interference fit so a deliberate peg-top place can rest in the
+  mate zone; `_maybe_mate_stacks` arms on a closed grasp in zone, then pins after
+  `STACK_MATE_HOLD` released frames (single-frame sweeps do not free-pin).
+- Honest privileged (`oracle=False`) must not call `_pin_stack_on_peg` / stack snaps;
+  completion uses the same latch miners use (pose nudges only).
+- Twist/screw: per-eligible-peg Bernoulli(`twist_frac` / `screw_frac`) instead of
+  `round(frac * n)` (which was almost always 0 on live-sized graphs).

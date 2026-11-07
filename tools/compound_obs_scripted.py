@@ -34,6 +34,7 @@ from nist_sim.compound_v07 import (  # noqa: E402
     sample_compound_v07,
 )
 from nist_sim.env import ACT_DIM, DXYZ, DYAW, MAX_PEGS, PEG_FEAT, PROPRIO_DIM  # noqa: E402
+from miner_path_stack import MinerStackPlacer  # noqa: E402
 
 PEG0 = PROPRIO_DIM + ACT_DIM  # 21
 TASK0 = 184  # v0.5 prefix ends here
@@ -68,6 +69,7 @@ class CompoundObsScripted:
     mode: str = "insert"  # insert | collar | twist | stack
     timer: int = 0
     yaw0: float = 0.0
+    stack_placer: MinerStackPlacer | None = None
     # Screw dir magnitude 2 is visible; we treat |dir|>1.5 as screw but still only twist
     # (no reliable press from noisy force alone — deliberate weakness vs privileged).
 
@@ -76,6 +78,7 @@ class CompoundObsScripted:
         self.target = -1
         self.mode = "insert"
         self.timer = 0
+        self.stack_placer = None
 
     def _hand_xy(self, obs):
         return obs[0:2] / 10.0
@@ -96,21 +99,55 @@ class CompoundObsScripted:
             if f[0] < 0.5:
                 continue
             if t[0] < 0.5 and t[1] < 0.5 and f[16] < 0.5:
-                # Relative peg→slot is in f[1:3] (×10) plus slot is f[13:15] (×10) — use rel.
-                rel = f[1:3] / 10.0
-                d = float(np.hypot(*(rel))) + 0.15 * float(np.hypot(*(f[1:3] / 10.0 - (hand - f[13:15] / 10.0))))
-                # Prefer near-hand pegs.
-                peg_xy_est = hand + f[1:3] / 10.0  # rough: rel is peg-slot, not peg-hand
                 # Peg relative to hand: from proprio we only have slot and rel-to-slot.
                 slot = f[13:15] / 10.0
                 peg_est = slot + f[1:3] / 10.0
                 d = float(np.hypot(*(peg_est - hand)))
+                mode = "insert"
+                # Prefer seating pegs that already reveal a key tol (unlocks high-weight key).
+                if 0.25 < float(t[5]) < 0.95:
+                    d -= 0.35
                 if d < best_d:
-                    best, best_d, best_mode = i, d, "insert"
+                    best, best_d, best_mode = i, d, mode
+            # Mis-seated rework: seated but insert/rework not done, no key/collar flag.
+            if (
+                f[16] > 0.5
+                and t[0] < 0.5
+                and t[1] < 0.5
+                and abs(float(t[2])) < 0.05
+                and abs(float(t[5])) < 0.25
+            ):
+                slot = f[13:15] / 10.0
+                d = float(np.hypot(*(slot - hand))) - 0.20
+                if d < best_d:
+                    best, best_d, best_mode = i, d, "rework"
+            # Key tol packs into t[5] as tol*10 ∈ ~[0.5, 0.9] when no collar flag (1 or 2).
+            # When collar/stack owns t[5]∈{1,2}, fall back to unit-circle sin/cos with cos<0
+            # (twist progress is always ≥0, so negative cos cannot be twist).
+            s2, s3, s5 = float(t[2]), float(t[3]), float(t[5])
+            is_screw = abs(s2) > 1.4
+            unit = s2 * s2 + s3 * s3
+            is_key = f[16] > 0.5 and t[4] < 0.5 and (
+                0.25 < s5 < 0.95
+                or (s5 >= 0.95 and unit > 0.7 and abs(s2) <= 1.05 and s3 < -0.05)
+            )
+            is_twist = (
+                (not is_screw)
+                and (not is_key)
+                and abs(abs(s2) - 1.0) < 0.12
+                and 0.0 <= s3 <= 1.0 + 1e-3
+            )
+            if is_key:
+                slot = f[13:15] / 10.0
+                d = float(np.hypot(*(slot - hand))) - 0.30  # keys dominate score
+                if d < best_d:
+                    best, best_d, best_mode = i, d, "key"
             # Twist / screw available: dir nonzero, not blocked, peg seated.
-            if abs(float(t[2])) > 0.5 and t[4] < 0.5 and f[16] > 0.5 and float(t[3]) < 0.95:
+            if (is_twist or is_screw) and t[4] < 0.5 and f[16] > 0.5 and s3 < 0.95:
                 slot = f[13:15] / 10.0
                 d = float(np.hypot(*(slot - hand))) + 0.05
+                if is_screw:
+                    d -= 0.02
                 if d < best_d:
                     best, best_d, best_mode = i, d, "twist"
         # Collars / stacks.
@@ -148,10 +185,12 @@ class CompoundObsScripted:
                 a[2] = 0.3
                 a[4] = 1.0
                 return a
-        if self.mode in ("insert",):
+        if self.mode in ("insert", "rework"):
             return self._act_insert(obs)
         if self.mode in ("collar", "stack"):
             return self._act_collar(obs)
+        if self.mode == "key":
+            return self._act_key(obs)
         return self._act_twist(obs)
 
     def _insert_only(self, obs: np.ndarray) -> np.ndarray:
@@ -236,18 +275,17 @@ class CompoundObsScripted:
         if c[0] < 0.5 or c[11] > 0.5:
             self.reset()
             return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
-        # Collar relative to hole estimate: c[1:3]; height c[3].
-        # Approximate collar world as hand + (unknown); steer to cancel rel to hole by moving
-        # opposite to the collar-hole residual projected through hand.
-        # Practical heuristic: move so that collar-hole XY residual shrinks; we treat residual
-        # as "collar is at hand, hole is hand - residual".
+        stack = c[0] > 1.5
+        if stack:
+            return self._act_stack(obs, j, c)
+        # Block-seat collar: residual c[1:3] is collar−hole (×10); peg slot anchors world.
         hand = self._hand_xy(obs)
         hz = self._hand_z(obs)
-        hole_est = hand - c[1:3] / 10.0  # if collar≈hand when gripped; before grasp, noisy
-        # Before grasp, move toward where we think the collar is: hole + residual.
-        collar_est = hole_est + c[1:3] / 10.0
+        peg_i = int(np.clip(int(round(float(c[10]) * MAX_PEGS)), 0, MAX_PEGS - 1))
+        slot_est = _peg(obs, peg_i)[13:15] / 10.0
+        residual = c[1:3] / 10.0
+        collar_est = slot_est + residual
         a = np.zeros(5)
-        stack = c[0] > 1.5
         if self.phase == "goto":
             err = collar_est - hand
             a[0:2] = np.clip(err / DXYZ, -1, 1)
@@ -271,17 +309,15 @@ class CompoundObsScripted:
                 self.phase = "place"
                 self.timer = 0
         elif self.phase == "place":
-            # Now collar≈hand; drive residual to 0.
-            a[0:2] = np.clip((-c[1:3] / 10.0) / DXYZ, -1, 1)
-            z_goal = 0.055 if stack else 0.035
-            a[2] = np.clip((z_goal - hz) / DXYZ, -1, 1)
+            a[0:2] = np.clip((-residual) / DXYZ, -1, 1)
+            a[2] = np.clip((0.035 - hz) / DXYZ, -1, 1)
             a[4] = -1.0
             if abs(float(c[1])) < 0.03 and abs(float(c[2])) < 0.03:
                 self.phase = "drop"
                 self.timer = 0
         else:
-            a[0:2] = np.clip((-c[1:3] / 10.0) / DXYZ, -0.4, 0.4)
-            a[2] = -0.35 if stack else -0.55
+            a[0:2] = np.clip((-residual) / DXYZ, -0.4, 0.4)
+            a[2] = -0.55
             a[4] = -1.0
             self.timer += 1
             if self.timer > 20:
@@ -289,6 +325,97 @@ class CompoundObsScripted:
                 a[2] = 0.5
             if self.timer > 35 or c[11] > 0.5:
                 self.reset()
+        return a
+
+    def _act_stack(self, obs: np.ndarray, j: int, c: np.ndarray) -> np.ndarray:
+        """Peg-top stack place via observe only (open jaws before rise)."""
+        peg_i = int(np.clip(int(round(float(c[10]) * MAX_PEGS)), 0, MAX_PEGS - 1))
+        if self.stack_placer is None or self.stack_placer.collar_j != j:
+            self.stack_placer = MinerStackPlacer(collar_j=j, peg_i=peg_i)
+        # Prefer peg seat: if peg not seated, fall back to insert on that peg.
+        if _peg(obs, peg_i)[16] < 0.5:
+            self.target = peg_i
+            self.mode = "insert"
+            self.phase = "goto"
+            self.stack_placer = None
+            return self._act_insert(obs)
+        a = self.stack_placer.act(obs)
+        if self.stack_placer.phase == "idle" and self.stack_placer.timer > 20:
+            self.reset()
+        elif c[11] > 0.5:
+            self.reset()
+        return a
+
+    def _act_key(self, obs: np.ndarray) -> np.ndarray:
+        """Yaw-index a seated peg using key sin/cos channels (obs-only)."""
+        i = self.target
+        f = _peg(obs, i)
+        t = _task(obs, i)
+        if f[0] < 0.5:
+            self.reset()
+            return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
+        # If the peg pops out, re-seat via insert rather than abandoning forever.
+        if f[16] < 0.5:
+            self.mode = "insert"
+            self.phase = "goto"
+            self.timer = 0
+            return self._act_insert(obs)
+        s2, s3 = float(t[2]), float(t[3])
+        if abs(s2) > 1.4 or t[4] > 0.5:
+            self.reset()
+            return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
+        slot = f[13:15] / 10.0
+        hand = self._hand_xy(obs)
+        hz = self._hand_z(obs)
+        key_yaw = math.atan2(s2, s3)
+        # Peg quat is f[4:8] (wxyz); use estimated peg yaw vs key target.
+        qw, qx, qy, qz = (float(f[4 + k]) for k in range(4))
+        peg_yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+        err = _wrap(key_yaw - peg_yaw)
+        tol = float(t[5]) / 10.0 if 0.25 < float(t[5]) < 0.95 else 0.08
+        a = np.zeros(5)
+        if self.phase in ("pick", "goto"):
+            self.phase = "goto"
+            e = slot - hand
+            a[0:2] = np.clip(e / DXYZ, -1, 1)
+            a[2] = np.clip((0.048 - hz) / DXYZ, -1, 1)
+            a[4] = 1.0
+            if float(np.hypot(*e)) < 0.005:
+                self.phase = "press"
+                self.timer = 0
+        elif self.phase == "press":
+            e = slot - hand
+            a[0:2] = np.clip(e / DXYZ, -0.35, 0.35)
+            # Light rim touch — hard press unseats the peg under noise.
+            a[2] = np.clip((0.032 - hz) / DXYZ, -0.45, 0.45)
+            a[4] = -1.0
+            self.timer += 1
+            if self.timer > 12:
+                self.phase = "turn"
+                self.timer = 0
+        elif self.phase == "turn":
+            e = slot - hand
+            a[0:2] = np.clip(e / DXYZ, -0.25, 0.25)
+            a[2] = np.clip((0.030 - hz) / DXYZ, -0.25, 0.25)
+            a[3] = float(np.clip(err / 0.30, -1, 1))
+            a[4] = -1.0
+            self.timer += 1
+            if abs(err) < tol * 0.85 or self.timer > 55:
+                self.phase = "release"
+                self.timer = 0
+        else:
+            # Retreat laterally so hold can count without yanking the peg.
+            a[0] = 0.35
+            a[1] = 0.35
+            a[2] = 0.6
+            a[4] = 1.0
+            self.timer += 1
+            if self.timer > 22:
+                if abs(err) > tol:
+                    self.phase = "goto"
+                    self.timer = 0
+                else:
+                    self.reset()
         return a
 
     def _act_twist(self, obs: np.ndarray) -> np.ndarray:
