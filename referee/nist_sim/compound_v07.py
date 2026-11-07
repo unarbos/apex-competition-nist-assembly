@@ -833,7 +833,10 @@ class AssemblyIIIEpisode(CompoundEpisode):
             j = s.part
             if self.collar_parked[j]:
                 return False, 0.0
-            done = self.collar_run[j] >= SEATED_HOLD or (
+            # Latch mate is the completion gate (arm + STACK_MATE_HOLD released frames).
+            # Do not also require SEATED_HOLD via collar_run — that double-hold burned the
+            # last horizon frames after pin (honest seed7 saw ~16/78 mated-but-not-done).
+            done = bool(self._stack_mated[j]) or self.collar_run[j] >= SEATED_HOLD or (
                 self.step_done[k] and self._stack_seated_now(j)
             )
             p, _ = self.collar_pose(j)

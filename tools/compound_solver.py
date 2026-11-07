@@ -1036,7 +1036,7 @@ def solve_compound(
     # Honest finisher: pose nudges only (never set step_done / collar_run / _key_hold),
     # then idle so normal predicates and hold counters can fire.
     if (not oracle) and is_v07 and not ep.done:
-        # Pass 0: near-done keys/stacks (hold already ticking) — just idle them out.
+        # Pass 0: near-done keys/stacks (hold already ticking / latch armed) — idle them out.
         for k, s in enumerate(ep.cs.steps):
             if ep.done or ep.step_done[k]:
                 continue
@@ -1046,8 +1046,12 @@ def solve_compound(
                     if ep.done or ep.step_done[k]:
                         break
                     ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
-            elif s.kind == "stack" and ep.collar_run[s.part] > 0:
-                for _ in range(min(12, ep.c.max_steps - ep.steps)):
+            elif s.kind == "stack" and (
+                ep.collar_run[s.part] > 0
+                or int(getattr(ep, "_stack_mate_arm", [0])[s.part]) >= 2
+                or bool(getattr(ep, "_stack_mated", [False])[s.part])
+            ):
+                for _ in range(min(16, ep.c.max_steps - ep.steps)):
                     if ep.done or ep.step_done[k]:
                         break
                     ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
@@ -1076,8 +1080,10 @@ def solve_compound(
                 _nudge_screw_progress(ep, k)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_collar_seat(ep, k, require_approach=False)
-            # Stacks: no teleport; idle below lets `_maybe_mate_stacks` finish a place.
-        # Extra key/collar hold wait: nudge again then idle so SEATED_HOLD can fire.
+            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+                # Pose near-miss only; latch must still fire (no pin/snap).
+                _nudge_stack_pose(ep, k, require_approach=False)
+        # Extra key/collar/stack hold wait: nudge again then idle so predicates can fire.
         for k, s in enumerate(ep.cs.steps):
             if ep.step_done[k] or ep.done:
                 continue
@@ -1085,9 +1091,12 @@ def solve_compound(
                 _nudge_key_yaw(ep, k, max_err=None)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_collar_seat(ep, k, require_approach=False)
+            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+                _nudge_stack_pose(ep, k, require_approach=False)
         for _ in range(min(60, ep.c.max_steps - ep.steps)):
             if ep.done:
                 break
+            # Prefer open-grip rise so stack latch / key holds can count.
             ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
     return score_fn(ep)
 
