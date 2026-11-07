@@ -94,16 +94,17 @@ STEP_KINDS_V07 = ("insert", "collar", "twist", "rework", "screw", "stack", "key"
 # do not index keys, extract mis-seats, or stack on peg tops. Weight those gates hard.
 # Hard steps dominate so v0.6-style (insert/collar/twist only) stays ≤~0.30; honest privileged
 # that finishes keys/stacks/rework clears ≥~0.50.
-# Hard adaptive steps dominate total weight so v0.6 kings (insert/collar/twist/screw) stay
-# ≤~0.25 even when they clear those kinds at ~0.9. Honest privileged clears keys/stacks/rework.
+# Hard adaptive steps dominate total weight. Image-eval of revealed v0.6 kings on the
+# prior weights still scored ~0.37 via inserts + stacks + some reworks — so insert/screw
+# share is cut again and key/rework/stack carry more of the ceiling.
 STEP_WEIGHT_V07 = {
-    "insert": 0.30,
-    "collar": 0.25,
-    "twist": 0.25,
-    "screw": 0.40,
-    "rework": 2.10,
-    "stack": 2.60,
-    "key": 3.40,
+    "insert": 0.07,
+    "collar": 0.07,
+    "twist": 0.07,
+    "screw": 0.10,
+    "rework": 3.60,
+    "stack": 1.70,
+    "key": 5.20,
 }
 # Short budgets + hard horizon keep slow ONNX kings inside the ~600 s / 64-ep / 2-CPU bar.
 STEP_BUDGET_V07 = {
@@ -121,25 +122,25 @@ TIER_CFG_V07 = {
     # Density: keys dominate; stacks require precise mate; reworks are secondary.
     # edge_p / event_p / reveal_p force obs-conditioned adaptation; slack keeps privileged room.
     "c1": dict(
-        extra_pegs=0, collar_frac=0.12, twist_frac=0.04, screw_frac=0.08, rework_frac=0.22,
-        stack_frac=0.28, key_frac=0.28, waves=(1, 1), edge_p=0.10, event_p=0.14, slack=1.60,
-        reveal_p=0.35, max_keys=1,
+        extra_pegs=0, collar_frac=0.10, twist_frac=0.03, screw_frac=0.06, rework_frac=0.28,
+        stack_frac=0.32, key_frac=0.34, waves=(1, 1), edge_p=0.12, event_p=0.18, slack=1.55,
+        reveal_p=0.40, max_keys=1,
     ),
     "c2": dict(
-        extra_pegs=0, collar_frac=0.12, twist_frac=0.04, screw_frac=0.10, rework_frac=0.26,
-        stack_frac=0.32, key_frac=0.32, waves=(1, 2), edge_p=0.14, event_p=0.20, slack=1.45,
-        reveal_p=0.45, max_keys=1,
+        extra_pegs=0, collar_frac=0.10, twist_frac=0.03, screw_frac=0.08, rework_frac=0.30,
+        stack_frac=0.34, key_frac=0.36, waves=(1, 2), edge_p=0.16, event_p=0.22, slack=1.40,
+        reveal_p=0.50, max_keys=2,
     ),
     "c3": dict(
-        extra_pegs=1, collar_frac=0.10, twist_frac=0.03, screw_frac=0.10, rework_frac=0.26,
-        stack_frac=0.30, key_frac=0.36, waves=(1, 2), edge_p=0.14, event_p=0.20, slack=1.40,
-        reveal_p=0.45, max_keys=2,
+        extra_pegs=1, collar_frac=0.08, twist_frac=0.02, screw_frac=0.08, rework_frac=0.32,
+        stack_frac=0.34, key_frac=0.40, waves=(1, 2), edge_p=0.16, event_p=0.24, slack=1.35,
+        reveal_p=0.55, max_keys=2,
     ),
     "c4": dict(
         # waves=(2, 2): at most 2 waves on c4 (docs previously claimed "up to 5"; code wins).
-        extra_pegs=1, collar_frac=0.10, twist_frac=0.02, screw_frac=0.08, rework_frac=0.28,
-        stack_frac=0.32, key_frac=0.40, waves=(2, 2), edge_p=0.16, event_p=0.24, slack=1.28,
-        reveal_p=0.50, max_keys=2,
+        extra_pegs=1, collar_frac=0.08, twist_frac=0.02, screw_frac=0.06, rework_frac=0.34,
+        stack_frac=0.36, key_frac=0.44, waves=(2, 2), edge_p=0.18, event_p=0.28, slack=1.25,
+        reveal_p=0.60, max_keys=2,
     ),
 }
 # Residuals large enough that open-loop / hard-coded trajectories miss; privileged uses true state.
@@ -148,21 +149,21 @@ EVENT_KINDS_V07 = EVENT_KINDS + ("swap_bias", "misseat")
 EVENT_WEIGHTS_V07 = np.array([0.13, 0.13, 0.11, 0.09, 0.15, 0.13, 0.14, 0.12])
 # Multi-turn press-twists; pitch drawn per step and shown in obs when revealed.
 SCREW_TARGET = (0.30, 0.55)
-KEY_TOL = (0.08, 0.13)  # yaw-index; still reachable for privileged true-state nudge
-STACK_SEAT_XY = 0.0038
-STACK_SEAT_Z_CLEAR = 0.0032
+KEY_TOL = (0.05, 0.09)  # tighter yaw-index; privileged true-state nudge still reaches
+STACK_SEAT_XY = 0.0030
+STACK_SEAT_Z_CLEAR = 0.0028
 # Screw press: palm must be on the peg (touch). Free-twist open-grip scripts still get 0.
 PRESS_PALM_MARGIN = 0.001
 # Rework pegs sit deep enough that casual yanks miss; privileged extract_routine still clears.
-REWORK_SEAT_DEPTH = 0.0030
+REWORK_SEAT_DEPTH = 0.0045
 # Stack rings use a slight interference fit so a deliberate peg-top place can rest in the
 # mate zone (clearance-fit rings free-fall ~4 mm in <1 control frame and can never hold).
-# Mate zone stays tight so accidental near-peg sweeps by v0.6 kings do not auto-pin.
-STACK_MATE_XY = 0.0040
-STACK_MATE_Z = 0.0040
-STACK_MATE_HOLD = 4  # ungripped frames in zone before pin (anti-king single-frame sweep)
+# Mate zone + hold tightened after image-eval showed revealed kings completing ~half of stacks.
+STACK_MATE_XY = 0.0030
+STACK_MATE_Z = 0.0030
+STACK_MATE_HOLD = 5  # ungripped frames in zone before pin (anti-king single-frame sweep)
 # Inner radius = peg_outer - this amount (metres). Soft contacts settle the ring on the top.
-STACK_INTERFERENCE = (0.00010, 0.00028)
+STACK_INTERFERENCE = (0.00012, 0.00028)
 
 OBS_DIM_V07 = OBS_DIM_V06  # 288; encodings reuse v0.6 channels
 
@@ -658,6 +659,10 @@ class AssemblyIIIEpisode(CompoundEpisode):
 
         Same latch for miners and honest privileged (``oracle=False``). Oracle snaps may
         still call ``_pin_stack_on_peg`` directly.
+
+        Note: a privileged v0.6-style block-seat collar on an interference stack ring can
+        still snag the peg tip and arm — that path uses true poses miners lack. Obs-only /
+        ONNX kings stay capped by key/rework weights and noise.
         """
         if not hasattr(self, "_stack_mate_run"):
             self._stack_mate_run = [0] * self.n_collars
@@ -828,7 +833,10 @@ class AssemblyIIIEpisode(CompoundEpisode):
             j = s.part
             if self.collar_parked[j]:
                 return False, 0.0
-            done = self.collar_run[j] >= SEATED_HOLD or (
+            # Latch mate is the completion gate (arm + STACK_MATE_HOLD released frames).
+            # Do not also require SEATED_HOLD via collar_run — that double-hold burned the
+            # last horizon frames after pin (honest seed7 saw ~16/78 mated-but-not-done).
+            done = bool(self._stack_mated[j]) or self.collar_run[j] >= SEATED_HOLD or (
                 self.step_done[k] and self._stack_seated_now(j)
             )
             p, _ = self.collar_pose(j)

@@ -34,6 +34,7 @@ from nist_sim.compound import (  # noqa: E402
     wrap,
 )
 from nist_sim.compound_v07 import (  # noqa: E402
+    STACK_MATE_HOLD,
     AssemblyIIIEpisode,
     compound_score_v07,
     sample_compound_v07,
@@ -300,16 +301,17 @@ def collar_routine(ep: CompoundEpisode, j: int, stack: bool = False) -> Iterator
             # Release: open jaws first at place height (radial grasp gone; latch may count
             # via open-gripper clear), then rise so pads leave. Do not lift while closed —
             # that drags an interference-fit ring off the peg.
-            yield from ctl.wait(6, grip=1.0)
+            yield from ctl.wait(8, grip=1.0)
             peg_p, _ = ep.peg_pose(col.peg)
             peg_top = peg_p[2] + PEG_LEN / 2
             clear_z = peg_top + COLLAR_H / 2 - PAD_CENTRE_Z + 0.022
-            for _ in range(45):
-                yield ctl.act([hx, hy, clear_z], None, 1.0, speed=0.40)
+            for _ in range(50):
+                yield ctl.act([hx, hy, clear_z], None, 1.0, speed=0.35)
                 if float(ep.data.qpos[2]) >= clear_z - 0.0015:
                     break
-            # Idle above the peg so `_maybe_mate_stacks` can finish the ungripped hold.
-            yield from ctl.wait(max(14, SEATED_HOLD_WAIT()), grip=1.0)
+            # Idle above the peg so `_maybe_mate_stacks` can finish the ungripped hold
+            # (STACK_MATE_HOLD may be 5+ frames under the hardened latch).
+            yield from ctl.wait(max(18, SEATED_HOLD_WAIT(), STACK_MATE_HOLD + 8), grip=1.0)
             yield from ctl.goto([hx + 0.05, hy + 0.05, 0.12], None, 1.0, max_n=35)
             yield from ctl.wait(6, grip=1.0)
         else:
@@ -1034,7 +1036,7 @@ def solve_compound(
     # Honest finisher: pose nudges only (never set step_done / collar_run / _key_hold),
     # then idle so normal predicates and hold counters can fire.
     if (not oracle) and is_v07 and not ep.done:
-        # Pass 0: near-done keys/stacks (hold already ticking) — just idle them out.
+        # Pass 0: near-done keys/stacks (hold already ticking / latch armed) — idle them out.
         for k, s in enumerate(ep.cs.steps):
             if ep.done or ep.step_done[k]:
                 continue
@@ -1044,8 +1046,12 @@ def solve_compound(
                     if ep.done or ep.step_done[k]:
                         break
                     ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
-            elif s.kind == "stack" and ep.collar_run[s.part] > 0:
-                for _ in range(min(12, ep.c.max_steps - ep.steps)):
+            elif s.kind == "stack" and (
+                ep.collar_run[s.part] > 0
+                or int(getattr(ep, "_stack_mate_arm", [0])[s.part]) >= 2
+                or bool(getattr(ep, "_stack_mated", [False])[s.part])
+            ):
+                for _ in range(min(16, ep.c.max_steps - ep.steps)):
                     if ep.done or ep.step_done[k]:
                         break
                     ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
@@ -1074,8 +1080,10 @@ def solve_compound(
                 _nudge_screw_progress(ep, k)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_collar_seat(ep, k, require_approach=False)
-            # Stacks: no teleport; idle below lets `_maybe_mate_stacks` finish a place.
-        # Extra key/collar hold wait: nudge again then idle so SEATED_HOLD can fire.
+            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+                # Pose near-miss only; latch must still fire (no pin/snap).
+                _nudge_stack_pose(ep, k, require_approach=False)
+        # Extra key/collar/stack hold wait: nudge again then idle so predicates can fire.
         for k, s in enumerate(ep.cs.steps):
             if ep.step_done[k] or ep.done:
                 continue
@@ -1083,9 +1091,12 @@ def solve_compound(
                 _nudge_key_yaw(ep, k, max_err=None)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_collar_seat(ep, k, require_approach=False)
+            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+                _nudge_stack_pose(ep, k, require_approach=False)
         for _ in range(min(60, ep.c.max_steps - ep.steps)):
             if ep.done:
                 break
+            # Prefer open-grip rise so stack latch / key holds can count.
             ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
     return score_fn(ep)
 
