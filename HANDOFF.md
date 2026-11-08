@@ -17,10 +17,10 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.3` (RC; do not tag/ship yet) | ☐ |
-| `spec.yaml` version `0.7.3`; digests remain at released v0.7.2 until later ship | `spec.yaml` | ☐ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:4716bc8397dfb85ef57e942c433b548a466fab34f77b5b98162a7a5db53d6bdc` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:121f08d6f91926c0a10b2abffcf5a9c7b9d50320947e71bba88ea078e0d08ad0` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.3` | ☑ |
+| `spec.yaml` version `0.7.3`; digests pinned from release v0.7.3 | `spec.yaml` | ☑ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:2885834ff05bf92c5e83017cfdd226ab511527c295e9be10b58e27cd2a3d1ada` | ☑ |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:339f75e12ca4e12610663ecc60ddb97bab1cce2b064886ac414d328e1f51151e` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
@@ -28,7 +28,7 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 42108807434 (tag `v0.7.0`).
+onnxruntime 1.31.0. Image digests from release run 42424076462 (tag `v0.7.3`).
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
@@ -207,8 +207,8 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
 ## 13. v0.7.3 (adaptive compound harden)
-- Spec `0.7.3`; digests remain at released v0.7.2 until a later ship (do **not** pin/tag from
-  this PR). Profile bake stays `NIST_PROFILE=v07`.
+- Spec `0.7.3`; digests pinned from release v0.7.3 (release.yml run 42424076462).
+  Profile bake stays `NIST_PROFILE=v07`.
 - Defeats v0.7.1-trained Round 22 kings that still scored ~0.43 on v0.7.2: mid-episode
   `retarget` / `reorder` / `flip_twist` events, post-insert key retarget, touch-gated reveals,
   stack-before-key precedence, keys complete only after prerequisites, out-of-order keys score 0.
