@@ -1,5 +1,53 @@
 # NIST-Lite calibration
 
+## v0.7.4 (branching / probe adaptive harden, profile `v07`)
+
+Spec `0.7.4`. Image bake stays `NIST_PROFILE=v07` (do not regress). Digests on main stay at
+v0.7.3 until a later ship decision — this release does **not** pin digests.
+
+Hardens vs strong conditional ONNX scripts that still scored ~0.50–0.60 on live v0.7.3
+(Rounds 25–27). Difficulty is in **feedback / adaptation structure**, not perception noise
+or broken physics:
+
+- **Press-gated probe-refined key yaw:** after touch/late reveal, obs `sin/cos` carries a
+  large decaying bias that converges only while *pressing* on the peg (`KEY_PROBE_FRAMES`).
+  Touch-and-snap scripts keep a wrong absolute yaw.
+- **Single-active key rotation (`activate`)** on dual-key hard tiers; inactive keys report
+  `blocked=1` and cannot accumulate hold.
+- **`regraph`:** drop soft unfinished edges and redraw 1–3 wave-consistent ones.
+- **Post-stack key retarget** (+ denser post-insert retarget); `max_keys=1` on c1/c2.
+- Weights: insert/collar/twist 0.03, screw 0.05, rework 1.60, stack 3.50, key 4.50.
+- Horizon hard cap **1600** control steps. No wall-clock score caps.
+
+**Privileged numbers below are honest** (`solve_compound(..., oracle=False)` / no helpers that
+set `step_done` / `collar_run` / `_key_hold` / `_stack_mated`). Pose nudges only. Public seeds.
+Strong scripted ONNX files are **not** in the repo (calibration only); refer to them as
+"strong scripted controllers" with aggregate scores only.
+
+Reproduce (in-process; same code the image bakes):
+
+```bash
+NIST_PROFILE=v07 python tools/compound_solver.py --profile v07 --honest --seed 7 --per 8 --episodes 64
+NIST_PROFILE=v07 python tools/calib_v06.py --profile v07 --seeds 7 19 --per 8 --workers 4 \
+  --policies reference v06_style compound_scripted /path/to/strong_scripted_*.onnx \
+  --ref reference --live-eps 64 --cpus 2 --out out/calib_v074
+```
+
+### Calibration table (64 episodes = 8/stratum, 2 CPU workers)
+
+| Policy | seed 7 mean | seed 7 wall_s | seed 19 mean | seed 19 wall_s | notes |
+|---|---|---|---|---|---|
+| privileged reference (honest) | **0.451**† | ~90‡ | (in paired 7+19 mean **0.451**) | — | †from seeds 7+19 paired run mean; ≥~0.40 / roughly ~0.45–0.50 |
+| v0.6-style scripted | **0.193** | ~92‡ | (paired) | — | ≤~0.25 |
+| obs-only compound_scripted | **0.002** | ~100‡ | (paired) | — | ≤~0.15 |
+| strong scripted controllers (3) | *(pending full ONNX table)* | | | | target ≤~0.25 |
+| projected live (slowest in-process) | — | — | — | — | ~100 s in-process; ONNX kings slower (target &lt;600 s / hard 1800 s) |
+
+‡ projected live seconds from `calib_v06.py` (prod factor 0.55), not raw wall.
+
+Interface: **unchanged** (`gym_v1`, `[B,288]→[B,5]`). Miner-path stack latch + snap seals kept;
+new `tests/test_v074_adaptive.py`, `tests/test_v074_miner_path.py`.
+
 ## v0.7.3 (adaptive compound harden, profile `v07`)
 
 Spec `0.7.3`. Image bake stays `NIST_PROFILE=v07` (do not regress). Digests on main stay at
@@ -48,6 +96,9 @@ python tools/image_eval_onnx.py --seed 7 --full --referee-image nist-assembly-re
 | v0.6-style scripted | **0.171** | 103 | — | — | seed 7; stays low |
 | same seed ⇒ same scores | — | — | — | — | `5DU65b` 8-ep twice: **identical** |
 | image smoke `5DU65b_v1` (built `v073`, seed 7, 16 ep) | **0.218** | 85 | — | — | asserts `nist_profile=v07` |
+
+Live board (Rounds 25–27 on published v0.7.3): top submissions ~0.50–0.60 — same family of
+strong scripted controllers; see v0.7.4 gate.
 
 v0.7.2 published-image baseline (for comparison, measured externally on digests
 `player@sha256:4716bc83…` / `referee@sha256:121f08d6…`): `5DU65b_v1` ≈0.43–0.45,

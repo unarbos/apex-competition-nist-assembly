@@ -22,6 +22,7 @@ from nist_sim import conditions as C  # noqa: E402
 from nist_sim.compound import TASK_PEG_FEAT, wrap  # noqa: E402
 from nist_sim.compound_v07 import (  # noqa: E402
     EVENT_KINDS_V07,
+    KEY_PROBE_FRAMES,
     TIER_CFG_V07,
     AssemblyIIIEpisode,
     sample_compound_v07,
@@ -44,6 +45,7 @@ def test_adaptive_events_registered():
         assert cfg["reveal_p"] >= 0.90, tier
         assert cfg["touch_reveal_p"] >= 0.85, tier
         assert cfg["post_insert_retarget_p"] >= 0.55, tier
+        # v0.7.4 keeps these floors (and raises them); do not regress.
 
 
 def test_touch_reveal_zeros_key_until_contact():
@@ -67,6 +69,8 @@ def test_touch_reveal_zeros_key_until_contact():
     b = OBS_DIM + s.peg * TASK_PEG_FEAT
     assert float(o[b + 2]) == 0.0 and float(o[b + 3]) == 0.0
     e._peg_touched[s.peg] = True
+    # v0.7.4: after touch, yaw is probe-noisy until KEY_PROBE_FRAMES converge.
+    e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
     o2 = e.observe(r)
     assert abs(float(o2[b + 2]) - math.sin(s.key_yaw)) < 1e-5
     assert abs(float(o2[b + 3]) - math.cos(s.key_yaw)) < 1e-5

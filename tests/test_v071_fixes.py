@@ -22,6 +22,7 @@ os.environ["NIST_PROFILE"] = "v07"
 from nist_sim import conditions as C  # noqa: E402
 from nist_sim.compound import TASK_PEG_FEAT, wrap  # noqa: E402
 from nist_sim.compound_v07 import (  # noqa: E402
+    KEY_PROBE_FRAMES,
     AssemblyIIIEpisode,
     sample_compound_v07,
 )
@@ -128,11 +129,14 @@ def test_key_yaw_reachable_and_obs_packs_tol():
         e = _ep(13, i, per=8)
         r = np.random.default_rng(0)
         # Reveal any late-hidden / touch-gated keys so obs packing can be checked.
+        # v0.7.4: also finish probe refine so sin/cos / key_tol pack the true window.
         for s in e.cs.steps:
             if s.kind == "key" and s.reveal_after is not None:
                 e.step_done[s.reveal_after] = True
             if s.kind == "key" and getattr(s, "touch_reveal", False):
                 e._peg_touched[s.peg] = True
+            if s.kind == "key":
+                e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
         o = e.observe(r)
         task0 = OBS_DIM
         for s in e.cs.steps:

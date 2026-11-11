@@ -12,11 +12,19 @@ Encodings in the 288-d observation (v0.6 prefix unchanged):
 - Hidden params: when ``reveal_after`` is set and that step is not done, twist_dir / progress /
   key fields are zeroed in the observation. ``touch_reveal`` also zeros them until the gripper
   has touched that peg (interaction-gated).
+- v0.7.4 probe refine: after touch/late reveal gates pass, key ``sin/cos`` shows a noisy yaw
+  that only converges to the true window after sustained peg contact (``KEY_PROBE_FRAMES``).
+  Inactive keys (single-active rotation) report ``blocked=1`` even when prerequisites are done.
 
 v0.7.3 adaptive harden (defeats v0.7.1-trained fixed scripts without breaking physics):
 - Mid-episode ``retarget`` / ``reorder`` / ``flip_twist`` events, plus post-insert key retarget.
 - Touch-gated key/twist reveals; denser precedence and higher adaptive event rates.
 - ``misseat`` clears key holds so credit must be re-earned from interaction.
+
+v0.7.4 branching / probe harden (defeats adaptive conditional ONNX scripts):
+- Probe-refined key yaw (interaction-inferred; snap-to-first-obs fails).
+- Single-active key rotation (``activate``) + stronger ``regraph`` precedence rewrites.
+- Post-stack key retarget; denser adaptive events; slightly deeper rework.
 """
 
 from __future__ import annotations
@@ -100,19 +108,19 @@ STEP_KINDS_V07 = ("insert", "collar", "twist", "rework", "screw", "stack", "key"
 # do not index keys, extract mis-seats, or stack on peg tops. Weight those gates hard.
 # Hard steps dominate so v0.6-style (insert/collar/twist only) stays ≤~0.30; honest privileged
 # that finishes keys/stacks/rework clears ≥~0.50.
-# Hard adaptive steps dominate total weight. v0.7.3 keeps the v0.7.2 weight shape but
-# shifts credit further onto keys/reworks (obs+interaction adaptive) vs stacks (place latch
-# that v0.7.1 kings partly learned). Ceiling still comes from finishing hard steps honestly.
-# Stacks gate keys (see make_compound). v0.7.1 kings farm reworks + some keys; they rarely
-# finish peg-top stacks — so stack carries the ceiling and rework share is cut.
+# Hard adaptive steps dominate total weight. v0.7.4 keeps stacks heavy (place latch) but
+# lifts keys (probe-refined + single-active rotation) so conditional scripts that learned
+# stacks still lose when yaw must be inferred from interaction and priorities rotate.
 STEP_WEIGHT_V07 = {
-    "insert": 0.04,
-    "collar": 0.04,
-    "twist": 0.04,
-    "screw": 0.06,
+    "insert": 0.03,
+    "collar": 0.03,
+    "twist": 0.03,
+    "screw": 0.05,
     "rework": 1.60,
-    "stack": 5.00,
-    "key": 2.60,
+    # Keys lead (press-gated probe); stacks still matter via stack-before-key on many pegs.
+    # Stack-alone farming cannot clear the ≤~0.25 script bar when keys fail the probe.
+    "stack": 3.50,
+    "key": 4.50,
 }
 # Short budgets + hard horizon keep slow ONNX kings inside the ~600 s / 64-ep / 2-CPU bar.
 STEP_BUDGET_V07 = {
@@ -122,55 +130,69 @@ STEP_BUDGET_V07 = {
     "rework": 220,
     "screw": 160,
     "stack": 160,
-    "key": 140,
+    "key": 160,
 }
 REWORK_EXTRA = 40
-MAX_HORIZON_V07 = 1400  # hard sim-step cap; no wall-clock episode cut
+MAX_HORIZON_V07 = 1600  # hard sim-step cap; no wall-clock episode cut (room for probe/retarget)
 TIER_CFG_V07 = {
-    # v0.7.3: denser precedence + adaptive events; touch/late reveals force re-reading obs.
-    # slack stays generous enough for honest privileged (≥~0.45); kings must adapt mid-episode.
-    # Calibrated config (in-process 64-ep seeds 7/19): kings ≤~0.24; honest privileged
-    # mean ~0.45 (0.471 / 0.426). Changing these draws reshuffles the seed→episode map.
+    # v0.7.4: probe-refined keys + activate/regraph + post-stack retarget.
+    # Slack stays generous enough for honest privileged (true-state keys skip probe noise).
+    # Changing these draws reshuffles the seed→episode map.
     "c1": dict(
-        extra_pegs=0, collar_frac=0.06, twist_frac=0.03, screw_frac=0.06, rework_frac=0.18,
-        stack_frac=0.40, key_frac=0.36, waves=(1, 2), edge_p=0.18, event_p=0.30, slack=1.85,
-        reveal_p=0.90, touch_reveal_p=0.85, max_keys=2, post_insert_retarget_p=0.60,
+        extra_pegs=0, collar_frac=0.06, twist_frac=0.03, screw_frac=0.06, rework_frac=0.20,
+        stack_frac=0.40, key_frac=0.40, waves=(1, 2), edge_p=0.20, event_p=0.32, slack=2.00,
+        # One key per episode on c1/c2: activate is a no-op; press-probe + retarget still bite scripts.
+        reveal_p=1.00, touch_reveal_p=1.00, max_keys=1,
+        post_insert_retarget_p=0.70, post_stack_retarget_p=0.45,
     ),
     "c2": dict(
-        extra_pegs=0, collar_frac=0.06, twist_frac=0.03, screw_frac=0.07, rework_frac=0.20,
-        stack_frac=0.42, key_frac=0.38, waves=(1, 2), edge_p=0.22, event_p=0.36, slack=1.70,
-        reveal_p=0.95, touch_reveal_p=0.90, max_keys=2, post_insert_retarget_p=0.65,
+        extra_pegs=0, collar_frac=0.06, twist_frac=0.03, screw_frac=0.07, rework_frac=0.22,
+        stack_frac=0.42, key_frac=0.42, waves=(1, 2), edge_p=0.24, event_p=0.38, slack=1.85,
+        reveal_p=1.00, touch_reveal_p=1.00, max_keys=1,
+        post_insert_retarget_p=0.75, post_stack_retarget_p=0.55,
     ),
     "c3": dict(
-        extra_pegs=1, collar_frac=0.05, twist_frac=0.02, screw_frac=0.07, rework_frac=0.22,
-        stack_frac=0.42, key_frac=0.42, waves=(2, 2), edge_p=0.24, event_p=0.40, slack=1.58,
-        reveal_p=1.00, touch_reveal_p=0.92, max_keys=2, post_insert_retarget_p=0.70,
+        extra_pegs=1, collar_frac=0.05, twist_frac=0.02, screw_frac=0.07, rework_frac=0.24,
+        stack_frac=0.44, key_frac=0.46, waves=(2, 2), edge_p=0.28, event_p=0.44, slack=1.72,
+        # Dual keys only on hard tiers (activate rotation matters); 15% of the mix.
+        reveal_p=1.00, touch_reveal_p=1.00, max_keys=2,
+        post_insert_retarget_p=0.85, post_stack_retarget_p=0.65,
     ),
     "c4": dict(
         # waves=(2, 2): at most 2 waves on c4 (docs previously claimed "up to 5"; code wins).
-        extra_pegs=1, collar_frac=0.05, twist_frac=0.02, screw_frac=0.06, rework_frac=0.24,
-        stack_frac=0.44, key_frac=0.46, waves=(2, 2), edge_p=0.28, event_p=0.46, slack=1.48,
-        reveal_p=1.00, touch_reveal_p=0.95, max_keys=2, post_insert_retarget_p=0.75,
+        extra_pegs=1, collar_frac=0.05, twist_frac=0.02, screw_frac=0.06, rework_frac=0.26,
+        stack_frac=0.46, key_frac=0.50, waves=(2, 2), edge_p=0.32, event_p=0.50, slack=1.62,
+        reveal_p=1.00, touch_reveal_p=1.00, max_keys=2,
+        post_insert_retarget_p=0.90, post_stack_retarget_p=0.75,
     ),
 }
 # Residuals large enough that open-loop / hard-coded trajectories miss; privileged uses true state.
 NOISE_SCALE_V07 = dict(slot_bias=0.45, peg_delta=0.42, glitch=0.40, drift=0.42)
-# Adaptive events (retarget / reorder / flip_twist / misseat / swap_bias) dominate the mix so
-# fixed scripts trained on static v0.7.1 graphs cannot open-loop the episode.
-EVENT_KINDS_V07 = EVENT_KINDS + ("swap_bias", "misseat", "retarget", "reorder", "flip_twist")
+# Adaptive events dominate: retarget / regraph / activate force online replan from feedback.
+EVENT_KINDS_V07 = EVENT_KINDS + (
+    "swap_bias", "misseat", "retarget", "reorder", "flip_twist", "regraph", "activate",
+)
 EVENT_WEIGHTS_V07 = np.array(
-    # friction, gain, mass, delay, rebias, shove, swap_bias, misseat, retarget, reorder, flip_twist
-    [0.06, 0.06, 0.05, 0.04, 0.07, 0.05, 0.12, 0.14, 0.18, 0.14, 0.09]
+    # friction, gain, mass, delay, rebias, shove, swap_bias, misseat,
+    # retarget, reorder, flip_twist, regraph, activate
+    # Press-gated probe + retarget/regraph carry the script drop; misseat is lighter so
+    # honest privileged is not repeatedly unseated near the horizon.
+    [0.04, 0.04, 0.04, 0.03, 0.05, 0.04, 0.09, 0.08, 0.24, 0.08, 0.07, 0.14, 0.06]
 )
 # Multi-turn press-twists; pitch drawn per step and shown in obs when revealed.
 SCREW_TARGET = (0.30, 0.55)
-KEY_TOL = (0.05, 0.09)  # tighter yaw-index; privileged true-state nudge still reaches
+KEY_TOL = (0.045, 0.080)  # tighter yaw-index; privileged true-state nudge still reaches
+# Contact frames needed before obs key yaw converges to the true window (interaction-inferred).
+KEY_PROBE_FRAMES = 20
+# Large initial bias; decays only while pressing on the peg (not mere touch).
+KEY_PROBE_NOISE0 = 0.85
+KEY_HOLD = 5  # ungripped aligned frames (matches SEATED_HOLD; probe is the script killer)
 STACK_SEAT_XY = 0.0030
 STACK_SEAT_Z_CLEAR = 0.0028
 # Screw press: palm must be on the peg (touch). Free-twist open-grip scripts still get 0.
 PRESS_PALM_MARGIN = 0.001
 # Rework pegs sit deep enough that casual yanks miss; privileged extract_routine still clears.
-REWORK_SEAT_DEPTH = 0.0045
+REWORK_SEAT_DEPTH = 0.0050
 # Stack rings use a slight interference fit so a deliberate peg-top place can rest in the
 # mate zone (clearance-fit rings free-fall ~4 mm in <1 control frame and can never hold).
 # Mate zone + hold tightened after image-eval showed revealed kings completing ~half of stacks.
@@ -222,6 +244,12 @@ def _draw_event_v07(rng: np.random.Generator) -> dict:
         return dict(kind=kind)
     if kind == "flip_twist":
         # Flip unfinished twist/screw direction and clear accumulated progress.
+        return dict(kind=kind)
+    if kind == "regraph":
+        # Drop soft unfinished edges and redraw 1–3 wave-consistent ones (stronger than reorder).
+        return dict(kind=kind)
+    if kind == "activate":
+        # Rotate which unfinished key is currently completable (single-active gate).
         return dict(kind=kind)
     return dict(kind=kind, sigma=float(rng.uniform(0.14, 0.32)))
 
@@ -349,10 +377,12 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
         return True
 
     # Pair stacks onto key pegs so stack-before-key can zero key credit when stacks fail.
+    # v0.7.4: 55% pairing (was 70%) — leaves some keys stack-free so honest privileged can
+    # clear key weight without every key waiting on a peg-top mate.
     for peg_i in list(key_pegs):
         if any(p == peg_i and k == "stack" for p, k in ring_pegs):
             continue
-        if rng.random() < 0.70:
+        if rng.random() < 0.55:
             _add_stack_on(int(peg_i))
     # Guarantee at least one stack (preferred) or rework so insert/key-only kings stay capped.
     if not any(k == "stack" for _, k in ring_pegs):
@@ -388,6 +418,7 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
             steps.append(TaskStep("insert", i, i))
         insert_idx[i] = len(steps) - 1
         if i in key_pegs:
+            # v0.7.4: keys always touch-gated when touch_reveal_p≈1 so probe refine can start.
             steps.append(
                 TaskStep(
                     "key",
@@ -519,6 +550,17 @@ def sample_compound_v07(seed: int, episodes_per_stratum: int, split: str = "live
 
 
 # ---- episode ------------------------------------------------------------------------------------
+def _is_hard_prereq(sa: TaskStep, sb: TaskStep) -> bool:
+    """Mandatory same-peg edges that ``regraph`` must not drop."""
+    if sa.peg != sb.peg:
+        return False
+    if sa.kind in ("insert", "rework") and sb.kind in ("key", "stack", "collar", "twist", "screw"):
+        return True
+    if sa.kind == "stack" and sb.kind == "key":
+        return True
+    return False
+
+
 class AssemblyIIIEpisode(CompoundEpisode):
     """v0.7 episode: rework spawns, screw press gate, stack seat, key yaw, late reveals."""
 
@@ -534,7 +576,13 @@ class AssemblyIIIEpisode(CompoundEpisode):
         self._screw_hand_prev: dict[int, float | None] = {}
         # Interaction-gated reveals: True once the gripper has touched the peg this episode.
         self._peg_touched = [False] * cond.n_pegs
+        # v0.7.4: probe-refined key yaw + single-active key rotation.
+        self._peg_probe_frames = [0] * cond.n_pegs
+        self._key_yaw_noise = [1.0] * cond.n_pegs
+        self._active_key: int | None = None
         super().__init__(cond, rng)
+        self._init_key_probe_state()
+        self._pick_active_key()
 
     def _seat_in_wrong_slot(self, i: int) -> None:
         """Place peg shallowly over the wrong hole (extractable; full-depth jams)."""
@@ -612,6 +660,63 @@ class AssemblyIIIEpisode(CompoundEpisode):
         self._screw_hand_prev = {}
         self._key_hold = [0] * self.n_pegs
         self._peg_touched = [False] * self.n_pegs
+        self._active_key = None
+        self._init_key_probe_state()
+        # step_done exists only after CompoundEpisode finishes constructing.
+        if hasattr(self, "step_done"):
+            self._pick_active_key()
+
+    def _init_key_probe_state(self) -> None:
+        n = int(getattr(self, "n_pegs", 0) or len(self._peg_touched))
+        self._peg_probe_frames = [0] * n
+        self._key_yaw_noise = [
+            1.0 if self.rng.random() < 0.5 else -1.0 for _ in range(n)
+        ]
+
+    def _unfinished_keys(self) -> list[int]:
+        if not hasattr(self, "step_done"):
+            return []
+        return [k for k, s in enumerate(self.cs.steps) if s.kind == "key" and not self.step_done[k]]
+
+    def _pick_active_key(self, prefer: int | None = None, *, rotate: bool = False) -> None:
+        """Single-active key gate: only one unfinished key may complete at a time."""
+        unfinished = self._unfinished_keys()
+        if not unfinished:
+            self._active_key = None
+            return
+        # Prefer keys whose prerequisites are already done (actionable now).
+        ready = [
+            k for k in unfinished
+            if all(self.step_done[p] for p in self.cs.steps[k].prereq)
+        ]
+        pool = ready or unfinished
+        if prefer is not None and prefer in pool:
+            self._active_key = int(prefer)
+            return
+        if (not rotate) and self._active_key in pool:
+            # Keep current if still valid unless caller forces a rotation.
+            return
+        # Prefer a different unfinished key when rotating.
+        cands = [k for k in pool if k != self._active_key] or pool
+        self._active_key = int(cands[int(self.rng.integers(0, len(cands)))])
+
+    def _key_is_active(self, k: int) -> bool:
+        unfinished = self._unfinished_keys()
+        if len(unfinished) <= 1:
+            return True
+        if self._active_key is None:
+            return True
+        return k == self._active_key
+
+    def _obs_key_yaw(self, s: TaskStep) -> float:
+        """Noisy key yaw that converges after sustained contact (probe refine)."""
+        frames = int(self._peg_probe_frames[s.peg])
+        if frames >= KEY_PROBE_FRAMES:
+            return float(s.key_yaw)
+        frac = frames / float(KEY_PROBE_FRAMES)
+        sigma = KEY_PROBE_NOISE0 * (1.0 - frac)
+        sign = float(self._key_yaw_noise[s.peg])
+        return float(wrap(s.key_yaw + sign * sigma))
 
     def _intended_peg_xy(self, peg) -> tuple[float, float]:
         i = self.c.pegs.index(peg)
@@ -821,9 +926,12 @@ class AssemblyIIIEpisode(CompoundEpisode):
             if abs(wrap(new - old)) > max(0.12, 2.5 * s.key_tol):
                 break
         s.key_yaw = new
-        if self.rng.random() < 0.35:
+        # v0.7.4: usually redraw tol and reset probe so snap-to-obs after retarget fails.
+        if self.rng.random() < 0.70:
             s.key_tol = float(self.rng.uniform(*KEY_TOL))
         self._key_hold[s.peg] = 0
+        self._peg_probe_frames[s.peg] = 0
+        self._key_yaw_noise[s.peg] = 1.0 if self.rng.random() < 0.5 else -1.0
         return dict(kind=reason, step=self.steps, peg=int(s.peg), key_step=int(k), old_yaw=old, new_yaw=float(s.key_yaw))
 
     def _maybe_post_insert_retarget(self, seat_k: int) -> None:
@@ -841,7 +949,37 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 if payload is not None:
                     payload["auto"] = "post_insert"
                     self.events_fired.append(payload)
+                    self._pick_active_key(prefer=k)
                 break
+
+    def _maybe_post_stack_retarget(self, stack_k: int) -> None:
+        """After a stack completes, often retarget that peg's unfinished key (v0.7.4)."""
+        s = self.cs.steps[stack_k]
+        if s.kind != "stack":
+            return
+        cfg = TIER_CFG_V07.get(self.cs.tier, {})
+        p = float(cfg.get("post_stack_retarget_p", 0.0))
+        if p <= 0.0 or self.rng.random() >= p:
+            return
+        for k, ks in enumerate(self.cs.steps):
+            if ks.kind == "key" and ks.peg == s.peg and not self.step_done[k]:
+                payload = self._retarget_key(k, reason="retarget")
+                if payload is not None:
+                    payload["auto"] = "post_stack"
+                    self.events_fired.append(payload)
+                    self._pick_active_key(prefer=k)
+                break
+
+    def _maybe_activate_unblocked_key(self, done_k: int) -> None:
+        """When a completion unblocks a key, make that key active (avoid stranded ready keys)."""
+        for k, s in enumerate(self.cs.steps):
+            if s.kind != "key" or self.step_done[k]:
+                continue
+            if done_k not in s.prereq:
+                continue
+            if all(self.step_done[p] for p in s.prereq):
+                self._pick_active_key(prefer=k)
+                return
 
     def _fire_event(self, ev: dict) -> None:
         if ev["kind"] == "swap_bias":
@@ -947,6 +1085,89 @@ class AssemblyIIIEpisode(CompoundEpisode):
                         return
             self.events_fired.append(dict(ev, step=self.steps, skipped=True))
             return
+        if ev["kind"] == "regraph":
+            # Stronger than reorder: drop soft unfinished edges, then add 1–3 new ones.
+            unfinished = [k for k, s in enumerate(self.cs.steps) if not self.step_done[k]]
+            if len(unfinished) < 2:
+                self.events_fired.append(dict(ev, step=self.steps, skipped=True))
+                return
+            dropped = 0
+            for b in unfinished:
+                keep: list[int] = []
+                for a in self.cs.steps[b].prereq:
+                    if a not in unfinished:
+                        keep.append(a)
+                        continue
+                    if _is_hard_prereq(self.cs.steps[a], self.cs.steps[b]):
+                        keep.append(a)
+                        continue
+                    # Soft edge among unfinished: drop with high probability.
+                    if self.rng.random() < 0.55:
+                        dropped += 1
+                        continue
+                    keep.append(a)
+                self.cs.steps[b].prereq = sorted(set(keep))
+            # Rebuild a topological order under remaining edges.
+            prereq = {k: [p for p in self.cs.steps[k].prereq if p in unfinished] for k in unfinished}
+            indeg = {k: len(prereq[k]) for k in unfinished}
+            ready = [k for k in unfinished if indeg[k] == 0]
+            order: list[int] = []
+            while ready:
+                u = ready.pop()
+                order.append(u)
+                for v in unfinished:
+                    if u in prereq[v]:
+                        indeg[v] -= 1
+                        if indeg[v] == 0:
+                            ready.append(v)
+            added: list[list[int]] = []
+            if len(order) == len(unfinished):
+                pos = {k: i for i, k in enumerate(order)}
+                cands: list[tuple[int, int]] = []
+                for a in unfinished:
+                    for b in unfinished:
+                        if a == b or pos[a] >= pos[b]:
+                            continue
+                        if a in self.cs.steps[b].prereq:
+                            continue
+                        wa = _step_wave_of(self.cs.steps[a], self.cs.peg_wave, self.cs.collars)
+                        wb = _step_wave_of(self.cs.steps[b], self.cs.peg_wave, self.cs.collars)
+                        if wa <= wb:
+                            cands.append((a, b))
+                n_add = min(len(cands), int(self.rng.integers(1, 4)))
+                self.rng.shuffle(cands)
+                for a, b in cands[:n_add]:
+                    self.cs.steps[b].prereq.append(a)
+                    self.cs.steps[b].prereq.sort()
+                    added.append([int(a), int(b)])
+            if dropped or added:
+                self.events_fired.append(
+                    dict(ev, step=self.steps, dropped=int(dropped), edges=added)
+                )
+                # Priority rotation often accompanies a graph rewrite.
+                if len(self._unfinished_keys()) >= 2:
+                    self._pick_active_key(rotate=True)
+                return
+            self.events_fired.append(dict(ev, step=self.steps, skipped=True))
+            return
+        if ev["kind"] == "activate":
+            unfinished = self._unfinished_keys()
+            if len(unfinished) < 2:
+                self.events_fired.append(dict(ev, step=self.steps, skipped=True))
+                return
+            old = self._active_key
+            # Force a rotation away from the current active key when possible.
+            prefer = None
+            others = [k for k in unfinished if k != old]
+            if others:
+                prefer = int(others[int(self.rng.integers(0, len(others)))])
+            self._pick_active_key(prefer=prefer, rotate=True)
+            for i in range(self.n_pegs):
+                self._key_hold[i] = 0
+            self.events_fired.append(
+                dict(ev, step=self.steps, old=old, active=self._active_key)
+            )
+            return
         super()._fire_event(ev)
 
     def _step_state(self, k: int) -> tuple[bool, float]:
@@ -990,14 +1211,15 @@ class AssemblyIIIEpisode(CompoundEpisode):
             # v0.7.3: do not accumulate hold (or complete) until prerequisites are done.
             # Early yaw alignment during stack work must not latch an out-of-order key —
             # stack-before-key would otherwise zero honest credit after a later stack.
-            prereq_ok = all(self.step_done[p] for p in s.prereq)
+            # v0.7.4: inactive keys (single-active rotation) also cannot accumulate hold.
+            prereq_ok = all(self.step_done[p] for p in s.prereq) and self._key_is_active(k)
             if prereq_ok and aligned and not self._gripper_touching(self.peg_body[i]):
                 self._key_hold[i] = self._key_hold[i] + 1
             else:
                 self._key_hold[i] = 0
             done = bool(prereq_ok) and (
-                self._key_hold[i] >= SEATED_HOLD
-                or (self.step_done[k] and aligned and self._peg_in_hole(i))
+                self._key_hold[i] >= KEY_HOLD
+                or (self.step_done[k] and aligned and self._peg_in_hole(i) and self._key_is_active(k))
             )
             yaw = quat_yaw(self.peg_pose(i)[1])
             err = abs(wrap(yaw - s.key_yaw))
@@ -1077,11 +1299,19 @@ class AssemblyIIIEpisode(CompoundEpisode):
                     self._pin_stack_on_peg(j)
                 self.collar_run[j] = self.collar_run[j] + 1 if self._stack_seated_now(j) else 0
         # Interaction tracking for touch-gated reveals (any contact with the peg body).
+        # v0.7.4: key-yaw probe refine advances only while pressing on the peg (screw-like
+        # press gate). Mere touch reveals the channel but leaves a large decaying bias —
+        # touch-and-snap scripts keep a wrong absolute yaw.
         for i in range(self.n_pegs):
             if self.peg_parked[i]:
                 continue
             if self._gripper_touching(self.peg_body[i]):
                 self._peg_touched[i] = True
+                if (
+                    self._peg_probe_frames[i] < KEY_PROBE_FRAMES
+                    and self._pressing_on_peg(i)
+                ):
+                    self._peg_probe_frames[i] += 1
         # Sole bookkeeping path for v0.7 hard steps (parent skipped them).
         newly_done: list[int] = []
         for k, s in enumerate(self.cs.steps):
@@ -1098,6 +1328,9 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 self.n_completions += 1
                 if ev is not None:
                     self._fire_event(ev)
+                if s.kind == "key":
+                    # Rotate active key onto the next unfinished key after a completion.
+                    self._pick_active_key()
             elif not done and self.step_done[k]:
                 # Latch: brief flickers must not wipe completion or redo time bonus.
                 continue
@@ -1108,7 +1341,9 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 if self.step_done_at[k] == self.steps:
                     newly_done.append(k)
         for k in newly_done:
+            self._maybe_activate_unblocked_key(k)
             self._maybe_post_insert_retarget(k)
+            self._maybe_post_stack_retarget(k)
         if all(self.step_done) and all(self.wave_arrived) and not self.done:
             self.done = True
             self.success = True
@@ -1148,17 +1383,21 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 o[b + 4] = float(self.step_blocked(k))
             elif s.kind == "key":
                 # Keys are never co-assigned with twist/screw, so these channels stay free.
+                # v0.7.4: inactive keys report blocked; yaw is probe-noisy until contact converges.
+                active = self._key_is_active(k)
+                blocked = float(self.step_blocked(k) or not active)
                 if revealed:
-                    o[b + 2] = math.sin(s.key_yaw)
-                    o[b + 3] = math.cos(s.key_yaw)
-                    o[b + 4] = float(self.step_blocked(k))
-                    # Pack tol into the collar-flag slot when that peg has no collar/stack.
-                    if o[b + 5] == 0.0:
+                    yaw_show = self._obs_key_yaw(s)
+                    o[b + 2] = math.sin(yaw_show)
+                    o[b + 3] = math.cos(yaw_show)
+                    o[b + 4] = blocked
+                    # Pack tol only after probe converges and when collar-flag is free.
+                    if o[b + 5] == 0.0 and self._peg_probe_frames[s.peg] >= KEY_PROBE_FRAMES:
                         o[b + 5] = float(s.key_tol) * 10.0
                 else:
                     o[b + 2] = 0.0
                     o[b + 3] = 0.0
-                    o[b + 4] = float(self.step_blocked(k))
+                    o[b + 4] = blocked
             elif s.kind in ("collar", "stack"):
                 o[b + 5] = 1.0 if s.kind == "collar" else 2.0
         # Collar present channel: 2.0 for stacks.
@@ -1186,6 +1425,8 @@ def compound_score_v07(ep: AssemblyIIIEpisode | CompoundEpisode) -> dict:
     v0.7.3: keys finished *out of order* score 0 (not the v0.6 out-of-order floor).
     Stack-before-key precedence then zeros key credit unless the stack is done first.
     Stack/rework keep the normal out-of-order floor so honest privileged stays ≥~0.45.
+
+    v0.7.4: same OOO key rule; probe/activate affect completion, not the credit formula.
     """
     kinds = {s.kind for s in ep.cs.steps}
     if kinds <= {"insert", "collar", "twist"}:

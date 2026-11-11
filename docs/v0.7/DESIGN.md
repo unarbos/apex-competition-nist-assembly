@@ -1,4 +1,4 @@
-# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.3)
+# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.4)
 
 ## Goal
 
@@ -24,7 +24,7 @@ must score the same on any machine load.
 - **Stronger between-step events:** higher fire rate and wider scales; an extra `swap_bias`
   event reshuffles peg-vs-slot residuals.
 - **Tighter time slack on c3/c4** (and shorter per-step budgets) so failed episodes do not
-  explode sim steps. Hard horizon `MAX_HORIZON_V07 = 1400`.
+  explode sim steps. Hard horizon `MAX_HORIZON_V07 = 1600` (v0.7.4; was 1400).
 - **Observation:** still 288-d with the v0.6 layout as a compatible prefix. New kinds reuse
   collar/twist/task channels with documented encodings (see HANDOFF / README).
 - **Profile clearance:** `Profile.clearance` for `v07` is a design target only — the simulator
@@ -36,15 +36,15 @@ Same rubric family as v0.6 (done = 0.70 + 0.30·time; unfinished ≤ 0.30). In v
 finished out of order score **0** (stack/rework keep the out-of-order floor). Weights (code
 `STEP_WEIGHT_V07`, v0.7.3):
 
-| kind | weight |
+| kind | weight (v0.7.4) |
 |---|---|
-| insert | 0.04 |
-| collar | 0.04 |
-| twist | 0.04 |
-| screw | 0.06 |
+| insert | 0.03 |
+| collar | 0.03 |
+| twist | 0.03 |
+| screw | 0.05 |
 | rework | 1.60 |
-| stack | 5.00 |
-| key | 2.60 |
+| stack | 3.50 |
+| key | 4.50 |
 
 ## Release bars (calibration, honest privileged)
 
@@ -63,6 +63,18 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
 - Removed `round_wall_s` and per-episode `EPISODE_WALL_S_V07` wall-clock cuts.
 - Stack hold counting no longer fights the parent collar-on-block reset.
 - Key yaw sampling + `key_tol` obs packing; latch so completed hard steps stay completed.
+
+## v0.7.4 branching / probe harden (vs adaptive conditional scripts)
+
+- **Press-gated probe-refined key yaw:** after touch/late reveal, obs `sin/cos` carries a
+  large decaying bias that converges only while *pressing* on the peg (`KEY_PROBE_FRAMES`) —
+  touch-and-snap scripts keep a wrong absolute yaw; press-and-refine (or true-state) works.
+- **Single-active key rotation (`activate`):** with ≥2 unfinished keys, only one may complete;
+  inactive keys report `blocked=1` and cannot accumulate hold.
+- **`regraph`:** drop soft unfinished edges and redraw 1–3 wave-consistent ones (stronger than
+  single-edge `reorder`); often rotates the active key.
+- **Post-stack key retarget** (plus denser post-insert retarget); deeper rework seat.
+- Interface unchanged (`[B,288]→[B,5]`); no wall-clock score caps; miner-path latch sealed.
 
 ## v0.7.3 adaptive harden (vs v0.7.1-trained kings)
 

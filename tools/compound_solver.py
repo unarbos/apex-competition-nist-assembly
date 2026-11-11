@@ -651,7 +651,8 @@ def _is_lying_insert(ep: CompoundEpisode, k: int) -> bool:
 
 def _max_attempts_for(kind: str) -> int:
     # Honest path needs more tries — no oracle snaps to finish near-misses.
-    return {"rework": 4, "stack": 7, "screw": 4, "key": 6, "lying": 1}.get(kind, 5)
+    # v0.7.4: keys retarget / rotate mid-episode — allow extra honest attempts.
+    return {"rework": 4, "stack": 8, "screw": 4, "key": 9, "lying": 1}.get(kind, 5)
 
 
 def solve_compound(
@@ -679,7 +680,8 @@ def solve_compound(
 
     # Leave a tail of the horizon for the honest finisher (pose nudges + hold waits).
     # Keep this small so late stacks still get a full place-and-release slice.
-    finish_reserve = 80 if (is_v07 and not oracle) else 0
+    # Leave a short tail for ungripped key/stack holds after the last place.
+    finish_reserve = 50 if (is_v07 and not oracle) else 0
 
     def usable_remaining() -> int:
         return max(0, ep.c.max_steps - ep.steps - finish_reserve)
@@ -768,6 +770,11 @@ def solve_compound(
             k for k in in_order
             if k not in lying and ep.cs.steps[k].kind == "key"
             and (ep.seated_now[ep.cs.steps[k].peg] or ep._peg_in_hole(ep.cs.steps[k].peg))
+            # v0.7.4 single-active key gate: skip inactive keys (blocked in obs).
+            and (
+                not hasattr(ep, "_key_is_active")
+                or ep._key_is_active(k)
+            )
         ]
         other_gate = [
             k for k in in_order
@@ -809,6 +816,9 @@ def solve_compound(
         collars_only = [k for k in ring if ep.cs.steps[k].kind == "collar"]
         if remaining < 420 and (stacks or keys):
             ready = stacks or keys or easy_seat or rework_seat or screws or other_gate or collars_only
+        elif keys and not stacks:
+            # v0.7.4: once stacks clear, chase the active key before more low-weight inserts.
+            ready = keys or easy_seat or rework_seat or screws or other_gate or collars_only
         else:
             ready = easy_seat or stacks or keys or screws or other_gate or rework_seat or collars_only
         if not ready and not all(ep.wave_arrived) and remaining > 80:
@@ -837,7 +847,7 @@ def solve_compound(
         elif s.kind == "stack":
             frac_cap, floor = 0.75, 220
         elif s.kind == "key":
-            frac_cap, floor = 0.60, 160
+            frac_cap, floor = 0.65, 180
         elif s.kind == "rework":
             frac_cap, floor = 0.50, 100
         else:

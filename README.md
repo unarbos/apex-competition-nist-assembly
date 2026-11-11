@@ -5,14 +5,14 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.7.3** ("Assembly III", profile `v07`) — adaptive compound harden vs v0.7.1 kings;
-> denser graphs, new step kinds
-> (`rework`, `screw`, `stack`, `key`), press-gated screws, **obs-indexed key yaw**, mis-seated
-> rework, stack rings, and residual noise so open-loop v0.6 controllers fail. Observation stays
+> Version: **v0.7.4** ("Assembly III", profile `v07`) — branching / probe adaptive harden vs
+> strong conditional scripts that still scored ~0.5–0.6 on v0.7.3; denser graphs, new step kinds
+> (`rework`, `screw`, `stack`, `key`), press-gated screws, **probe-refined key yaw**, single-active
+> key rotation, `regraph` / post-stack retarget, mis-seated rework, stack rings. Observation stays
 > `[B, 288]` with v0.6 encodings extended in-place. Referee image bakes `NIST_PROFILE=v07`.
 > Cost is bounded by sim horizon only (no round/episode wall-clock caps). Policy deadline
-> 80 ms; horizon ≤ 1400. Digests stay at the last released pins until Apex cuts the tag.
-> Scores are **not** comparable with v0.6.x.
+> 80 ms; horizon ≤ 1600. Digests stay at the last released pins until Apex cuts the tag.
+> Scores are **not** comparable with v0.6.x / v0.7.3.
 >
 > Every episode is a random multi-step assembly graph. Four complexity tiers (c1–c4); weighted
 > partial credit per step (insert 0.45, collar/twist 0.60, screw 1.00, rework 1.50, stack 1.40,
@@ -48,7 +48,7 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.7.3 Assembly III)
+## The task (v0.7.4 Assembly III)
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions, slot yaw, and a cross-section per slot from continuous families
@@ -75,8 +75,8 @@ families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 - **Tiers** (~40/45/10/5% c1–c4): hardness is in keys / stacks / rework / screws, not wave count.
 - **Horizon:** per-step budgets × tier slack, hard-capped at 1000 control steps. No referee
   wall-clock episode or round cut — scores are load-invariant.
-- **Score:** weights insert 0.45, collar 0.60, twist 0.60, screw 1.00, rework 1.50, stack 1.40,
-  key 1.80. Rubric otherwise as v0.6 (done = 0.70 + 0.30·time; unfinished ≤ 0.30).
+- **Score:** weights insert 0.03, collar 0.03, twist 0.03, screw 0.05, rework 1.60, stack 3.50,
+  key 4.50. Rubric otherwise as v0.6 (done = 0.70 + 0.30·time; unfinished ≤ 0.30; OOO keys = 0).
 - **Round size:** 8 strata × 8 = 64 episodes (fixture). Timeout 1800 s.
 
 ## Policy interface
@@ -109,6 +109,8 @@ v0.5 layout); every other policy gets all 288.
    yaw into the twist slots when revealed and `key_tol × 10` into the collar-flag slot when
    that peg has no collar/stack; late-reveal steps zero those channels until the gated
    prerequisite finishes; stack sets the collar-flag channel to 2.
+   **v0.7.4:** after reveal gates pass, key `sin/cos` is probe-noisy until sustained peg
+   contact converges; inactive keys (single-active rotation) report blocked=1.
 6. **Collar table (4 × 13 = 52):** presence (0 until it arrives); noisy collar position
    relative to the biased target-slot estimate ×10 (3) + quaternion (4); inner and outer
    radius ×100 (2); target peg row / 8; done; blocked.
