@@ -12,17 +12,18 @@ The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper
 **What changed in v0.7.4**
 
 * Branching / probe adaptive harden against strong conditional ONNX scripts that still scored
-  ~0.5–0.6 on v0.7.3: probe-refined key yaw (interaction-inferred), single-active key rotation
-  (`activate`), stronger `regraph` precedence rewrites, post-stack key retarget, denser adaptive
-  events, deeper rework. Weights: insert/collar/twist 0.03, screw 0.05, rework 1.60, stack 3.50,
-  key 4.50. Interface unchanged (288→5). Physics stays action-only solvable; digests not re-pinned.
+  ~0.5–0.6 on v0.7.3: blind key yaw, press-probe + leave/reenter index arm, single-active key
+  rotation (`activate`), stronger `regraph` precedence rewrites, post-stack/post-insert key
+  retarget, seat-only key prereqs. Weights: insert/collar/twist 0.02, screw 0.04, rework 1.10,
+  stack 1.25, key 7.00. Interface unchanged (288→5). Physics stays action-only solvable;
+  digests not re-pinned.
 
 **What changed in v0.7.3**
 
 * Adaptive mid-episode structure against v0.7.1-trained policies: `retarget` / `reorder` /
   `flip_twist` events, post-insert key retarget, touch-gated reveals, stack-before-key
   precedence, keys complete only after prerequisites, out-of-order keys score 0. Weights
-  shift onto stacks (insert/collar/twist 0.04, screw 0.06, rework 1.60, stack 5.00, key 2.60).
+  shift onto stacks (insert/collar/twist 0.02, screw 0.04, rework 0.9, stack 1.1, key 7.5).
   Physics stays action-only solvable; digests not re-pinned.
 
 **What changed in v0.7.2**

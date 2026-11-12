@@ -22,6 +22,7 @@ from nist_sim import conditions as C  # noqa: E402
 from nist_sim.compound import TASK_PEG_FEAT, wrap  # noqa: E402
 from nist_sim.compound_v07 import (  # noqa: E402
     EVENT_KINDS_V07,
+    KEY_HOLD,
     KEY_PROBE_FRAMES,
     KEY_PROBE_NOISE0,
     TIER_CFG_V07,
@@ -43,14 +44,14 @@ def test_v074_events_registered():
     for tier, cfg in TIER_CFG_V07.items():
         assert cfg["event_p"] >= 0.32, tier
         assert cfg["touch_reveal_p"] >= 1.0 - 1e-9, tier
-        assert cfg["post_insert_retarget_p"] >= 0.70, tier
-        assert cfg["post_stack_retarget_p"] >= 0.45, tier
+        assert cfg["post_insert_retarget_p"] >= 0.55, tier
+        assert cfg["post_stack_retarget_p"] >= 0.40, tier
         assert cfg["reveal_p"] >= 1.0 - 1e-9, tier
         assert int(cfg["max_keys"]) >= 1, tier
         assert int(cfg["max_keys"]) <= 2, tier
 
 
-def test_probe_noise_converges_with_contact():
+def test_key_obs_hides_yaw_and_closeness():
     _, conds = sample_compound_v07(53, 8)
     idx = next(
         (i for i, c in enumerate(conds) if any(s.kind == "key" for s in c.compound.steps)),
@@ -59,22 +60,24 @@ def test_probe_noise_converges_with_contact():
     if idx is None:
         pytest.skip("no key")
     e = _ep(53, idx, per=8)
-    s = next(s for s in e.cs.steps if s.kind == "key")
+    k = next(k for k, s in enumerate(e.cs.steps) if s.kind == "key")
+    s = e.cs.steps[k]
     if s.reveal_after is not None:
         e.step_done[s.reveal_after] = True
+    for p in s.prereq:
+        e.step_done[p] = True
+    e._active_key = k
     e._peg_touched[s.peg] = True
-    e._peg_probe_frames[s.peg] = 0
-    e._key_yaw_noise[s.peg] = 1.0
-    r = np.random.default_rng(0)
-    o0 = e.observe(r)
-    b = OBS_DIM + s.peg * TASK_PEG_FEAT
-    # First reveal is offset by ~KEY_PROBE_NOISE0.
-    shown0 = math.atan2(float(o0[b + 2]), float(o0[b + 3]))
-    assert abs(wrap(shown0 - s.key_yaw)) > 0.35
     e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+    e.seated_now[s.peg] = True
+    r = np.random.default_rng(0)
     o1 = e.observe(r)
-    shown1 = math.atan2(float(o1[b + 2]), float(o1[b + 3]))
-    assert abs(wrap(shown1 - s.key_yaw)) < 1e-5
+    b = OBS_DIM + s.peg * TASK_PEG_FEAT
+    assert float(o1[b + 2]) == 0.0
+    assert float(o1[b + 3]) == 0.0  # no closeness either — blind search
+    has_ring = any(t.kind in ("collar", "stack") and t.peg == s.peg for t in e.cs.steps)
+    if not has_ring:
+        assert abs(float(o1[b + 5]) - s.key_tol * 10.0) < 1e-5
     assert KEY_PROBE_NOISE0 >= 0.5
 
 
@@ -91,12 +94,16 @@ def test_inactive_key_blocked_in_obs_and_cannot_hold():
     e = _dual_key_episode()
     keys = [k for k, s in enumerate(e.cs.steps) if s.kind == "key"]
     assert len(keys) >= 2
+    # Ensure both keys remain unfinished so single-active gating applies.
+    for k in keys:
+        e.step_done[k] = False
     e._active_key = keys[0]
     inactive = keys[1]
     # Mark prereqs done so only activate gate remains.
     for p in e.cs.steps[inactive].prereq:
         e.step_done[p] = True
     e.seated_now[e.cs.steps[inactive].peg] = True
+    assert len(e._unfinished_keys()) >= 2
     assert e._key_is_active(inactive) is False
     r = np.random.default_rng(1)
     if e.cs.steps[inactive].reveal_after is not None:
@@ -174,12 +181,51 @@ def test_post_stack_retarget_fires():
     assert hit, "post_stack retarget never fired in 40 draws"
 
 
-def test_retarget_resets_probe_frames():
+def test_retarget_clears_hold_and_index_arm_keeps_probe():
     e = _ep(89, 0, per=8)
     key = next((k for k, s in enumerate(e.cs.steps) if s.kind == "key"), None)
     if key is None:
         pytest.skip("no key")
     s = e.cs.steps[key]
     e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+    e._key_hold[s.peg] = 4
+    e._key_index_armed[s.peg] = True
+    old = float(s.key_yaw)
     e._retarget_key(key)
-    assert e._peg_probe_frames[s.peg] == 0
+    assert e._key_hold[s.peg] == 0
+    assert e._key_index_armed[s.peg] is False
+    assert e._peg_probe_frames[s.peg] == KEY_PROBE_FRAMES
+    assert abs(wrap(s.key_yaw - old)) > 0.05
+
+
+def test_key_requires_leave_and_reenter_after_probe():
+    """Natural-seat freebie: probed+aligned without leaving the window must not complete."""
+    e = _dual_key_episode()
+    k = next(k for k, s in enumerate(e.cs.steps) if s.kind == "key")
+    s = e.cs.steps[k]
+    for p in s.prereq:
+        e.step_done[p] = True
+    e._active_key = k
+    e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+    e._key_index_armed[s.peg] = False
+    e.seated_now[s.peg] = True
+    e._key_aligned = lambda _s: True  # type: ignore[method-assign]
+    e._gripper_touching = lambda _b: False  # type: ignore[method-assign]
+    done, prog = e._step_state(k)
+    assert done is False
+    assert e._key_hold[s.peg] == 0
+    # Leaving the window arms the index gate.
+    e._key_aligned = lambda _s: False  # type: ignore[method-assign]
+    e._step_state(k)
+    assert e._key_index_armed[s.peg] is True
+    e._key_aligned = lambda _s: True  # type: ignore[method-assign]
+    e._key_hold[s.peg] = 0
+    for _ in range(KEY_PROBE_FRAMES):  # enough idle frames; hold needs KEY_HOLD
+        done, _ = e._step_state(k)
+        if done:
+            break
+    # Hold accumulates only when armed+aligned; simulate KEY_HOLD ticks.
+    e._key_hold[s.peg] = 0
+    for _ in range(KEY_HOLD):
+        done, _ = e._step_state(k)
+    assert done is True

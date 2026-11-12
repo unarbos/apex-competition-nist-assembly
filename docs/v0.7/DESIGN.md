@@ -38,13 +38,13 @@ finished out of order score **0** (stack/rework keep the out-of-order floor). We
 
 | kind | weight (v0.7.4) |
 |---|---|
-| insert | 0.03 |
-| collar | 0.03 |
-| twist | 0.03 |
-| screw | 0.05 |
-| rework | 1.60 |
-| stack | 3.50 |
-| key | 4.50 |
+| insert | 0.02 |
+| collar | 0.02 |
+| twist | 0.02 |
+| screw | 0.04 |
+| rework | 1.10 |
+| stack | 1.25 |
+| key | 7.00 |
 
 ## Release bars (calibration, honest privileged)
 
@@ -66,14 +66,16 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
 
 ## v0.7.4 branching / probe harden (vs adaptive conditional scripts)
 
-- **Press-gated probe-refined key yaw:** after touch/late reveal, obs `sin/cos` carries a
-  large decaying bias that converges only while *pressing* on the peg (`KEY_PROBE_FRAMES`) —
-  touch-and-snap scripts keep a wrong absolute yaw; press-and-refine (or true-state) works.
+- **Blind key yaw:** obs never publishes `sin/cos(key_yaw)` or a closeness scalar. After
+  reveal + press-probe, only `key_tol` may appear — policies must blind-search or use true
+  state; snap-to-published-yaw fails.
+- **Press-probe + leave/reenter:** `KEY_PROBE_FRAMES` of press, then the peg must leave the
+  key window once before hold can latch (blocks natural-seat freebies).
 - **Single-active key rotation (`activate`):** with ≥2 unfinished keys, only one may complete;
   inactive keys report `blocked=1` and cannot accumulate hold.
 - **`regraph`:** drop soft unfinished edges and redraw 1–3 wave-consistent ones (stronger than
   single-edge `reorder`); often rotates the active key.
-- **Post-stack key retarget** (plus denser post-insert retarget); deeper rework seat.
+- **Post-stack / post-insert key retarget;** keys only wait on their own peg's insert/rework.
 - Interface unchanged (`[B,288]→[B,5]`); no wall-clock score caps; miner-path latch sealed.
 
 ## v0.7.3 adaptive harden (vs v0.7.1-trained kings)

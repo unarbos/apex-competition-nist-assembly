@@ -129,17 +129,21 @@ def test_key_yaw_reachable_and_obs_packs_tol():
         e = _ep(13, i, per=8)
         r = np.random.default_rng(0)
         # Reveal any late-hidden / touch-gated keys so obs packing can be checked.
-        # v0.7.4: also finish probe refine so sin/cos / key_tol pack the true window.
-        for s in e.cs.steps:
+        # v0.7.4: finish probe + activate so key_tol can pack (yaw stays blind).
+        for ki, s in enumerate(e.cs.steps):
             if s.kind == "key" and s.reveal_after is not None:
                 e.step_done[s.reveal_after] = True
             if s.kind == "key" and getattr(s, "touch_reveal", False):
                 e._peg_touched[s.peg] = True
             if s.kind == "key":
                 e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+                e.seated_now[s.peg] = True
+                for p in s.prereq:
+                    e.step_done[p] = True
+                e._active_key = ki
         o = e.observe(r)
         task0 = OBS_DIM
-        for s in e.cs.steps:
+        for ki, s in enumerate(e.cs.steps):
             if s.kind != "key":
                 continue
             if s.reveal_after is not None and not e.step_done[s.reveal_after]:
@@ -147,12 +151,18 @@ def test_key_yaw_reachable_and_obs_packs_tol():
             if getattr(s, "touch_reveal", False) and not e._peg_touched[s.peg]:
                 continue
             b = task0 + s.peg * TASK_PEG_FEAT
-            assert abs(o[b + 2] - math.sin(s.key_yaw)) < 1e-5
-            assert abs(o[b + 3] - math.cos(s.key_yaw)) < 1e-5
+            # v0.7.4: absolute key yaw and closeness stay hidden (blind search).
+            assert abs(float(o[b + 2])) < 1e-5
+            assert abs(float(o[b + 3])) < 1e-5
             has_ring = any(
                 t.kind in ("collar", "stack") and t.peg == s.peg for t in e.cs.steps
             )
-            if not has_ring:
+            # key_tol packs only for the active key (inactive report blocked only).
+            if (
+                not has_ring
+                and e._peg_probe_frames[s.peg] >= KEY_PROBE_FRAMES
+                and e._key_is_active(ki)
+            ):
                 assert abs(float(o[b + 5]) - s.key_tol * 10.0) < 1e-5, (
                     f"key_tol not packed for peg {s.peg}: got {o[b + 5]}"
                 )
@@ -194,9 +204,12 @@ def test_key_hold_increments_once_per_step():
     e = _ep(17, idx, per=8)
     sk = next(k for k, s in enumerate(e.cs.steps) if s.kind == "key")
     peg = e.cs.steps[sk].peg
-    # v0.7.3: key hold only accumulates after prerequisites (e.g. stack-before-key).
+    # v0.7.3/v0.7.4: hold only after prereqs + active + press-probe.
     for p in e.cs.steps[sk].prereq:
         e.step_done[p] = True
+    e._active_key = sk
+    e._peg_probe_frames[peg] = KEY_PROBE_FRAMES
+    e._key_index_armed[peg] = True
     e._key_aligned = lambda s: True  # type: ignore[method-assign]
     e._gripper_touching = lambda _b: False  # type: ignore[method-assign]
     e.seated_now[peg] = True

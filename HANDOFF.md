@@ -210,11 +210,13 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 - Spec `0.7.4`; digests **not** re-pinned (still v0.7.3 images until owner ships).
   Profile bake stays `NIST_PROFILE=v07`. Player interface unchanged (`gym_v1`, 288→5).
 - Defeats adaptive conditional ONNX scripts that re-read obs on v0.7.3:
-  probe-refined key yaw (interaction-inferred), single-active key rotation (`activate`),
-  stronger `regraph` precedence rewrites, post-stack key retarget, denser adaptive events,
-  deeper rework. Weights: insert/collar/twist 0.03, screw 0.05, rework 1.60, stack 3.50, key 4.50.
+  blind key yaw, press-probe + leave/reenter index arm, single-active key rotation
+  (`activate`), stronger `regraph` precedence rewrites, post-stack/post-insert key retarget,
+  seat-only key prereqs. Weights: insert/collar/twist 0.02, screw 0.04, rework 1.10,
+  stack 1.25, key 7.00
 - Physics unchanged in spirit: every subtask remains action-only completable; miner-path stack
-  latch tests kept; honest privileged target ~0.5–0.75; strong scripts ≤~0.25. See `CALIBRATION.md`.
+  latch tests kept; honest privileged ~0.48 (target ~0.5–0.75); strong scripts ≤~0.25.
+  See `CALIBRATION.md`.
 
 ## 13z. v0.7.3 (adaptive compound harden)
 - Spec `0.7.3`; digests pinned from release v0.7.3 (release.yml run 42424076462).
@@ -222,7 +224,7 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 - Defeats v0.7.1-trained Round 22 kings that still scored ~0.43 on v0.7.2: mid-episode
   `retarget` / `reorder` / `flip_twist` events, post-insert key retarget, touch-gated reveals,
   stack-before-key precedence, keys complete only after prerequisites, out-of-order keys score 0.
-  Weights: insert/collar/twist 0.04, screw 0.06, rework 1.60, stack 5.00, key 2.60.
+  Weights: insert/collar/twist 0.02, screw 0.04, rework 0.9, stack 1.1, key 7.5
 - Physics unchanged in spirit: every subtask remains action-only completable; miner-path stack
   latch tests kept/extended; honest privileged ≥~0.45; kings ≤~0.25. See `CALIBRATION.md`.
 

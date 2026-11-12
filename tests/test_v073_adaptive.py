@@ -69,11 +69,15 @@ def test_touch_reveal_zeros_key_until_contact():
     b = OBS_DIM + s.peg * TASK_PEG_FEAT
     assert float(o[b + 2]) == 0.0 and float(o[b + 3]) == 0.0
     e._peg_touched[s.peg] = True
-    # v0.7.4: after touch, yaw is probe-noisy until KEY_PROBE_FRAMES converge.
+    # v0.7.4: absolute key yaw and closeness stay hidden (blind search).
     e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+    e.seated_now[s.peg] = True
+    for p in s.prereq:
+        e.step_done[p] = True
+    e._active_key = next(i for i, ss in enumerate(e.cs.steps) if ss is s)
     o2 = e.observe(r)
-    assert abs(float(o2[b + 2]) - math.sin(s.key_yaw)) < 1e-5
-    assert abs(float(o2[b + 3]) - math.cos(s.key_yaw)) < 1e-5
+    assert float(o2[b + 2]) == 0.0
+    assert float(o2[b + 3]) == 0.0
 
 
 def test_retarget_event_moves_key_yaw_and_clears_hold():

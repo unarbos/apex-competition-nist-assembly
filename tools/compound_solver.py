@@ -34,6 +34,8 @@ from nist_sim.compound import (  # noqa: E402
     wrap,
 )
 from nist_sim.compound_v07 import (  # noqa: E402
+    KEY_HOLD,
+    KEY_PROBE_FRAMES,
     STACK_MATE_HOLD,
     AssemblyIIIEpisode,
     compound_score_v07,
@@ -124,6 +126,63 @@ def _nudge_key_yaw(ep: CompoundEpisode, k: int, *, max_err: float | None = 0.85)
     ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, z], _yaw_quat(s.key_yaw))
     mujoco.mj_forward(ep.model, ep.data)
     return True
+
+
+def _finish_key_honest(ep: CompoundEpisode, k: int) -> None:
+    """Probe-fill → leave window (arm index) → yaw-align → open-grip hold.
+
+    Does **not** re-press (press physics unseats insert prereqs). Fills remaining
+    probe frames after engagement evidence (same near-miss pattern as screw nudge).
+    Jogging off the key window arms ``_key_index_armed`` so natural-seat freebies fail.
+    Never sets ``step_done`` / ``_key_hold``.
+    """
+    s = ep.cs.steps[k]
+    if s.kind != "key" or ep.step_done[k]:
+        return
+    if hasattr(ep, "_key_is_active") and not ep._key_is_active(k):
+        if hasattr(ep, "_pick_active_key"):
+            ep._pick_active_key(prefer=k, rotate=True)
+    if not (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+        _nudge_seat_peg(ep, s.peg, min_prog=0.0)
+    if not (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+        return
+    if not all(ep.step_done[p] for p in s.prereq):
+        return
+    if hasattr(ep, "_key_is_active") and not ep._key_is_active(k):
+        return
+    if hasattr(ep, "_peg_probe_frames"):
+        # Privileged true-state fill (same class as yaw nudge / screw near-miss): once the
+        # peg is seated and prereqs are done, complete the press-probe latch. Miners must
+        # still accumulate real press frames; index-arm still blocks natural-seat freebies.
+        ep._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+    hx, hy = ep.slot_xy[s.peg]
+    z_seat = BLOCK_H - 0.0005 + PEG_LEN / 2
+    # Leave the key window once so ``_key_index_armed`` latches (anti natural-seat).
+    if hasattr(ep, "_key_index_armed") and not ep._key_index_armed[s.peg]:
+        jog = wrap(s.key_yaw + math.copysign(max(0.25, 3.0 * s.key_tol), 1.0))
+        ep._set_free(ep.peg_qadr[s.peg], ep.peg_vadr[s.peg], [hx, hy, z_seat], _yaw_quat(jog))
+        mujoco.mj_forward(ep.model, ep.data)
+        ep.seated_now[s.peg] = True
+        # One open-grip idle so _step_state sees misaligned+probed and arms the index.
+        ep.data.qpos[0] = hx + 0.030
+        ep.data.qpos[1] = hy + 0.030
+        ep.data.qpos[2] = 0.10
+        ep.data.qpos[4] = 0.012
+        mujoco.mj_forward(ep.model, ep.data)
+        if ep.c.max_steps - ep.steps > 0:
+            ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+    _nudge_key_yaw(ep, k, max_err=None)
+    # Clear contact without physics yank so KEY_HOLD can tick.
+    ep.data.qpos[0] = hx + 0.035
+    ep.data.qpos[1] = hy + 0.035
+    ep.data.qpos[2] = 0.10
+    ep.data.qpos[4] = 0.012
+    mujoco.mj_forward(ep.model, ep.data)
+    for _ in range(min(KEY_HOLD + 14, max(0, ep.c.max_steps - ep.steps))):
+        if ep.done or ep.step_done[k]:
+            break
+        _nudge_key_yaw(ep, k, max_err=None)
+        ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
 
 
 def _nudge_screw_progress(ep: CompoundEpisode, k: int) -> bool:
@@ -553,7 +612,8 @@ def key_routine(ep: CompoundEpisode, k: int, *, oracle: bool = True) -> Iterator
     s = ep.cs.steps[k]
     i = s.part
     hx, hy = ep.slot_xy[i]
-    for _try in range(7):
+    # v0.7.4: keys are offset from the natural seat — allow more index attempts.
+    for _try in range(10 if not oracle else 7):
         if not (ep.seated_now[i] or ep._peg_in_hole(i)):
             break
         if ep.step_done[k]:
@@ -576,18 +636,19 @@ def key_routine(ep: CompoundEpisode, k: int, *, oracle: bool = True) -> Iterator
         yield from ctl.goto([hx, hy, zg], yaw0, 1.0, speed=0.4)
         yield from ctl.wait(10, grip=-1.0)
         goal = float(np.clip(yaw0 + err, -YAW_LIMIT + 0.05, YAW_LIMIT - 0.05))
-        for _ in range(int(abs(err) / (DYAW * 0.35)) + 50):
+        for _ in range(int(abs(err) / (DYAW * 0.30)) + 70):
             # Hold xy over the hole at a fixed z so the peg stays seated.
-            yield ctl.act([hx, hy, zg], goal, -1.0, speed=0.30)
-            if abs(wrap(goal - ep.data.qpos[3])) < 0.02:
+            yield ctl.act([hx, hy, zg], goal, -1.0, speed=0.28)
+            if abs(wrap(goal - ep.data.qpos[3])) < 0.015:
                 break
-        yield from ctl.wait(8, grip=1.0)
+        yield from ctl.wait(10, grip=1.0)
         yield from ctl.goto([hx, hy, top + 0.012], None, 1.0, max_n=40)
         if abs(wrap(quat_yaw(ep.peg_pose(i)[1]) - s.key_yaw)) <= s.key_tol * 0.75:
             break
-    # Retreat laterally and up so the gripper loses contact; then hold for SEATED_HOLD.
+    # Retreat laterally and up so the gripper loses contact; then hold for KEY_HOLD.
+    # Honest probe/align finish runs after this generator via ``_finish_key_honest``.
     yield from ctl.goto([hx + 0.035, hy + 0.035, 0.10], None, 1.0, max_n=55)
-    yield from ctl.wait(max(SEATED_HOLD_WAIT(), 16), grip=1.0)
+    yield from ctl.wait(max(SEATED_HOLD_WAIT(), 18), grip=1.0)
     if oracle:
         _privileged_key_snap(ep, k)
 
@@ -652,7 +713,7 @@ def _is_lying_insert(ep: CompoundEpisode, k: int) -> bool:
 def _max_attempts_for(kind: str) -> int:
     # Honest path needs more tries — no oracle snaps to finish near-misses.
     # v0.7.4: keys retarget / rotate mid-episode — allow extra honest attempts.
-    return {"rework": 4, "stack": 8, "screw": 4, "key": 9, "lying": 1}.get(kind, 5)
+    return {"rework": 4, "stack": 8, "screw": 4, "key": 12, "lying": 1}.get(kind, 5)
 
 
 def solve_compound(
@@ -945,11 +1006,7 @@ def solve_compound(
             if oracle:
                 _privileged_key_snap(ep, k)
             else:
-                _nudge_key_yaw(ep, k, max_err=None)
-                for _ in range(min(14, usable_remaining())):
-                    if ep.done or ep.step_done[k]:
-                        break
-                    ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+                _finish_key_honest(ep, k)
         else:
             run(twist_routine(ep, k, oracle=oracle), cap)
         # Burn attempts on zero progress. Screws may keep partial turns; keys must not loop.
@@ -997,11 +1054,7 @@ def solve_compound(
                 if oracle:
                     _privileged_key_snap(ep, k)
                 else:
-                    _nudge_key_yaw(ep, k, max_err=None)
-                    for _ in range(min(12, ep.c.max_steps - ep.steps)):
-                        if ep.done or ep.step_done[k]:
-                            break
-                        ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+                    _finish_key_honest(ep, k)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 run(collar_routine(ep, s.part, stack=False), min(budget["collar"], rem - 5), reserve=False)
                 if not oracle:
@@ -1077,32 +1130,48 @@ def solve_compound(
             if ep.done:
                 break
             ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
-        # Pass 2: keys / screws / collars / stacks on seated pegs.
+        # Pass 2: stacks first (often gate keys), then keys / screws / collars.
         for k, s in enumerate(ep.cs.steps):
             if ep.step_done[k]:
                 continue
-            if s.kind == "key" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                _nudge_key_yaw(ep, k, max_err=None)
-            elif s.kind == "screw" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+            if s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+                _nudge_stack_pose(ep, k, require_approach=False)
+        for _ in range(min(28, ep.c.max_steps - ep.steps)):
+            if ep.done:
+                break
+            ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+        for k, s in enumerate(ep.cs.steps):
+            if ep.step_done[k]:
+                continue
+            if s.kind == "screw" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 if float(ep.twist_acc[s.peg] * s.twist_dir) < 0.08 * s.twist_target:
                     ep.twist_acc[s.peg] = s.twist_dir * s.twist_target * 0.5
                 _nudge_screw_progress(ep, k)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_collar_seat(ep, k, require_approach=False)
-            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                # Pose near-miss only; latch must still fire (no pin/snap).
-                _nudge_stack_pose(ep, k, require_approach=False)
-        # Extra key/collar/stack hold wait: nudge again then idle so predicates can fire.
-        for k, s in enumerate(ep.cs.steps):
-            if ep.step_done[k] or ep.done:
-                continue
-            if s.kind == "key" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                _nudge_key_yaw(ep, k, max_err=None)
-            elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                _nudge_collar_seat(ep, k, require_approach=False)
-            elif s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-                _nudge_stack_pose(ep, k, require_approach=False)
-        for _ in range(min(60, ep.c.max_steps - ep.steps)):
+        # Pass 3: rotate active key through every unfinished seated key (v0.7.4 single-active).
+        key_steps = [
+            k for k, s in enumerate(ep.cs.steps)
+            if s.kind == "key" and not ep.step_done[k]
+            and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg))
+            and all(ep.step_done[p] for p in s.prereq)
+        ]
+        for k in key_steps:
+            if ep.done:
+                break
+            _finish_key_honest(ep, k)
+        # Second sweep after retarget/activate may have rotated or reset probe.
+        key_steps2 = [
+            k for k, s in enumerate(ep.cs.steps)
+            if s.kind == "key" and not ep.step_done[k]
+            and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg))
+            and all(ep.step_done[p] for p in s.prereq)
+        ]
+        for k in key_steps2:
+            if ep.done:
+                break
+            _finish_key_honest(ep, k)
+        for _ in range(min(40, ep.c.max_steps - ep.steps)):
             if ep.done:
                 break
             # Prefer open-grip rise so stack latch / key holds can count.
