@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.3 (Assembly III)
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.4 (Assembly III)
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -17,10 +17,10 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.3` | ☑ |
-| `spec.yaml` version `0.7.3`; digests pinned from release v0.7.3 | `spec.yaml` | ☑ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:2885834ff05bf92c5e83017cfdd226ab511527c295e9be10b58e27cd2a3d1ada` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:339f75e12ca4e12610663ecc60ddb97bab1cce2b064886ac414d328e1f51151e` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.4` (RC; digests still v0.7.3 until ship) | ☐ |
+| `spec.yaml` version `0.7.4`; digests left at release v0.7.3 until owner pins | `spec.yaml` | ☐ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:2885834ff05bf92c5e83017cfdd226ab511527c295e9be10b58e27cd2a3d1ada` | ☑ (v0.7.3 pin) |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:339f75e12ca4e12610663ecc60ddb97bab1cce2b064886ac414d328e1f51151e` | ☑ (v0.7.3 pin) |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
@@ -206,13 +206,25 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   `body_conaffinity` are the only fields it changes besides the mass-derived constants.
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
-## 13. v0.7.3 (adaptive compound harden)
+## 13. v0.7.4 (branching / probe adaptive harden)
+- Spec `0.7.4`; digests **not** re-pinned (still v0.7.3 images until owner ships).
+  Profile bake stays `NIST_PROFILE=v07`. Player interface unchanged (`gym_v1`, 288→5).
+- Defeats adaptive conditional ONNX scripts that re-read obs on v0.7.3:
+  blind key yaw, press-probe + leave/reenter index arm, single-active key rotation
+  (`activate`), stronger `regraph` precedence rewrites, post-stack/post-insert key retarget,
+  seat-only key prereqs. Weights: insert/collar/twist 0.02, screw 0.04, rework 1.10,
+  stack 1.25, key 7.00
+- Physics unchanged in spirit: every subtask remains action-only completable; miner-path stack
+  latch tests kept; honest privileged ~0.48 (target ~0.5–0.75); strong scripts ≤~0.25.
+  See `CALIBRATION.md`.
+
+## 13z. v0.7.3 (adaptive compound harden)
 - Spec `0.7.3`; digests pinned from release v0.7.3 (release.yml run 42424076462).
   Profile bake stays `NIST_PROFILE=v07`.
 - Defeats v0.7.1-trained Round 22 kings that still scored ~0.43 on v0.7.2: mid-episode
   `retarget` / `reorder` / `flip_twist` events, post-insert key retarget, touch-gated reveals,
   stack-before-key precedence, keys complete only after prerequisites, out-of-order keys score 0.
-  Weights: insert/collar/twist 0.04, screw 0.06, rework 1.60, stack 5.00, key 2.60.
+  Weights: insert/collar/twist 0.02, screw 0.04, rework 0.9, stack 1.1, key 7.5
 - Physics unchanged in spirit: every subtask remains action-only completable; miner-path stack
   latch tests kept/extended; honest privileged ≥~0.45; kings ≤~0.25. See `CALIBRATION.md`.
 
@@ -225,7 +237,7 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   Stack rings are interference-fit; completion via `_maybe_mate_stacks` (arm + released hold).
   Twist/screw: per-peg Bernoulli draws. King gate was calibrated on v0.6-era kings only — that
   was the Round 22 mistake (v0.7.1 policies stayed near saturation). Superseded by v0.7.3.
-- Eval bounds: `deadline_ms=80`, `MAX_HORIZON=1400`. **No** wall-clock score cuts.
+- Eval bounds: `deadline_ms=80`, `MAX_HORIZON=1400` (raised to 1600 in v0.7.4). **No** wall-clock score cuts.
 - Privileged solver must use `--honest` / `oracle=False` for the calibration bar (pose nudges
   only; no stack pin teleports). See `CALIBRATION.md` / `docs/v0.7/DESIGN.md`.
 

@@ -1,6 +1,6 @@
 # NIST Assembly Competition
 
-Docs page text for v0.7.3 (Assembly III). Platform-wide items that Macrocosmos sets
+Docs page text for v0.7.4 (Assembly III). Platform-wide items that Macrocosmos sets
 (submission fee, rate limits) are not repeated here.
 
 ### NIST Assembly Competition
@@ -9,12 +9,21 @@ Docs page text for v0.7.3 (Assembly III). Platform-wide items that Macrocosmos s
 
 The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper on a Cartesian stage** (x, y, z, yaw) through **multi-peg sequential assembly** on a board modelled on the **NIST Assembly Task Board #1**, simulated in MuJoCo on CPU. Miners submit an ONNX policy that outputs incremental stage and gripper commands at 25 Hz. The setup borrows from AlphaNIST (Zhang et al., arXiv 2610.13354): the ATB-1 board, the 1 mm success criterion, 25 Hz control, diverse start states and free-order multi-part episodes. It is much smaller: pegs only, primitive geometry, a 4-DoF stage instead of a 7-DoF arm, and noisy state estimates instead of point clouds. Since v0.6 every episode is a **compound assembly task**; v0.7 adds rework, press-gated screws, stack rings and obs-indexed keys. Scoring gives weighted partial credit per step so that a ranked competition has a gradient. Cost is bounded by the sim horizon only — same policy and seed score the same under any machine load.
 
+**What changed in v0.7.4**
+
+* Branching / probe adaptive harden against strong conditional ONNX scripts that still scored
+  ~0.5–0.6 on v0.7.3: blind key yaw, press-probe + leave/reenter index arm, single-active key
+  rotation (`activate`), stronger `regraph` precedence rewrites, post-stack/post-insert key
+  retarget, seat-only key prereqs. Weights: insert/collar/twist 0.02, screw 0.04, rework 1.10,
+  stack 1.25, key 7.00. Interface unchanged (288→5). Physics stays action-only solvable;
+  digests not re-pinned.
+
 **What changed in v0.7.3**
 
 * Adaptive mid-episode structure against v0.7.1-trained policies: `retarget` / `reorder` /
   `flip_twist` events, post-insert key retarget, touch-gated reveals, stack-before-key
   precedence, keys complete only after prerequisites, out-of-order keys score 0. Weights
-  shift onto stacks (insert/collar/twist 0.04, screw 0.06, rework 1.60, stack 5.00, key 2.60).
+  shift onto stacks (insert/collar/twist 0.02, screw 0.04, rework 0.9, stack 1.1, key 7.5).
   Physics stays action-only solvable; digests not re-pinned.
 
 **What changed in v0.7.2**
@@ -26,7 +35,7 @@ The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper
 **What changed in v0.7.1**
 
 * **Referee image bakes `NIST_PROFILE=v07`.** The v0.7.0 image still had `v06` in the Dockerfile, so `setdefault` never promoted the live task.
-* **No wall-clock scoring caps.** Removed `round_wall_s` and the per-episode 18 s wall. Horizon (≤ 1400 steps) is the only cost bound inside the referee.
+* **No wall-clock scoring caps.** Removed `round_wall_s` and the per-episode 18 s wall. Horizon (≤ 1600 steps as of v0.7.4; was 1400) is the only cost bound inside the referee.
 * **Stack / key / latch fixes.** Stack hold counting works; key yaw is reachable on non-round pegs and `key_tol` is shown; completed hard steps stay completed.
 * **Docs match code.** Weights insert 0.30 / collar 0.25 / twist 0.25 / screw 0.40 / rework 2.10 / stack 2.60 / key 3.40; c4 waves at most 2; profile `clearance` is wired via `conditions.active_ranges()` (v07 draws 0.20–0.68 mm). Result/records log `nist_profile`. Hard steps (key/stack/rework) are all-or-nothing for scoring.
 

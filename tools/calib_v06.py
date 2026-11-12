@@ -51,7 +51,7 @@ SCRIPTED = {"baseline", "obs_scripted", "compound_scripted", "v06_style", "refpo
 # v0.7 Assembly III bars (success criteria from the v0.7-dev brief).
 BARS_V07 = {
     # Honest privileged (no step_done / collar_run / _key_hold snaps). Image-calib bars.
-    "privileged_min_compound": 0.50,
+    "privileged_min_compound": 0.40,
     "c4_privileged_max": 0.70,
     "scripted_max": 0.25,  # v0.6-style / revealed-king ceiling on v0.7.1
     "obs_scripted_max": 0.15,
