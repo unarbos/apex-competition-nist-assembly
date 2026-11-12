@@ -12,10 +12,10 @@ resources:
   gpu_count: 0
 
 # PLAYER image: serves the miner's ONNX policy over gym_v1 (player/Dockerfile).
-# Digests pinned from release v0.7.3 (release.yml run 42424076462, cosign-signed).
+# Digests pinned from release v0.7.4 (release.yml run 43256589506, cosign-signed).
 image:
   ref: ghcr.io/unarbos/apex-competition-nist-assembly-player
-  digest: sha256:2885834ff05bf92c5e83017cfdd226ab511527c295e9be10b58e27cd2a3d1ada
+  digest: sha256:717b863d6775c5c4b2654087118b462b713b220f16232446de753273a01e343d
 
 submission:
   artifact_type: onnx
@@ -56,7 +56,7 @@ referee:
   image:
     # Private package; built with reserved.json from the NIST_HELDOUT_SEED build secret.
     ref: ghcr.io/unarbos/apex-competition-nist-assembly-referee
-    digest: sha256:339f75e12ca4e12610663ecc60ddb97bab1cce2b064886ac414d328e1f51151e
+    digest: sha256:176ac835710a9c2c362ba91ae12b9b750770dcc1fd648cf759f2b694fcc046cf
   timeout_s: 1800
 
 signature:
