@@ -17,10 +17,10 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.4` (RC; digests still v0.7.3 until ship) | ☐ |
-| `spec.yaml` version `0.7.4`; digests left at release v0.7.3 until owner pins | `spec.yaml` | ☐ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:2885834ff05bf92c5e83017cfdd226ab511527c295e9be10b58e27cd2a3d1ada` | ☑ (v0.7.3 pin) |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:339f75e12ca4e12610663ecc60ddb97bab1cce2b064886ac414d328e1f51151e` | ☑ (v0.7.3 pin) |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.4` | ☑ |
+| `spec.yaml` version `0.7.4`; digests pinned from release v0.7.4 | `spec.yaml` | ☑ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:717b863d6775c5c4b2654087118b462b713b220f16232446de753273a01e343d` | ☑ |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:176ac835710a9c2c362ba91ae12b9b750770dcc1fd648cf759f2b694fcc046cf` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
@@ -28,7 +28,7 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 42424076462 (tag `v0.7.3`).
+onnxruntime 1.31.0. Image digests from release run 43256589506 (tag `v0.7.4`).
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
@@ -207,7 +207,7 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
 ## 13. v0.7.4 (branching / probe adaptive harden)
-- Spec `0.7.4`; digests **not** re-pinned (still v0.7.3 images until owner ships).
+- Spec `0.7.4`; digests pinned from release v0.7.4 (release.yml run 43256589506).
   Profile bake stays `NIST_PROFILE=v07`. Player interface unchanged (`gym_v1`, 288→5).
 - Defeats adaptive conditional ONNX scripts that re-read obs on v0.7.3:
   blind key yaw, press-probe + leave/reenter index arm, single-active key rotation
