@@ -151,9 +151,9 @@ def test_key_yaw_reachable_and_obs_packs_tol():
             if getattr(s, "touch_reveal", False) and not e._peg_touched[s.peg]:
                 continue
             b = task0 + s.peg * TASK_PEG_FEAT
-            # v0.7.4: absolute key yaw and closeness stay hidden (blind search).
-            assert abs(float(o[b + 2])) < 1e-5
-            assert abs(float(o[b + 3])) < 1e-5
+            # v0.7.5: absolute key yaw stays hidden; closeness may be non-zero after probe.
+            assert float(o[b + 2]) in (0.0, 1.0)  # retarget pulse only
+            assert 0.0 <= float(o[b + 3]) <= 1.0
             has_ring = any(
                 t.kind in ("collar", "stack") and t.peg == s.peg for t in e.cs.steps
             )

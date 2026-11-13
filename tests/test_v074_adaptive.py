@@ -22,9 +22,9 @@ from nist_sim import conditions as C  # noqa: E402
 from nist_sim.compound import TASK_PEG_FEAT, wrap  # noqa: E402
 from nist_sim.compound_v07 import (  # noqa: E402
     EVENT_KINDS_V07,
+    KEY_CLOSE_NOISE,
     KEY_HOLD,
     KEY_PROBE_FRAMES,
-    KEY_PROBE_NOISE0,
     TIER_CFG_V07,
     AssemblyIIIEpisode,
     sample_compound_v07,
@@ -51,7 +51,8 @@ def test_v074_events_registered():
         assert int(cfg["max_keys"]) <= 2, tier
 
 
-def test_key_obs_hides_yaw_and_closeness():
+def test_key_obs_hides_absolute_yaw_publishes_closeness():
+    """v0.7.5: absolute yaw stays hidden; coarse noisy closeness appears after probe."""
     _, conds = sample_compound_v07(53, 8)
     idx = next(
         (i for i, c in enumerate(conds) if any(s.kind == "key" for s in c.compound.steps)),
@@ -73,12 +74,13 @@ def test_key_obs_hides_yaw_and_closeness():
     r = np.random.default_rng(0)
     o1 = e.observe(r)
     b = OBS_DIM + s.peg * TASK_PEG_FEAT
-    assert float(o1[b + 2]) == 0.0
-    assert float(o1[b + 3]) == 0.0  # no closeness either — blind search
+    # feat 2 is retarget pulse (0 unless recently retargeted), not sin(key_yaw).
+    assert float(o1[b + 2]) in (0.0, 1.0)
+    assert 0.0 <= float(o1[b + 3]) <= 1.0  # noisy closeness
     has_ring = any(t.kind in ("collar", "stack") and t.peg == s.peg for t in e.cs.steps)
     if not has_ring:
         assert abs(float(o1[b + 5]) - s.key_tol * 10.0) < 1e-5
-    assert KEY_PROBE_NOISE0 >= 0.5
+    assert KEY_CLOSE_NOISE > 0.0
 
 
 def _dual_key_episode() -> AssemblyIIIEpisode:

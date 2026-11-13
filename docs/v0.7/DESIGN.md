@@ -1,4 +1,4 @@
-# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.4)
+# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.5)
 
 ## Goal
 
@@ -34,17 +34,17 @@ must score the same on any machine load.
 
 Same rubric family as v0.6 (done = 0.70 + 0.30·time; unfinished ≤ 0.30). In v0.7.3, **keys**
 finished out of order score **0** (stack/rework keep the out-of-order floor). Weights (code
-`STEP_WEIGHT_V07`, v0.7.3):
+`STEP_WEIGHT_V07`):
 
-| kind | weight (v0.7.4) |
+| kind | weight (v0.7.5) |
 |---|---|
-| insert | 0.02 |
-| collar | 0.02 |
-| twist | 0.02 |
-| screw | 0.04 |
-| rework | 1.10 |
-| stack | 1.25 |
-| key | 7.00 |
+| insert | 0.12 |
+| collar | 0.12 |
+| twist | 0.12 |
+| screw | 0.45 |
+| rework | 1.50 |
+| stack | 2.00 |
+| key | 2.80 |
 
 ## Release bars (calibration, honest privileged)
 
@@ -64,19 +64,28 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
 - Stack hold counting no longer fights the parent collar-on-block reset.
 - Key yaw sampling + `key_tol` obs packing; latch so completed hard steps stay completed.
 
+## v0.7.5 observation-completable keys (vs Macrocosmos v0.7.4 hold)
+
+- **No absolute key yaw**, but after reveal + press-probe publish a **coarse noisy unsigned
+  closeness** (task feat 3) and a **retarget/disarm pulse** (feat 2). Wrist yaw-torque gets a
+  **noisy detent** while pressing inside the window. Absolute `sin/cos(key_yaw)` stays hidden
+  so snap-to-published-yaw still fails; hill-climb / detent search is feasible from obs alone.
+- **D-flat / symmetry-1 auto-arm** after probe (hole play can be smaller than `tol − |jitter|`).
+- **Key weight rebalanced** to 2.80 (was 7.00 / ~73% of episode mass).
+- **Key index is hand yaw** (wrist) vs the hidden window — soft contacts rarely spin a seated peg.
+- **Dead code removed:** temporary stack→key edge in `make_compound_v07`; unused `_obs_key_yaw`
+  RNG draw (RNG stream changes — fine for a new version).
+- **Insert latch documented:** insert credit survives deliberate pull-out; only `misseat`
+  (done_at = −1) forces a re-seat. Insert weight stays low.
+- Honest privileged key path is **actions only** (no `_peg_probe_frames` writes / key teleports);
+  oracle path remains separate via `oracle=True`.
+- Interface unchanged (`[B,288]→[B,5]`); no wall-clock score caps; miner-path latch sealed.
+
 ## v0.7.4 branching / probe harden (vs adaptive conditional scripts)
 
-- **Blind key yaw:** obs never publishes `sin/cos(key_yaw)` or a closeness scalar. After
-  reveal + press-probe, only `key_tol` may appear — policies must blind-search or use true
-  state; snap-to-published-yaw fails.
-- **Press-probe + leave/reenter:** `KEY_PROBE_FRAMES` of press, then the peg must leave the
-  key window once before hold can latch (blocks natural-seat freebies).
-- **Single-active key rotation (`activate`):** with ≥2 unfinished keys, only one may complete;
-  inactive keys report `blocked=1` and cannot accumulate hold.
-- **`regraph`:** drop soft unfinished edges and redraw 1–3 wave-consistent ones (stronger than
-  single-edge `reorder`); often rotates the active key.
-- **Post-stack / post-insert key retarget;** keys only wait on their own peg's insert/rework.
-- Interface unchanged (`[B,288]→[B,5]`); no wall-clock score caps; miner-path latch sealed.
+- Press-probe + leave/reenter; single-active key rotation (`activate`); `regraph`; post-stack /
+  post-insert key retarget; keys only wait on their own peg's insert/rework.
+- v0.7.4 also hid closeness (blind search) — superseded by v0.7.5 cues above.
 
 ## v0.7.3 adaptive harden (vs v0.7.1-trained kings)
 

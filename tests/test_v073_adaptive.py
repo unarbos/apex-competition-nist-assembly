@@ -69,15 +69,15 @@ def test_touch_reveal_zeros_key_until_contact():
     b = OBS_DIM + s.peg * TASK_PEG_FEAT
     assert float(o[b + 2]) == 0.0 and float(o[b + 3]) == 0.0
     e._peg_touched[s.peg] = True
-    # v0.7.4: absolute key yaw and closeness stay hidden (blind search).
+    # v0.7.5: absolute yaw still hidden; after probe closeness may appear.
     e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
     e.seated_now[s.peg] = True
     for p in s.prereq:
         e.step_done[p] = True
     e._active_key = next(i for i, ss in enumerate(e.cs.steps) if ss is s)
     o2 = e.observe(r)
-    assert float(o2[b + 2]) == 0.0
-    assert float(o2[b + 3]) == 0.0
+    assert float(o2[b + 2]) in (0.0, 1.0)  # retarget pulse, not sin(key_yaw)
+    assert 0.0 <= float(o2[b + 3]) <= 1.0
 
 
 def test_retarget_event_moves_key_yaw_and_clears_hold():
@@ -92,11 +92,18 @@ def test_retarget_event_moves_key_yaw_and_clears_hold():
     k = next(k for k, s in enumerate(e.cs.steps) if s.kind == "key")
     s = e.cs.steps[k]
     old = float(s.key_yaw)
+    old_tol = float(s.key_tol)
     e._key_hold[s.peg] = 4
-    e._fire_event(dict(kind="retarget"))
-    assert abs(wrap(s.key_yaw - old)) > 0.10
+    # Target this key directly (event RNG may pick another unfinished key).
+    e._retarget_key(k)
     assert e._key_hold[s.peg] == 0
-    assert any(ev.get("kind") == "retarget" for ev in e.events_fired)
+    assert e._key_retarget_pulse[s.peg] > 0
+    sym = int(e.c.pegs[s.peg].spec.symmetry())
+    if sym == 1:
+        # D-flat cannot relocate the physical window; tol redraw + pulse still fire.
+        assert s.key_tol != old_tol or e._key_index_armed[s.peg] is False
+    else:
+        assert abs(wrap(s.key_yaw - old)) > 0.10
 
 
 def test_reorder_event_adds_precedence_edge():
