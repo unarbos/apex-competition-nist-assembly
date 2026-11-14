@@ -17,7 +17,7 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ main (v0.7.5 RC; do not tag from this PR) | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.5` | ☑ |
 | `spec.yaml` version `0.7.5`; digests pinned from release v0.7.5 | `spec.yaml` | ☑ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:717b863d6775c5c4b2654087118b462b713b220f16232446de753273a01e343d` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:176ac835710a9c2c362ba91ae12b9b750770dcc1fd648cf759f2b694fcc046cf` | ☑ |
