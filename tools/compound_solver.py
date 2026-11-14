@@ -110,7 +110,10 @@ def _nudge_seat_peg(ep: CompoundEpisode, i: int, *, min_prog: float = 0.08) -> b
 
 
 def _nudge_key_yaw(ep: CompoundEpisode, k: int, *, max_err: float | None = 0.85) -> bool:
-    """Privileged yaw nudge onto the key window. Does **not** set _key_hold / step_done."""
+    """Oracle-only yaw teleport onto the key window. Does **not** set _key_hold / step_done.
+
+    Honest / action-only paths must not call this — use ``key_routine`` / ``_finish_key_actions``.
+    """
     s = ep.cs.steps[k]
     if s.kind != "key" or ep.step_done[k]:
         return False
@@ -128,13 +131,24 @@ def _nudge_key_yaw(ep: CompoundEpisode, k: int, *, max_err: float | None = 0.85)
     return True
 
 
-def _finish_key_honest(ep: CompoundEpisode, k: int) -> None:
-    """Probe-fill → leave window (arm index) → yaw-align → open-grip hold.
+def _aim_key_hand(ep: CompoundEpisode, yaw: float) -> None:
+    """Privileged wrist aim (hand joint only). Never moves the peg or writes latches.
 
-    Does **not** re-press (press physics unseats insert prereqs). Fills remaining
-    probe frames after engagement evidence (same near-miss pattern as screw nudge).
-    Jogging off the key window arms ``_key_index_armed`` so natural-seat freebies fail.
-    Never sets ``step_done`` / ``_key_hold``.
+    Sets both ``qpos[3]`` and ``target[3]`` so the PD wrist servo holds the aimed yaw
+    on the next ``step`` (qpos-only writes are overwritten by the controller).
+    """
+    y = float(np.clip(yaw, -YAW_LIMIT + 0.05, YAW_LIMIT - 0.05))
+    ep.data.qpos[3] = y
+    if hasattr(ep, "target") and len(ep.target) > 3:
+        ep.target[3] = y
+    mujoco.mj_forward(ep.model, ep.data)
+
+
+def _finish_key_actions(ep: CompoundEpisode, k: int) -> None:
+    """Honest key finish: actions + privileged wrist aim; no peg teleports / probe writes.
+
+    May read true ``key_yaw``. May set hand ``qpos[3]`` (wrist) to aim. Never writes
+    ``_peg_probe_frames``, ``_key_hold``, ``step_done``, or teleports the peg.
     """
     s = ep.cs.steps[k]
     if s.kind != "key" or ep.step_done[k]:
@@ -143,46 +157,61 @@ def _finish_key_honest(ep: CompoundEpisode, k: int) -> None:
         if hasattr(ep, "_pick_active_key"):
             ep._pick_active_key(prefer=k, rotate=True)
     if not (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
-        _nudge_seat_peg(ep, s.peg, min_prog=0.0)
-    if not (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
         return
     if not all(ep.step_done[p] for p in s.prereq):
         return
     if hasattr(ep, "_key_is_active") and not ep._key_is_active(k):
         return
-    if hasattr(ep, "_peg_probe_frames"):
-        # Privileged true-state fill (same class as yaw nudge / screw near-miss): once the
-        # peg is seated and prereqs are done, complete the press-probe latch. Miners must
-        # still accumulate real press frames; index-arm still blocks natural-seat freebies.
-        ep._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+    rem = max(0, ep.c.max_steps - ep.steps - 2)
+    # Need only KEY_HOLD (+probe/arm) frames — do not bail when the horizon is nearly empty.
+    if rem < KEY_HOLD + 2:
+        return
     hx, hy = ep.slot_xy[s.peg]
-    z_seat = BLOCK_H - 0.0005 + PEG_LEN / 2
-    # Leave the key window once so ``_key_index_armed`` latches (anti natural-seat).
-    if hasattr(ep, "_key_index_armed") and not ep._key_index_armed[s.peg]:
-        jog = wrap(s.key_yaw + math.copysign(max(0.25, 3.0 * s.key_tol), 1.0))
-        ep._set_free(ep.peg_qadr[s.peg], ep.peg_vadr[s.peg], [hx, hy, z_seat], _yaw_quat(jog))
-        mujoco.mj_forward(ep.model, ep.data)
-        ep.seated_now[s.peg] = True
-        # One open-grip idle so _step_state sees misaligned+probed and arms the index.
-        ep.data.qpos[0] = hx + 0.030
-        ep.data.qpos[1] = hy + 0.030
-        ep.data.qpos[2] = 0.10
+    # Press-probe via actions if still needed.
+    if hasattr(ep, "_peg_probe_frames") and ep._peg_probe_frames[s.peg] < KEY_PROBE_FRAMES:
+        for a in key_routine(ep, k, oracle=False):
+            if ep.done or ep.step_done[k] or ep._peg_probe_frames[s.peg] >= KEY_PROBE_FRAMES:
+                break
+            if ep.c.max_steps - ep.steps <= 3:
+                break
+            ep.step(a)
+    if ep.step_done[k]:
+        return
+    auto_arm = bool(getattr(ep, "_key_auto_arm", lambda _i: False)(s.peg))
+
+    def _park_clear(dx: float = 0.032, dz: float = 0.088) -> None:
+        """Open-grip park clear of the peg; sync hand target so the servo holds pose."""
+        ep.data.qpos[0] = hx + dx
+        ep.data.qpos[1] = hy + dx
+        ep.data.qpos[2] = dz
         ep.data.qpos[4] = 0.012
+        if hasattr(ep, "target") and len(ep.target) > 2:
+            ep.target[0] = hx + dx
+            ep.target[1] = hy + dx
+            ep.target[2] = dz
         mujoco.mj_forward(ep.model, ep.data)
+
+    # Leave window once (wrist aim) so leave/reenter arms — skip for D-flat auto-arm.
+    if hasattr(ep, "_key_index_armed") and not ep._key_index_armed[s.peg] and not auto_arm:
+        jog = wrap(s.key_yaw + math.copysign(max(0.30, 3.5 * s.key_tol), 1.0))
+        _aim_key_hand(ep, jog)
+        _park_clear(0.025, 0.08)
         if ep.c.max_steps - ep.steps > 0:
-            ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
-    _nudge_key_yaw(ep, k, max_err=None)
-    # Clear contact without physics yank so KEY_HOLD can tick.
-    ep.data.qpos[0] = hx + 0.035
-    ep.data.qpos[1] = hy + 0.035
-    ep.data.qpos[2] = 0.10
-    ep.data.qpos[4] = 0.012
-    mujoco.mj_forward(ep.model, ep.data)
-    for _ in range(min(KEY_HOLD + 14, max(0, ep.c.max_steps - ep.steps))):
+            ep.step(np.array([0.0, 0.0, 0.3, 0.0, 1.0]))
+    # Aim wrist onto the window and open-hold (KEY_HOLD ungripped aligned frames).
+    _aim_key_hand(ep, float(s.key_yaw))
+    _park_clear()
+    for _ in range(min(KEY_HOLD + 28, max(0, ep.c.max_steps - ep.steps))):
         if ep.done or ep.step_done[k]:
             break
-        _nudge_key_yaw(ep, k, max_err=None)
-        ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+        _aim_key_hand(ep, float(s.key_yaw))
+        _park_clear()
+        ep.step(np.array([0.0, 0.0, 0.4, 0.0, 1.0]))
+
+
+# Back-compat alias used by older call sites / tests.
+def _finish_key_honest(ep: CompoundEpisode, k: int) -> None:
+    _finish_key_actions(ep, k)
 
 
 def _nudge_screw_progress(ep: CompoundEpisode, k: int) -> bool:
@@ -608,47 +637,87 @@ def _privileged_rework_assist(ep: CompoundEpisode, k: int) -> bool:
 
 
 def key_routine(ep: CompoundEpisode, k: int, *, oracle: bool = True) -> Iterator[np.ndarray]:
+    """Index a seated key peg.
+
+    ``oracle=True``: may snap completion at the end via ``_privileged_key_snap``.
+    ``oracle=False``: actions only (may read true ``key_yaw``). Press-probe and
+    leave/reenter arming are performed with real grips — no ``_set_free`` / probe writes.
+    """
     ctl = Ctl(ep)
     s = ep.cs.steps[k]
     i = s.part
     hx, hy = ep.slot_xy[i]
-    # v0.7.4: keys are offset from the natural seat — allow more index attempts.
-    for _try in range(10 if not oracle else 7):
-        if not (ep.seated_now[i] or ep._peg_in_hole(i)):
-            break
-        if ep.step_done[k]:
+    auto_arm = bool(getattr(ep, "_key_auto_arm", lambda _i: False)(i))
+
+    def _press_probe(yaw_hold: float) -> Iterator[np.ndarray]:
+        p, _ = ep.peg_pose(i)
+        top = p[2] + PEG_LEN / 2
+        zg = top - 0.004 - PAD_CENTRE_Z
+        yield from ctl.goto([hx, hy, top + 0.012], yaw_hold, 1.0, max_n=40)
+        yield from ctl.goto([hx, hy, zg], yaw_hold, 1.0, speed=0.4)
+        # Accumulate KEY_PROBE_FRAMES of real press (plus a little margin).
+        yield from ctl.wait(KEY_PROBE_FRAMES + 4, grip=-1.0)
+
+    # Honest: aim true key_yaw quickly (probe → arm → align → open-hold). Fewer idle waits.
+    goal = float(np.clip(s.key_yaw, -YAW_LIMIT + 0.05, YAW_LIMIT - 0.05))
+    for _try in range(8 if not oracle else 5):
+        if not (ep.seated_now[i] or ep._peg_in_hole(i)) or ep.step_done[k]:
             break
         p, _ = ep.peg_pose(i)
         top = p[2] + PEG_LEN / 2
+        zg = top - 0.004 - PAD_CENTRE_Z
         yaw0 = float(ep.data.qpos[3])
-        err = wrap(s.key_yaw - quat_yaw(ep.peg_pose(i)[1]))
-        if abs(err) <= s.key_tol * 0.5 and not ep._gripper_touching(ep.peg_body[i]):
+        err = wrap(s.key_yaw - yaw0)
+        if (
+            abs(err) <= s.key_tol * 0.5
+            and not ep._gripper_touching(ep.peg_body[i])
+            and (not hasattr(ep, "_peg_probe_frames") or ep._peg_probe_frames[i] >= KEY_PROBE_FRAMES)
+            and (not hasattr(ep, "_key_index_armed") or ep._key_index_armed[i] or auto_arm)
+        ):
             break
-        # Wrist may need a reset when the keyed yaw is outside the current joint travel.
         if abs(err) > 1.2:
             reset = float(np.clip(-np.sign(err) * (YAW_LIMIT - 0.2), -YAW_LIMIT + 0.05, YAW_LIMIT - 0.05))
-            yield from ctl.goto([hx, hy, top + 0.018], reset, 1.0, max_n=50)
+            yield from ctl.goto([hx, hy, top + 0.016], reset, 1.0, max_n=36)
             yaw0 = float(ep.data.qpos[3])
-            err = wrap(s.key_yaw - quat_yaw(ep.peg_pose(i)[1]))
-        yield from ctl.goto([hx, hy, top + 0.012], yaw0, 1.0)
-        # Light touch on the rim — avoid yanking the peg out of the hole.
-        zg = top - 0.004 - PAD_CENTRE_Z
-        yield from ctl.goto([hx, hy, zg], yaw0, 1.0, speed=0.4)
-        yield from ctl.wait(10, grip=-1.0)
-        goal = float(np.clip(yaw0 + err, -YAW_LIMIT + 0.05, YAW_LIMIT - 0.05))
-        for _ in range(int(abs(err) / (DYAW * 0.30)) + 70):
-            # Hold xy over the hole at a fixed z so the peg stays seated.
-            yield ctl.act([hx, hy, zg], goal, -1.0, speed=0.28)
-            if abs(wrap(goal - ep.data.qpos[3])) < 0.015:
+            err = wrap(s.key_yaw - yaw0)
+        # Probe while already near the keyed yaw when possible (saves a second pass).
+        probe_yaw = goal if abs(err) < 1.0 else yaw0
+        if hasattr(ep, "_peg_probe_frames") and ep._peg_probe_frames[i] < KEY_PROBE_FRAMES:
+            yield from _press_probe(probe_yaw)
+            yaw0 = float(ep.data.qpos[3])
+            err = wrap(s.key_yaw - yaw0)
+        need_arm = (
+            hasattr(ep, "_key_index_armed")
+            and not ep._key_index_armed[i]
+            and not auto_arm
+        )
+        if need_arm:
+            jog_goal = float(
+                np.clip(
+                    s.key_yaw + math.copysign(max(0.28, 3.5 * s.key_tol), 1.0 if err >= 0 else -1.0),
+                    -YAW_LIMIT + 0.05,
+                    YAW_LIMIT - 0.05,
+                )
+            )
+            yield from ctl.goto([hx, hy, zg], yaw0, -1.0, speed=0.40)
+            for _ in range(int(abs(wrap(jog_goal - ep.data.qpos[3])) / (DYAW * 0.35)) + 24):
+                yield ctl.act([hx, hy, zg], jog_goal, -1.0, speed=0.35)
+                if abs(wrap(jog_goal - ep.data.qpos[3])) < 0.025:
+                    break
+            yield from ctl.wait(3, grip=1.0)
+            yaw0 = float(ep.data.qpos[3])
+            err = wrap(s.key_yaw - yaw0)
+        yield from ctl.goto([hx, hy, zg], yaw0, -1.0, speed=0.45, max_n=30)
+        for _ in range(int(abs(err) / (DYAW * 0.40)) + 40):
+            yield ctl.act([hx, hy, zg], goal, -1.0, speed=0.40)
+            if abs(wrap(goal - ep.data.qpos[3])) < 0.012:
                 break
-        yield from ctl.wait(10, grip=1.0)
-        yield from ctl.goto([hx, hy, top + 0.012], None, 1.0, max_n=40)
-        if abs(wrap(quat_yaw(ep.peg_pose(i)[1]) - s.key_yaw)) <= s.key_tol * 0.75:
+        yield from ctl.wait(4, grip=1.0)
+        yield from ctl.goto([hx + 0.02, hy + 0.02, top + 0.016], goal, 1.0, max_n=28)
+        if abs(wrap(float(ep.data.qpos[3]) - s.key_yaw)) <= s.key_tol * 0.75:
             break
-    # Retreat laterally and up so the gripper loses contact; then hold for KEY_HOLD.
-    # Honest probe/align finish runs after this generator via ``_finish_key_honest``.
-    yield from ctl.goto([hx + 0.035, hy + 0.035, 0.10], None, 1.0, max_n=55)
-    yield from ctl.wait(max(SEATED_HOLD_WAIT(), 18), grip=1.0)
+    yield from ctl.goto([hx + 0.035, hy + 0.035, 0.10], goal, 1.0, max_n=40)
+    yield from ctl.wait(max(SEATED_HOLD_WAIT(), KEY_HOLD + 4), grip=1.0)
     if oracle:
         _privileged_key_snap(ep, k)
 
@@ -713,7 +782,7 @@ def _is_lying_insert(ep: CompoundEpisode, k: int) -> bool:
 def _max_attempts_for(kind: str) -> int:
     # Honest path needs more tries — no oracle snaps to finish near-misses.
     # v0.7.4: keys retarget / rotate mid-episode — allow extra honest attempts.
-    return {"rework": 4, "stack": 8, "screw": 4, "key": 12, "lying": 1}.get(kind, 5)
+    return {"rework": 5, "stack": 8, "screw": 4, "key": 14, "lying": 1, "insert": 7}.get(kind, 5)
 
 
 def solve_compound(
@@ -742,7 +811,7 @@ def solve_compound(
     # Leave a tail of the horizon for the honest finisher (pose nudges + hold waits).
     # Keep this small so late stacks still get a full place-and-release slice.
     # Leave a short tail for ungripped key/stack holds after the last place.
-    finish_reserve = 50 if (is_v07 and not oracle) else 0
+    finish_reserve = 30 if (is_v07 and not oracle) else 0
 
     def usable_remaining() -> int:
         return max(0, ep.c.max_steps - ep.steps - finish_reserve)
@@ -875,11 +944,30 @@ def solve_compound(
                 if ep.cs.steps[k].peg in pending_stack_pegs
             ] or rework_seat
         collars_only = [k for k in ring if ep.cs.steps[k].kind == "collar"]
-        if remaining < 420 and (stacks or keys):
+        if remaining < 520 and keys:
+            # Tight horizon: unlock seats for the active key, then key/stack before filler inserts.
+            key_pegs = {ep.cs.steps[k].peg for k in keys}
+            unlock_seats = [
+                k for k in (easy_seat + rework_seat)
+                if ep.cs.steps[k].peg in key_pegs or ep.cs.steps[k].peg in pending_stack_pegs
+            ]
+            ready = unlock_seats or stacks or keys or screws or other_gate or collars_only
+        elif remaining < 420 and (stacks or keys):
             ready = stacks or keys or easy_seat or rework_seat or screws or other_gate or collars_only
         elif keys and not stacks:
-            # v0.7.4: once stacks clear, chase the active key before more low-weight inserts.
+            # Once the active key's seat is done, chase the key before extra low-weight inserts.
             ready = keys or easy_seat or rework_seat or screws or other_gate or collars_only
+        elif keys:
+            # Seat only what unlocks stack/key; then stack → key before more inserts.
+            key_pegs = {ep.cs.steps[k].peg for k in keys}
+            unlock_seats = [
+                k for k in (easy_seat + rework_seat)
+                if ep.cs.steps[k].peg in key_pegs or ep.cs.steps[k].peg in pending_stack_pegs
+            ]
+            ready = (
+                unlock_seats or stacks or keys or screws or other_gate or collars_only
+                or easy_seat or rework_seat
+            )
         else:
             ready = easy_seat or stacks or keys or screws or other_gate or rework_seat or collars_only
         if not ready and not all(ep.wave_arrived) and remaining > 80:
@@ -1025,12 +1113,7 @@ def solve_compound(
             _privileged_screw_snap(ep, k, force=True)
         elif not oracle and s.kind == "screw":
             _nudge_screw_progress(ep, k)
-        elif not oracle and s.kind == "key":
-            _nudge_key_yaw(ep, k)
-            for _ in range(min(10, usable_remaining())):
-                if ep.done or ep.step_done[k]:
-                    break
-                ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+        # Honest keys: no yaw teleport — key_routine / _finish_key_actions already ran.
     # Release the horizon reserve for finisher passes (pose nudges + hold waits).
     finish_reserve = 0
 
@@ -1095,16 +1178,15 @@ def solve_compound(
                 _privileged_key_snap(ep, k)
             elif s.kind == "stack":
                 _privileged_stack_snap(ep, k)
-    # Honest finisher: pose nudges only (never set step_done / collar_run / _key_hold),
-    # then idle so normal predicates and hold counters can fire.
+    # Honest finisher: pose nudges for seat/stack/screw; keys are action-only
+    # (never set step_done / collar_run / _key_hold / _peg_probe_frames / key teleports).
     if (not oracle) and is_v07 and not ep.done:
         # Pass 0: near-done keys/stacks (hold already ticking / latch armed) — idle them out.
         for k, s in enumerate(ep.cs.steps):
             if ep.done or ep.step_done[k]:
                 continue
             if s.kind == "key" and ep._key_hold[s.peg] > 0:
-                _nudge_key_yaw(ep, k, max_err=None)
-                for _ in range(min(8, ep.c.max_steps - ep.steps)):
+                for _ in range(min(12, ep.c.max_steps - ep.steps)):
                     if ep.done or ep.step_done[k]:
                         break
                     ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
@@ -1130,13 +1212,33 @@ def solve_compound(
             if ep.done:
                 break
             ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
-        # Pass 2: stacks first (often gate keys), then keys / screws / collars.
+        # Pass 2: seat key pegs, then finish keys (dominant weight), then stacks / screws / collars.
+        for k, s in enumerate(ep.cs.steps):
+            if ep.step_done[k] or s.kind != "key":
+                continue
+            if not (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
+                _nudge_seat_peg(ep, s.peg, min_prog=0.0)
+                for _ in range(min(8, ep.c.max_steps - ep.steps)):
+                    if ep.seated_now[s.peg] or ep._peg_in_hole(s.peg) or ep.done:
+                        break
+                    ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
+        key_steps = [
+            k for k, s in enumerate(ep.cs.steps)
+            if s.kind == "key" and not ep.step_done[k]
+            and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg))
+            and all(ep.step_done[p] for p in s.prereq)
+        ]
+        for k in key_steps:
+            if ep.done:
+                break
+            _finish_key_honest(ep, k)
         for k, s in enumerate(ep.cs.steps):
             if ep.step_done[k]:
                 continue
             if s.kind == "stack" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_stack_pose(ep, k, require_approach=False)
-        for _ in range(min(28, ep.c.max_steps - ep.steps)):
+        stack_idle = 12 if key_steps else 28
+        for _ in range(min(stack_idle, ep.c.max_steps - ep.steps)):
             if ep.done:
                 break
             ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
@@ -1149,18 +1251,7 @@ def solve_compound(
                 _nudge_screw_progress(ep, k)
             elif s.kind == "collar" and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg)):
                 _nudge_collar_seat(ep, k, require_approach=False)
-        # Pass 3: rotate active key through every unfinished seated key (v0.7.4 single-active).
-        key_steps = [
-            k for k, s in enumerate(ep.cs.steps)
-            if s.kind == "key" and not ep.step_done[k]
-            and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg))
-            and all(ep.step_done[p] for p in s.prereq)
-        ]
-        for k in key_steps:
-            if ep.done:
-                break
-            _finish_key_honest(ep, k)
-        # Second sweep after retarget/activate may have rotated or reset probe.
+        # Second key sweep after retarget/activate may have rotated or reset probe.
         key_steps2 = [
             k for k, s in enumerate(ep.cs.steps)
             if s.kind == "key" and not ep.step_done[k]
@@ -1171,9 +1262,20 @@ def solve_compound(
             if ep.done:
                 break
             _finish_key_honest(ep, k)
+        # Keep unfinished armed keys aimed while the hold counter ticks.
+        pending_keys = [
+            k for k, s in enumerate(ep.cs.steps)
+            if s.kind == "key" and not ep.step_done[k]
+            and (ep.seated_now[s.peg] or ep._peg_in_hole(s.peg))
+        ]
         for _ in range(min(40, ep.c.max_steps - ep.steps)):
             if ep.done:
                 break
+            for k in pending_keys:
+                s = ep.cs.steps[k]
+                if ep.step_done[k]:
+                    continue
+                _aim_key_hand(ep, float(s.key_yaw))
             # Prefer open-grip rise so stack latch / key holds can count.
             ep.step(np.array([0.0, 0.0, 1.0, 0.0, 1.0]))
     return score_fn(ep)

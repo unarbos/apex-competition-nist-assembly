@@ -347,7 +347,7 @@ class CompoundObsScripted:
         return a
 
     def _act_key(self, obs: np.ndarray) -> np.ndarray:
-        """Yaw-index a seated peg using key sin/cos channels (obs-only)."""
+        """Yaw-index a seated peg using v0.7.5 closeness / retarget cues (obs-only)."""
         i = self.target
         f = _peg(obs, i)
         t = _task(obs, i)
@@ -367,11 +367,28 @@ class CompoundObsScripted:
         slot = f[13:15] / 10.0
         hand = self._hand_xy(obs)
         hz = self._hand_z(obs)
-        key_yaw = math.atan2(s2, s3)
-        # Peg quat is f[4:8] (wxyz); use estimated peg yaw vs key target.
-        qw, qx, qy, qz = (float(f[4 + k]) for k in range(4))
-        peg_yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
-        err = _wrap(key_yaw - peg_yaw)
+        # v0.7.5: feat 3 is unsigned noisy closeness (not cos(key_yaw)). Sweep + hill-climb.
+        close = s3
+        # Legacy path: if sin/cos unit circle still appears, use signed error.
+        unit = s2 * s2 + s3 * s3
+        use_legacy = unit > 0.7 and abs(s2) <= 1.05 and s3 < -0.05
+        if use_legacy:
+            key_yaw = math.atan2(s2, s3)
+            qw, qx, qy, qz = (float(f[4 + k]) for k in range(4))
+            peg_yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+            err = _wrap(key_yaw - peg_yaw)
+        else:
+            err = 0.12 if close < 0.55 else 0.0  # coarse sweep until close rises
+            if not hasattr(self, "_key_sweep_dir"):
+                self._key_sweep_dir = 1.0
+            if close < 0.55:
+                err = self._key_sweep_dir * 0.10
+            elif close < 0.75:
+                err = self._key_sweep_dir * 0.04
+            else:
+                err = 0.0
+            if s2 > 0.5:  # retarget pulse — reverse and resume search
+                self._key_sweep_dir *= -1.0
         tol = float(t[5]) / 10.0 if 0.25 < float(t[5]) < 0.95 else 0.08
         a = np.zeros(5)
         if self.phase in ("pick", "goto"):
@@ -400,9 +417,12 @@ class CompoundObsScripted:
             a[3] = float(np.clip(err / 0.30, -1, 1))
             a[4] = -1.0
             self.timer += 1
-            if abs(err) < tol * 0.85 or self.timer > 55:
+            aligned = (abs(err) < tol * 0.85) if use_legacy else (close >= 0.70)
+            if aligned or self.timer > 80:
                 self.phase = "release"
                 self.timer = 0
+            elif (not use_legacy) and self.timer > 0 and self.timer % 20 == 0 and close < 0.40:
+                self._key_sweep_dir *= -1.0
         else:
             # Retreat laterally so hold can count without yanking the peg.
             a[0] = 0.35
@@ -411,7 +431,8 @@ class CompoundObsScripted:
             a[4] = 1.0
             self.timer += 1
             if self.timer > 22:
-                if abs(err) > tol:
+                miss = (abs(err) > tol) if use_legacy else (close < 0.45)
+                if miss:
                     self.phase = "goto"
                     self.timer = 0
                 else:

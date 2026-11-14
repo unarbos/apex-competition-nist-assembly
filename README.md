@@ -5,18 +5,19 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.7.4** ("Assembly III", profile `v07`) — branching / probe adaptive harden vs
-> strong conditional scripts that still scored ~0.5–0.6 on v0.7.3; denser graphs, new step kinds
-> (`rework`, `screw`, `stack`, `key`), press-gated screws, **blind key yaw** with press-probe +
-> leave/reenter index arm, single-active key rotation, `regraph` / post-stack retarget,
-> mis-seated rework, stack rings. Observation stays `[B, 288]` with v0.6 encodings extended
-> in-place. Referee image bakes `NIST_PROFILE=v07`. Cost is bounded by sim horizon only (no
-> round/episode wall-clock caps). Policy deadline 80 ms; horizon ≤ 1600. Digests stay at the
-> last released pins until Apex cuts the tag. Scores are **not** comparable with v0.6.x / v0.7.3.
+> Version: **v0.7.5** ("Assembly III", profile `v07`) — observation-completable keys vs the
+> v0.7.4 Macrocosmos hold: noisy closeness + wrist detent + retarget pulse (after press-probe),
+> D-flat auto-arm; key weight **6.00** so missing keys cap score; denser graphs, new step kinds
+> (`rework`, `screw`, `stack`, `key`), press-gated screws, leave/reenter index arm, single-active
+> key rotation, `regraph` / post-stack retarget, mis-seated rework, stack rings. Observation
+> stays `[B, 288]` with v0.6 encodings extended in-place. Referee image bakes `NIST_PROFILE=v07`.
+> Cost is bounded by sim horizon only (no round/episode wall-clock caps). Policy deadline 80 ms;
+> horizon ≤ 870. Digests stay at the last released pins until Apex cuts the tag. Scores are
+> **not** comparable with v0.6.x / v0.7.3 / v0.7.4.
 >
 > Every episode is a random multi-step assembly graph. Four complexity tiers (c1–c4); weighted
-> partial credit per step (insert/collar/twist 0.02, screw 0.04, rework 1.10, stack 1.25,
-> key 7.00). Waves at most 2 on c4. Records `nist_lite_record/4` (include `nist_profile`).
+> partial credit per step (insert/collar/twist 0.04, screw 0.10, rework 1.10, stack 1.20,
+> key 6.00). Waves at most 2 on c4. Records `nist_lite_record/4` (include `nist_profile`).
 >
 > v0.5.1: harder pose estimates (5–11.5 mm peg-vs-hole offset, drift, glitch bursts) and more
 > lying starts. v0.5.0: board layout and peg shapes are drawn per episode.
@@ -48,7 +49,7 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.7.4 Assembly III)
+## The task (v0.7.5 Assembly III)
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions, slot yaw, and a cross-section per slot from continuous families
@@ -65,18 +66,20 @@ families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
   - **twist** turns a seated round peg by a random angle in a given direction.
   - **screw** (v0.7): press-gated multi-turn twist; yaw only counts while pressing the peg.
   - **stack** (v0.7): ring that must rest on the *peg top*, not the block.
-  - **key** (v0.7): seated peg must hold a yaw window shown in obs (`sin/cos` + `key_tol`);
-    never co-assigned with twist/screw on the same peg.
+  - **key** (v0.7): seated peg must hold a yaw window; after press-probe obs carries a noisy
+    closeness cue + retarget pulse (+ wrist detent while pressing in-window); never
+    co-assigned with twist/screw on the same peg.
   - **rework** (v0.7): peg starts shallow in a wrong slot; extract, then insert for real.
 - **Precedence / waves:** DAG edges as in v0.6; waves 1–2 (c4 at most 2). Parts that haven't
   arrived are off the board and zeroed in the observation.
 - **Between-subtask changes:** friction / gain / mass / delay / re-bias / shove, plus v0.7
   `swap_bias`.
 - **Tiers** (~40/45/10/5% c1–c4): hardness is in keys / stacks / rework / screws, not wave count.
-- **Horizon:** per-step budgets × tier slack, hard-capped at 1000 control steps. No referee
+- **Horizon:** per-step budgets × tier slack, hard-capped at 870 control steps. No referee
   wall-clock episode or round cut — scores are load-invariant.
-- **Score:** weights insert 0.02, collar 0.02, twist 0.02, screw 0.04, rework 0.9, stack 1.1,
-  key 7.5 Rubric otherwise as v0.6 (done = 0.70 + 0.30·time; unfinished ≤ 0.30; OOO keys = 0).
+- **Score:** weights insert/collar/twist 0.04, screw 0.10, rework 1.10, stack 1.20, key 6.00.
+  Rubric otherwise as v0.6 (done = 0.70 + 0.30·time; unfinished ≤ 0.30; OOO keys = 0).
+  Insert latch keeps insert credit after deliberate pull-out (low weight; misseat still clears).
 - **Round size:** 8 strata × 8 = 64 episodes (fixture). Timeout 1800 s.
 
 ## Policy interface
@@ -105,13 +108,11 @@ v0.5 layout); every other policy gets all 288.
    quaternion (4); size ×50.
 5. **Task table (8 × 6 = 48), one row per peg slot:** insert done, insert blocked, twist
    direction (±1, 0 = no twist), twist progress (0–1), twist blocked, has-collar flag.
-   **v0.7:** screw uses twist channels with direction ±2; key packs `sin/cos` of the key
-   yaw into the twist slots when revealed and `key_tol × 10` into the collar-flag slot when
-   that peg has no collar/stack; late-reveal steps zero those channels until the gated
-   prerequisite finishes; stack sets the collar-flag channel to 2.
-   **v0.7.4:** absolute key yaw and closeness are **not** published (blind search). After
-   reveal + press-probe, only `key_tol` may pack into the free collar-flag slot; inactive
-   keys report blocked=1.
+   **v0.7:** screw uses twist channels with direction ±2; late-reveal steps zero those
+   channels until the gated prerequisite finishes; stack sets the collar-flag channel to 2.
+   **v0.7.5:** absolute key yaw is **not** published. After reveal + press-probe: feat 2 =
+   retarget/disarm pulse, feat 3 = coarse noisy unsigned closeness, feat 5 = `key_tol × 10`
+   when free; inactive keys report blocked=1. Wrist yaw-torque gets a noisy detent in-window.
 6. **Collar table (4 × 13 = 52):** presence (0 until it arrives); noisy collar position
    relative to the biased target-slot estimate ×10 (3) + quaternion (4); inner and outer
    radius ×100 (2); target peg row / 8; done; blocked.

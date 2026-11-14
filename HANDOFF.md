@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.4 (Assembly III)
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.5 (Assembly III)
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -17,8 +17,8 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.4` | ☑ |
-| `spec.yaml` version `0.7.4`; digests pinned from release v0.7.4 | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ main (v0.7.5 RC; do not tag from this PR) | ☑ |
+| `spec.yaml` version `0.7.5`; digests stay at last published pins | `spec.yaml` | ☑ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:717b863d6775c5c4b2654087118b462b713b220f16232446de753273a01e343d` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:176ac835710a9c2c362ba91ae12b9b750770dcc1fd648cf759f2b694fcc046cf` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -206,17 +206,18 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   `body_conaffinity` are the only fields it changes besides the mass-derived constants.
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
-## 13. v0.7.4 (branching / probe adaptive harden)
+## 13. v0.7.5 (observation-completable keys)
+- Spec `0.7.5`; digests not re-pinned (stay at last published). Profile bake stays
+  `NIST_PROFILE=v07`. Player interface unchanged (`gym_v1`, 288→5).
+- Fixes Macrocosmos hold on v0.7.4: noisy closeness + wrist detent + retarget pulse;
+  D-flat auto-arm; key weight 3.20 (not ~73%); dead stack→key edge + `_obs_key_yaw` removed;
+  insert latch documented; honest key path is actions-only. See `CALIBRATION.md` / PR evidence.
+
+## 13y. v0.7.4 (branching / probe adaptive harden)
 - Spec `0.7.4`; digests pinned from release v0.7.4 (release.yml run 43256589506).
-  Profile bake stays `NIST_PROFILE=v07`. Player interface unchanged (`gym_v1`, 288→5).
-- Defeats adaptive conditional ONNX scripts that re-read obs on v0.7.3:
-  blind key yaw, press-probe + leave/reenter index arm, single-active key rotation
-  (`activate`), stronger `regraph` precedence rewrites, post-stack/post-insert key retarget,
-  seat-only key prereqs. Weights: insert/collar/twist 0.02, screw 0.04, rework 1.10,
-  stack 1.25, key 7.00
-- Physics unchanged in spirit: every subtask remains action-only completable; miner-path stack
-  latch tests kept; honest privileged ~0.48 (target ~0.5–0.75); strong scripts ≤~0.25.
-  See `CALIBRATION.md`.
+  Held for rollout after Macrocosmos review; superseded by v0.7.5 key observability.
+- Blind key yaw, press-probe + leave/reenter, activate/regraph, post-stack retarget.
+  Weights: insert/collar/twist 0.02, screw 0.04, rework 1.10, stack 1.25, key 7.00.
 
 ## 13z. v0.7.3 (adaptive compound harden)
 - Spec `0.7.3`; digests pinned from release v0.7.3 (release.yml run 42424076462).

@@ -1,6 +1,6 @@
 schema: apex.competition.v1
 id: nist_lite_assembly
-version: 0.7.4
+version: 0.7.5
 display_name: "NIST-Lite Robot Assembly (RL)"
 kind: solo
 process_type: cpu
@@ -11,8 +11,8 @@ resources:
   mem_limit: 2Gi
   gpu_count: 0
 
-# PLAYER image: serves the miner's ONNX policy over gym_v1 (player/Dockerfile).
-# Digests pinned from release v0.7.4 (release.yml run 43256589506, cosign-signed).
+# PLAYER image: digests stay at last published release until a later ship decision.
+# Version bump only for v0.7.5 RC (do not retag / republish from this PR).
 image:
   ref: ghcr.io/unarbos/apex-competition-nist-assembly-player
   digest: sha256:717b863d6775c5c4b2654087118b462b713b220f16232446de753273a01e343d
