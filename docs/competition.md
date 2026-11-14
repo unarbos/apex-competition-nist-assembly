@@ -16,7 +16,7 @@ The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper
   D-flat auto-arm after probe; key weight **6.00** (stack 1.20, rework 1.10, screw 0.10,
   insert/collar/twist 0.04) so missing keys cap score; horizon 870; dead stack→key edge and
   unused `_obs_key_yaw` RNG removed; insert latch documented. Interface unchanged (288→5).
-  Digests not re-pinned.
+  Digests pinned from release run 43596917775 (tag `v0.7.5`).
 
 **What changed in v0.7.4**
 

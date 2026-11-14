@@ -1,10 +1,19 @@
-"""Observation-only key searcher for v0.7.5 (no true-state reads / writes / teleports).
+"""Observation-only key searcher for v0.7.5.
 
-v0.7.5 keys index **hand yaw** against a hidden window. After fixture seat+probe, the
-policy sweeps wrist yaw and hill-climbs on the noisy closeness channel (and wrist detent),
-then leave/reenter-arms and open-holds. Absolute key yaw is never read.
+Two eval paths:
+
+1. **Actions-only (default, miner-path):** ``observe → act → step`` only. The policy
+   seats pegs, press-probes, and yaw-searches with its own actions. No true-state
+   reads and no private env writes (no ``_set_free``, qpos teleports, ``step_done``
+   edits, or ``_peg_probe_frames`` fills).
+
+2. **Fixture (``--fixture``):** privileged test setup seats the peg, clears prereqs,
+   and finishes press-probe via env internals, then the yaw policy runs from obs.
+   Use only to isolate observability of the closeness channel — **not** a miner-path
+   claim. Macrocosmos rejected this for the hold review.
 
     NIST_PROFILE=v07 python tools/obs_key_searcher.py --seed 7 --per 8 --episodes 64
+    NIST_PROFILE=v07 python tools/obs_key_searcher.py --fixture --seed 7 --per 8 --episodes 64
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ from nist_sim.compound_v07 import (  # noqa: E402
     KEY_HOLD,
     KEY_PROBE_FRAMES,
     AssemblyIIIEpisode,
+    compound_score_v07,
     sample_compound_v07,
 )
 from nist_sim.env import (  # noqa: E402
@@ -60,7 +70,11 @@ def _task(obs: np.ndarray, i: int) -> np.ndarray:
 
 
 def fixture_seat_key_peg(ep: AssemblyIIIEpisode, key_k: int) -> bool:
-    """Test-setup: seat peg, clear prereqs, finish press-probe. Policy finds the yaw."""
+    """PRIVILEGED test-setup: seat peg, clear prereqs, finish press-probe.
+
+    Writes ``_set_free``, hand ``qpos``, ``step_done``, and ``_peg_probe_frames``.
+    Not miner-path. Kept for ``--fixture`` observability isolation only.
+    """
     from nist_sim.env import PAD_CENTRE_Z
 
     s = ep.cs.steps[key_k]
@@ -134,7 +148,12 @@ def fixture_seat_key_peg(ep: AssemblyIIIEpisode, key_k: int) -> bool:
 
 @dataclass
 class ObsKeySearcher:
-    """Coarse yaw grid search + fine hill-climb on closeness, then open-hold."""
+    """Coarse yaw grid search + fine hill-climb on closeness, then open-hold.
+
+    Obs + actions only. Assumes the peg is already seated and press-probed
+    (closeness channel live). Used after fixture setup or after actions-only
+    seat/probe phases.
+    """
 
     phase: str = "seek"
     target: int = -1
@@ -163,7 +182,7 @@ class ObsKeySearcher:
         self.target = int(peg_i)
         # Coarse grid over ±π at ~2.5× typical tol spacing.
         step = 0.12
-        self.candidates = [ _wrap(-math.pi + k * step) for k in range(int(2 * math.pi / step)) ]
+        self.candidates = [_wrap(-math.pi + k * step) for k in range(int(2 * math.pi / step))]
         self.phase = "seek"
 
     def _hand_xy(self, obs):
@@ -310,7 +329,229 @@ class ObsKeySearcher:
         return a
 
 
-def run_eval(seed: int, per: int, episodes: int, start: int = 0, *, budget: int = 500) -> dict:
+@dataclass
+class ActionsOnlyKeyPolicy:
+    """Miner-path policy: seat + press-probe + key search from observations only.
+
+    Never reads true state. Never writes env internals — only returns actions.
+    """
+
+    mode: str = "pick"  # pick | insert | probe | key
+    target: int = -1
+    phase: str = "goto"
+    timer: int = 0
+    key_pol: ObsKeySearcher = field(default_factory=ObsKeySearcher)
+
+    def reset(self) -> None:
+        self.mode = "pick"
+        self.target = -1
+        self.phase = "goto"
+        self.timer = 0
+        self.key_pol.reset()
+
+    def _hand_xy(self, obs):
+        return obs[0:2] / 10.0
+
+    def _hand_z(self, obs):
+        return float(obs[2] / 10.0)
+
+    def _looks_like_key(self, t: np.ndarray, f: np.ndarray) -> bool:
+        s2, s3, s5 = float(t[2]), float(t[3]), float(t[5])
+        if t[4] > 0.5:
+            return False
+        # Key tol packs into t[5] as tol*10 ∈ ~[0.5, 0.9] when no collar flag.
+        if 0.25 < s5 < 0.95:
+            return True
+        # Closeness / retarget pulse after probe.
+        if f[16] > 0.5 and (s3 > 0.05 or s2 > 0.5):
+            return True
+        return False
+
+    def _choose(self, obs: np.ndarray) -> None:
+        hand = self._hand_xy(obs)
+        best, best_d, best_mode = -1, 1e9, "insert"
+        for i in range(MAX_PEGS):
+            f = _peg(obs, i)
+            t = _task(obs, i)
+            if f[0] < 0.5:
+                continue
+            # Prefer unfinished inserts (seat first — keys need a seated peg).
+            if t[0] < 0.5 and t[1] < 0.5 and f[16] < 0.5:
+                slot = f[13:15] / 10.0
+                peg_est = slot + f[1:3] / 10.0
+                d = float(np.hypot(*(peg_est - hand)))
+                if 0.25 < float(t[5]) < 0.95:
+                    d -= 0.35
+                if d < best_d:
+                    best, best_d, best_mode = i, d, "insert"
+            # Seated key: probe if closeness dead, else yaw-search.
+            if f[16] > 0.5 and self._looks_like_key(t, f) and t[0] < 0.5:
+                slot = f[13:15] / 10.0
+                d = float(np.hypot(*(slot - hand))) - 0.40
+                mode = "key" if float(t[3]) > 0.05 or float(t[2]) > 0.5 else "probe"
+                if d < best_d:
+                    best, best_d, best_mode = i, d, mode
+        self.target = best
+        self.mode = best_mode if best >= 0 else "pick"
+        self.phase = "goto"
+        self.timer = 0
+        if self.mode == "key" and best >= 0:
+            self.key_pol.bind(best)
+
+    def act(self, obs: np.ndarray) -> np.ndarray:
+        obs = np.asarray(obs, dtype=np.float64).reshape(-1)
+        if self.target < 0 or self.mode == "pick":
+            self._choose(obs)
+            if self.target < 0:
+                return np.array([0.0, 0.0, 0.3, 0.0, 1.0])
+        if self.mode == "insert":
+            return self._act_insert(obs)
+        if self.mode == "probe":
+            return self._act_probe(obs)
+        return self._act_key(obs)
+
+    def _act_insert(self, obs: np.ndarray) -> np.ndarray:
+        i = self.target
+        f = _peg(obs, i)
+        t = _task(obs, i)
+        if f[0] < 0.5 or f[16] > 0.5 or t[0] > 0.5:
+            # Seated — if it looks like a key, switch to probe/key.
+            if f[0] >= 0.5 and f[16] > 0.5 and self._looks_like_key(t, f):
+                self.mode = "probe" if float(t[3]) <= 0.05 else "key"
+                self.phase = "goto"
+                self.timer = 0
+                if self.mode == "key":
+                    self.key_pol.bind(i)
+                return self.act(obs)
+            self.reset()
+            return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
+        slot = f[13:15] / 10.0
+        peg = slot + f[1:3] / 10.0
+        hand = self._hand_xy(obs)
+        hz = self._hand_z(obs)
+        a = np.zeros(5)
+        if self.phase == "goto":
+            err = peg - hand
+            a[0:2] = np.clip(err / DXYZ, -1, 1)
+            a[2] = np.clip((0.05 - hz) / DXYZ, -1, 1)
+            a[4] = 1.0
+            if float(np.hypot(*err)) < 0.008:
+                self.phase = "grasp"
+                self.timer = 0
+        elif self.phase == "grasp":
+            err = peg - hand
+            a[0:2] = np.clip(err / DXYZ, -1, 1) * 0.5
+            a[2] = np.clip((0.012 - hz) / DXYZ, -1, 1)
+            a[4] = -1.0
+            self.timer += 1
+            if self.timer > 15:
+                self.phase = "lift"
+                self.timer = 0
+        elif self.phase == "lift":
+            a[2] = 0.8
+            a[4] = -1.0
+            self.timer += 1
+            if self.timer > 20 or hz > 0.06:
+                self.phase = "place"
+                self.timer = 0
+        elif self.phase == "place":
+            err = slot - hand
+            a[0:2] = np.clip(err / DXYZ, -1, 1)
+            a[2] = np.clip((0.045 - hz) / DXYZ, -1, 1)
+            a[4] = -1.0
+            if float(np.hypot(*err)) < 0.004:
+                self.phase = "insert"
+                self.timer = 0
+        else:
+            err = slot - hand
+            a[0:2] = np.clip(err / DXYZ, -0.5, 0.5)
+            a[2] = -0.6
+            a[4] = -1.0
+            self.timer += 1
+            if self.timer > 25:
+                a[4] = 1.0
+                a[2] = 0.5
+            if self.timer > 40 or f[16] > 0.5:
+                if f[16] > 0.5 and self._looks_like_key(t, f):
+                    self.mode = "probe"
+                    self.phase = "goto"
+                    self.timer = 0
+                else:
+                    self.reset()
+        return a
+
+    def _act_probe(self, obs: np.ndarray) -> np.ndarray:
+        """Press on a seated peg until the closeness channel lights up."""
+        i = self.target
+        f = _peg(obs, i)
+        t = _task(obs, i)
+        if f[0] < 0.5 or f[16] < 0.5:
+            self.mode = "insert"
+            self.phase = "goto"
+            self.timer = 0
+            return self._act_insert(obs)
+        if float(t[3]) > 0.05 or float(t[2]) > 0.5:
+            self.mode = "key"
+            self.key_pol.bind(i)
+            self.timer = 0
+            return self.key_pol.act(obs)
+        slot = f[13:15] / 10.0
+        hand = self._hand_xy(obs)
+        hz = self._hand_z(obs)
+        a = np.zeros(5)
+        e = slot - hand
+        a[0:2] = np.clip(e / DXYZ, -1, 1)
+        # Light rim press to accumulate probe frames via normal physics.
+        a[2] = np.clip((0.030 - hz) / DXYZ, -0.6, 0.6)
+        a[4] = -1.0
+        self.timer += 1
+        if self.timer > 80:
+            # Give up on this peg and re-pick.
+            self.reset()
+        elif self.timer > 40 and float(np.hypot(*e)) < 0.008:
+            # Brief open+lift then re-press (touch/leave helps some gates).
+            a[2] = 0.5
+            a[4] = 1.0
+        return a
+
+    def _act_key(self, obs: np.ndarray) -> np.ndarray:
+        i = self.target
+        f = _peg(obs, i)
+        t = _task(obs, i)
+        if f[0] < 0.5:
+            self.reset()
+            return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
+        if f[16] < 0.5:
+            self.mode = "insert"
+            self.phase = "goto"
+            self.timer = 0
+            return self._act_insert(obs)
+        if t[0] > 0.5:
+            self.reset()
+            return np.array([0.0, 0.0, 0.4, 0.0, 1.0])
+        if float(t[3]) <= 0.05 and float(t[2]) <= 0.5:
+            self.mode = "probe"
+            self.phase = "goto"
+            self.timer = 0
+            return self._act_probe(obs)
+        if self.key_pol.target != i:
+            self.key_pol.bind(i)
+        a = self.key_pol.act(obs)
+        # If key searcher reset itself, re-pick.
+        if self.key_pol.target < 0:
+            self.reset()
+        return a
+
+
+def run_eval(
+    seed: int,
+    per: int,
+    episodes: int,
+    start: int = 0,
+    *,
+    budget: int = 500,
+) -> dict:
+    """Fixture-assisted yaw search (privileged seat+probe). Not miner-path."""
     _, conds = sample_compound_v07(seed, per)
     n = min(len(conds), start + episodes)
     keys_total = 0
@@ -348,6 +589,50 @@ def run_eval(seed: int, per: int, episodes: int, start: int = 0, *, budget: int 
         key_rate=rate,
         mean_frames=float(np.mean(per_key_frames)) if per_key_frames else 0.0,
         median_frames=float(np.median(per_key_frames)) if per_key_frames else 0.0,
+        path="fixture",
+    )
+
+
+def run_eval_actions_only(
+    seed: int,
+    per: int,
+    episodes: int,
+    start: int = 0,
+) -> dict:
+    """Full-episode miner-path eval: observe → act → step only.
+
+    Reports key completions as keys_done/keys_total (key *steps*, not episodes)
+    and mean episode score.
+    """
+    _, conds = sample_compound_v07(seed, per)
+    n = min(len(conds), start + episodes)
+    keys_total = 0
+    keys_done = 0
+    scores: list[float] = []
+    for i in range(start, n):
+        c = conds[i]
+        key_idx = [k for k, s in enumerate(c.compound.steps) if s.kind == "key"]
+        keys_total += len(key_idx)
+        r1, r2 = (np.random.default_rng(s) for s in C.episode_seed_sequence(seed, i).spawn(2))
+        ep = AssemblyIIIEpisode(c, r1)
+        pol = ActionsOnlyKeyPolicy()
+        while not ep.done:
+            o = ep.observe(r2)
+            ep.step(np.clip(pol.act(o), -1.0, 1.0))
+        for k in key_idx:
+            if ep.step_done[k]:
+                keys_done += 1
+        scores.append(float(compound_score_v07(ep)["score"]))
+    rate = keys_done / max(1, keys_total)
+    return dict(
+        seed=seed,
+        episodes=n - start,
+        keys_total=keys_total,
+        keys_done=keys_done,
+        key_rate=rate,
+        score_mean=float(np.mean(scores)) if scores else 0.0,
+        score_std=float(np.std(scores)) if scores else 0.0,
+        path="actions_only",
     )
 
 
@@ -358,14 +643,27 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=64)
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--budget", type=int, default=500)
+    ap.add_argument(
+        "--fixture",
+        action="store_true",
+        help="Privileged seat+probe fixture then yaw search (not miner-path).",
+    )
     a = ap.parse_args()
     os.environ["NIST_PROFILE"] = "v07"
-    r = run_eval(a.seed, a.per, a.episodes, a.start, budget=a.budget)
-    print(
-        f"obs_key_searcher seed={r['seed']} eps={r['episodes']} "
-        f"keys={r['keys_done']}/{r['keys_total']} rate={r['key_rate']:.3f} "
-        f"mean_frames={r['mean_frames']:.1f} median_frames={r['median_frames']:.1f}"
-    )
+    if a.fixture:
+        r = run_eval(a.seed, a.per, a.episodes, a.start, budget=a.budget)
+        print(
+            f"obs_key_searcher[fixture] seed={r['seed']} eps={r['episodes']} "
+            f"keys={r['keys_done']}/{r['keys_total']} rate={r['key_rate']:.3f} "
+            f"mean_frames={r['mean_frames']:.1f} median_frames={r['median_frames']:.1f}"
+        )
+    else:
+        r = run_eval_actions_only(a.seed, a.per, a.episodes, a.start)
+        print(
+            f"obs_key_searcher[actions_only] seed={r['seed']} eps={r['episodes']} "
+            f"keys={r['keys_done']}/{r['keys_total']} rate={r['key_rate']:.3f} "
+            f"score_mean={r['score_mean']:.3f} score_std={r['score_std']:.3f}"
+        )
     return 0
 
 
