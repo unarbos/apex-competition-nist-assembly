@@ -24,7 +24,7 @@ must score the same on any machine load.
 - **Stronger between-step events:** higher fire rate and wider scales; an extra `swap_bias`
   event reshuffles peg-vs-slot residuals.
 - **Tighter time slack on c3/c4** (and shorter per-step budgets) so failed episodes do not
-  explode sim steps. Hard horizon `MAX_HORIZON_V07 = 1600` (v0.7.4; was 1400).
+  explode sim steps. Hard horizon `MAX_HORIZON_V07 = 870` (v0.7.5; was 1600 in v0.7.4).
 - **Observation:** still 288-d with the v0.6 layout as a compatible prefix. New kinds reuse
   collar/twist/task channels with documented encodings (see HANDOFF / README).
 - **Profile clearance:** `Profile.clearance` for `v07` is a design target only — the simulator
@@ -38,13 +38,13 @@ finished out of order score **0** (stack/rework keep the out-of-order floor). We
 
 | kind | weight (v0.7.5) |
 |---|---|
-| insert | 0.12 |
-| collar | 0.12 |
-| twist | 0.12 |
-| screw | 0.45 |
-| rework | 1.50 |
-| stack | 2.00 |
-| key | 2.80 |
+| insert | 0.04 |
+| collar | 0.04 |
+| twist | 0.04 |
+| screw | 0.10 |
+| rework | 1.10 |
+| stack | 1.20 |
+| key | 6.00 |
 
 ## Release bars (calibration, honest privileged)
 
@@ -71,7 +71,8 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
   **noisy detent** while pressing inside the window. Absolute `sin/cos(key_yaw)` stays hidden
   so snap-to-published-yaw still fails; hill-climb / detent search is feasible from obs alone.
 - **D-flat / symmetry-1 auto-arm** after probe (hole play can be smaller than `tol − |jitter|`).
-- **Key weight rebalanced** to 2.80 (was 7.00 / ~73% of episode mass).
+- **Key weight restored** to 6.00 (stack 1.20 / rework 1.10) so missing keys cap score ≤~0.30;
+  cues publish only after press-probe. Horizon 870 for the 600 s / 64-ep / 2-CPU bar.
 - **Key index is hand yaw** (wrist) vs the hidden window — soft contacts rarely spin a seated peg.
 - **Dead code removed:** temporary stack→key edge in `make_compound_v07`; unused `_obs_key_yaw`
   RNG draw (RNG stream changes — fine for a new version).

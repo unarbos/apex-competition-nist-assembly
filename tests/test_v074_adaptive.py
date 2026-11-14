@@ -42,10 +42,12 @@ def test_v074_events_registered():
     assert "regraph" in EVENT_KINDS_V07
     assert "activate" in EVENT_KINDS_V07
     for tier, cfg in TIER_CFG_V07.items():
-        assert cfg["event_p"] >= 0.32, tier
+        # v0.7.5: event/retarget rates tuned down so honest fits the short horizon bar,
+        # but adaptive kinds remain registered and fire at a meaningful rate.
+        assert cfg["event_p"] >= 0.20, tier
         assert cfg["touch_reveal_p"] >= 1.0 - 1e-9, tier
-        assert cfg["post_insert_retarget_p"] >= 0.55, tier
-        assert cfg["post_stack_retarget_p"] >= 0.40, tier
+        assert cfg["post_insert_retarget_p"] >= 0.25, tier
+        assert cfg["post_stack_retarget_p"] >= 0.20, tier
         assert cfg["reveal_p"] >= 1.0 - 1e-9, tier
         assert int(cfg["max_keys"]) >= 1, tier
         assert int(cfg["max_keys"]) <= 2, tier

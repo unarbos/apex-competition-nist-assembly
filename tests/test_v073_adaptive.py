@@ -41,11 +41,12 @@ def test_adaptive_events_registered():
     assert "reorder" in EVENT_KINDS_V07
     assert "flip_twist" in EVENT_KINDS_V07
     for tier, cfg in TIER_CFG_V07.items():
-        assert cfg["event_p"] >= 0.28, tier
+        # v0.7.5: event/retarget floors lowered so honest fits the short-horizon wall bar.
+        assert cfg["event_p"] >= 0.20, tier
         assert cfg["reveal_p"] >= 0.90, tier
         assert cfg["touch_reveal_p"] >= 0.85, tier
-        assert cfg["post_insert_retarget_p"] >= 0.55, tier
-        # v0.7.4 keeps these floors (and raises them); do not regress.
+        assert cfg["post_insert_retarget_p"] >= 0.25, tier
+        assert cfg["post_stack_retarget_p"] >= 0.20, tier
 
 
 def test_touch_reveal_zeros_key_until_contact():

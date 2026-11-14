@@ -35,8 +35,10 @@ v0.7.4 branching / probe harden (defeats adaptive conditional ONNX scripts):
   post-stack key retarget.
 
 v0.7.5 observation-completable keys (Macrocosmos v0.7.4 hold review):
-- Noisy closeness + wrist detent + retarget pulse so keys are searchable from obs alone.
-- D-flat (symmetry 1) auto-arms after probe; key weight rebalanced off ~73% dominance.
+- Noisy closeness + wrist detent + retarget pulse so keys are searchable from obs alone
+  (cues publish only after press-probe; absolute yaw stays hidden).
+- D-flat (symmetry 1) auto-arms after probe; key weight restored so missing keys cap score
+  (key 6.00 / stack 1.20 / rework 1.10); horizon 870 for the 600 s / 64-ep / 2-CPU bar.
 - Dead stack→key edge and unused ``_obs_key_yaw`` RNG draw removed.
 """
 
@@ -121,60 +123,60 @@ STEP_KINDS_V07 = ("insert", "collar", "twist", "rework", "screw", "stack", "key"
 # do not index keys, extract mis-seats, or stack on peg tops. Weight those gates hard.
 # Hard steps dominate so v0.6-style (insert/collar/twist only) stays ≤~0.30; honest privileged
 # that finishes keys/stacks/rework clears ≥~0.50.
-# Hard adaptive steps dominate total weight, but key must not own ~73% of episode mass
-# unless the obs cue makes it fairly searchable. v0.7.5 rebalances: key still leads, but
-# stack/rework/screw share the ceiling so a key miss is costly without being the whole game.
+# Missing keys must cap scripted/leader scores ≤~0.30: key dominates episode mass again,
+# while obs closeness/detent/retarget keep keys searchable (Macrocosmos observability hold).
+# Stack/rework stay meaningful but secondary; insert/collar/twist/screw stay tiny.
 STEP_WEIGHT_V07 = {
-    "insert": 0.12,
-    "collar": 0.12,
-    "twist": 0.12,
-    "screw": 0.45,
-    "rework": 1.50,
-    "stack": 2.00,
-    "key": 2.80,
+    "insert": 0.04,
+    "collar": 0.04,
+    "twist": 0.04,
+    "screw": 0.10,
+    "rework": 1.10,
+    "stack": 1.20,
+    "key": 6.00,
 }
 # Short budgets + hard horizon keep slow ONNX kings inside the ~600 s / 64-ep / 2-CPU bar.
+# Leaders run to the horizon at ~16–19 ms/step; at 1600 that projects ~850–990 s on 2 CPU.
 STEP_BUDGET_V07 = {
-    "insert": 140,
-    "collar": 100,
-    "twist": 80,
-    "rework": 220,
-    "screw": 160,
-    "stack": 160,
-    "key": 160,
+    "insert": 120,
+    "collar": 90,
+    "twist": 70,
+    "rework": 180,
+    "screw": 140,
+    "stack": 140,
+    "key": 140,
 }
-REWORK_EXTRA = 40
-MAX_HORIZON_V07 = 1600  # hard sim-step cap; no wall-clock episode cut (room for probe/retarget)
+REWORK_EXTRA = 30
+MAX_HORIZON_V07 = 870  # hard sim-step cap; no wall-clock episode cut (kings ~18–20 ms/step)
 TIER_CFG_V07 = {
     # v0.7.4: probe-refined keys + activate/regraph + post-stack retarget.
     # Slack stays generous enough for honest privileged (true-state keys skip probe noise).
     # Changing these draws reshuffles the seed→episode map.
     "c1": dict(
-        extra_pegs=0, collar_frac=0.06, twist_frac=0.03, screw_frac=0.06, rework_frac=0.20,
-        stack_frac=0.40, key_frac=0.40, waves=(1, 2), edge_p=0.20, event_p=0.32, slack=2.00,
-        # One key per episode on c1/c2: activate is a no-op; press-probe + retarget still bite scripts.
+        extra_pegs=0, collar_frac=0.05, twist_frac=0.03, screw_frac=0.05, rework_frac=0.16,
+        stack_frac=0.34, key_frac=0.36, waves=(1, 1), edge_p=0.16, event_p=0.22, slack=2.10,
+        # One key per episode: activate is a no-op; press-probe + retarget still bite scripts.
         reveal_p=1.00, touch_reveal_p=1.00, max_keys=1,
-        post_insert_retarget_p=0.55, post_stack_retarget_p=0.40,
+        post_insert_retarget_p=0.28, post_stack_retarget_p=0.22,
     ),
     "c2": dict(
-        extra_pegs=0, collar_frac=0.06, twist_frac=0.03, screw_frac=0.07, rework_frac=0.22,
-        stack_frac=0.42, key_frac=0.42, waves=(1, 2), edge_p=0.24, event_p=0.38, slack=1.85,
+        extra_pegs=0, collar_frac=0.05, twist_frac=0.03, screw_frac=0.06, rework_frac=0.18,
+        stack_frac=0.36, key_frac=0.38, waves=(1, 2), edge_p=0.18, event_p=0.26, slack=1.95,
         reveal_p=1.00, touch_reveal_p=1.00, max_keys=1,
-        post_insert_retarget_p=0.60, post_stack_retarget_p=0.48,
+        post_insert_retarget_p=0.32, post_stack_retarget_p=0.26,
     ),
     "c3": dict(
-        extra_pegs=1, collar_frac=0.05, twist_frac=0.02, screw_frac=0.07, rework_frac=0.24,
-        stack_frac=0.44, key_frac=0.46, waves=(2, 2), edge_p=0.28, event_p=0.44, slack=1.72,
-        # Dual keys only on hard tiers (activate rotation matters); 15% of the mix.
-        reveal_p=1.00, touch_reveal_p=1.00, max_keys=2,
-        post_insert_retarget_p=0.70, post_stack_retarget_p=0.55,
+        extra_pegs=1, collar_frac=0.04, twist_frac=0.02, screw_frac=0.06, rework_frac=0.20,
+        stack_frac=0.38, key_frac=0.40, waves=(1, 2), edge_p=0.22, event_p=0.30, slack=1.80,
+        reveal_p=1.00, touch_reveal_p=1.00, max_keys=1,
+        post_insert_retarget_p=0.36, post_stack_retarget_p=0.30,
     ),
     "c4": dict(
-        # waves=(2, 2): at most 2 waves on c4 (docs previously claimed "up to 5"; code wins).
-        extra_pegs=1, collar_frac=0.05, twist_frac=0.02, screw_frac=0.06, rework_frac=0.26,
-        stack_frac=0.46, key_frac=0.50, waves=(2, 2), edge_p=0.32, event_p=0.50, slack=1.62,
-        reveal_p=1.00, touch_reveal_p=1.00, max_keys=2,
-        post_insert_retarget_p=0.78, post_stack_retarget_p=0.65,
+        # waves at most 2 on c4.
+        extra_pegs=1, collar_frac=0.04, twist_frac=0.02, screw_frac=0.05, rework_frac=0.22,
+        stack_frac=0.40, key_frac=0.42, waves=(2, 2), edge_p=0.24, event_p=0.34, slack=1.70,
+        reveal_p=1.00, touch_reveal_p=1.00, max_keys=1,
+        post_insert_retarget_p=0.40, post_stack_retarget_p=0.34,
     ),
 }
 # Residuals large enough that open-loop / hard-coded trajectories miss; privileged uses true state.
@@ -188,7 +190,7 @@ EVENT_WEIGHTS_V07 = np.array(
     # retarget, reorder, flip_twist, regraph, activate
     # Press-probe + retarget/regraph/activate carry the script drop; misseat stays rare
     # so honest privileged is not unseated after a finished insert near the horizon.
-    [0.04, 0.04, 0.04, 0.03, 0.05, 0.04, 0.10, 0.04, 0.26, 0.08, 0.07, 0.15, 0.06]
+    [0.05, 0.05, 0.05, 0.04, 0.06, 0.05, 0.12, 0.04, 0.18, 0.08, 0.08, 0.12, 0.08]
 )
 # Multi-turn press-twists; pitch drawn per step and shown in obs when revealed.
 SCREW_TARGET = (0.30, 0.55)
@@ -199,16 +201,18 @@ KEY_TOL = (0.045, 0.080)  # yaw-index; privileged true-state nudge still reaches
 KEY_PROBE_FRAMES = 10
 # Soft unsigned closeness: cue rises inside ~KEY_CLOSE_SOFT * tol of the window centre.
 # Additive Gaussian noise (obs units in [0, 1]); absolute yaw is never published.
-KEY_CLOSE_SOFT = 3.5
-KEY_CLOSE_NOISE = 0.06
+# Published only after press-probe so casual contact cannot free-search the window.
+KEY_CLOSE_SOFT = 2.8
+KEY_CLOSE_NOISE = 0.08
 # Wrist yaw-torque detent while pressing inside the keyed window (N·m before TORQUE_SCALE).
-KEY_DETENT_TAU = 0.28
+# Detent also requires press-probe (same gate as the closeness channel).
+KEY_DETENT_TAU = 0.22
 KEY_DETENT_NOISE = 0.05
 # Frames the retarget/disarm pulse stays high in task feat 2 after a window move.
 KEY_RETARGET_PULSE = 20
-KEY_HOLD = 5  # ungripped aligned frames
-STACK_SEAT_XY = 0.0030
-STACK_SEAT_Z_CLEAR = 0.0028
+KEY_HOLD = 4  # ungripped aligned frames
+STACK_SEAT_XY = 0.0026
+STACK_SEAT_Z_CLEAR = 0.0024
 # Screw press: palm must be on the peg (touch). Free-twist open-grip scripts still get 0.
 PRESS_PALM_MARGIN = 0.001
 # Rework pegs sit deep enough that casual yanks miss; privileged extract_routine still clears.
@@ -217,8 +221,8 @@ REWORK_SEAT_DEPTH = 0.0050
 # mate zone (clearance-fit rings free-fall ~4 mm in <1 control frame and can never hold).
 # Mate zone + hold tightened after image-eval showed revealed kings completing ~half of stacks.
 # HOLD=5 blocks single-frame sweeps; XY/Z leave room for deliberate place + honest privileged.
-STACK_MATE_XY = 0.0034
-STACK_MATE_Z = 0.0032
+STACK_MATE_XY = 0.0030
+STACK_MATE_Z = 0.0028
 STACK_MATE_HOLD = 5  # ungripped frames in zone before pin (anti-king)
 # Inner radius = peg_outer - this amount (metres). Soft contacts settle the ring on the top.
 STACK_INTERFERENCE = (0.00012, 0.00028)
@@ -1387,6 +1391,8 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 continue
             if not self._pressing_on_peg(s.peg):
                 continue
+            if self._peg_probe_frames[s.peg] < KEY_PROBE_FRAMES:
+                continue
             if not self._key_aligned(s):
                 continue
             tau = KEY_DETENT_TAU + float(self.rng.normal(0.0, KEY_DETENT_NOISE))
@@ -1459,12 +1465,10 @@ class AssemblyIIIEpisode(CompoundEpisode):
             elif not done and self.step_done[k]:
                 # Latch: brief flickers must not wipe completion or redo time bonus.
                 continue
-        # Parent CompoundEpisode also marks insert completions; catch those for post-insert retarget.
+        # Parent CompoundEpisode also marks insert/collar/twist; catch those for retarget + idle.
         for k, s in enumerate(self.cs.steps):
-            if s.kind == "insert" and self.step_done[k] and k not in newly_done:
-                # Fire at most once per insert: use done_at match to this step.
-                if self.step_done_at[k] == self.steps:
-                    newly_done.append(k)
+            if self.step_done[k] and k not in newly_done and self.step_done_at[k] == self.steps:
+                newly_done.append(k)
         for k in newly_done:
             self._maybe_activate_unblocked_key(k)
             self._maybe_post_insert_retarget(k)
@@ -1520,15 +1524,15 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 o[b + 2] = 0.0
                 o[b + 3] = 0.0
                 o[b + 4] = blocked
-                # Closeness / retarget pulse after reveal+active+touch so search can aim
-                # during the press-probe; completion still requires full probe + arming.
-                if revealed and active and touched:
+                # Closeness / retarget pulse only after reveal+active+touch+press-probe.
+                # Pre-probe contact must not leak a searchable cue (anti-king free-search).
+                if revealed and active and touched and probed:
                     pulse = float(self._key_retarget_pulse[s.peg] > 0)
                     o[b + 2] = pulse
                     close = self._key_closeness(s)
                     noisy = close + float(noise_rng.normal(0.0, KEY_CLOSE_NOISE))
                     o[b + 3] = float(np.clip(noisy, 0.0, 1.0))
-                    if probed and o[b + 5] == 0.0:
+                    if o[b + 5] == 0.0:
                         o[b + 5] = float(s.key_tol) * 10.0
             elif s.kind in ("collar", "stack"):
                 o[b + 5] = 1.0 if s.kind == "collar" else 2.0
@@ -1550,20 +1554,21 @@ class AssemblyIIIEpisode(CompoundEpisode):
 def compound_score_v07(ep: AssemblyIIIEpisode | CompoundEpisode) -> dict:
     """Weighted per-step score using v0.7 weights when new kinds are present.
 
-    Key / stack / rework are all-or-nothing for scoring: near-miss partials do not
-    count. That keeps open-loop v0.6 kings from farming partial credit on adaptive
-    gates they never finish, while honest privileged still earns full weight on done.
+    Stack / rework stay all-or-nothing for scoring (near-miss partials do not count).
+    Keys may earn unfinished progress only after press-probe + arming (see ``_step_state``),
+    so open-loop kings that never probe still get 0 while honest near-misses keep a gradient.
 
     v0.7.3: keys finished *out of order* score 0 (not the v0.6 out-of-order floor).
     Stack-before-key precedence then zeros key credit unless the stack is done first.
     Stack/rework keep the normal out-of-order floor so honest privileged stays ≥~0.45.
 
-    v0.7.5: same OOO key rule; closeness/detent/retarget affect search, not the credit formula.
+    v0.7.5: OOO key rule unchanged; closeness/detent/retarget affect search; key partials
+    require probe+arm (progress is already 0 before that in ``_step_state``).
     """
     kinds = {s.kind for s in ep.cs.steps}
     if kinds <= {"insert", "collar", "twist"}:
         return _compound_score_v06(ep)
-    hard = {"key", "stack", "rework"}
+    hard = {"stack", "rework"}  # keys keep probe-gated progress; stacks/rework stay binary
     total = wsum = 0.0
     per_kind: dict[str, list[float]] = {k: [] for k in STEP_KINDS_V07}
     for k, s in enumerate(ep.cs.steps):
@@ -1573,6 +1578,10 @@ def compound_score_v07(ep: AssemblyIIIEpisode | CompoundEpisode) -> dict:
         cr = step_credit(ep.step_done[k], ep.step_in_order[k], ep.step_done_at[k], ep.c.max_steps, prog)
         if s.kind == "key" and ep.step_done[k] and not ep.step_in_order[k]:
             cr = 0.0
+        elif s.kind == "key" and ep.step_done[k] and ep.step_in_order[k]:
+            # Short horizons compress the time bonus; keep in-order key finishes near full
+            # credit so honest privileged stays ≥~0.50 without lengthening MAX_HORIZON.
+            cr = max(cr, 0.95)
         w = STEP_WEIGHT_V07.get(s.kind, 1.0)
         total += w * cr
         wsum += w
