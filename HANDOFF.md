@@ -17,8 +17,8 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ main (v0.7.5 RC; do not tag from this PR) | ☑ |
-| `spec.yaml` version `0.7.5`; digests stay at last published pins | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.5` | ☑ |
+| `spec.yaml` version `0.7.5`; digests pinned from release v0.7.5 | `spec.yaml` | ☑ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:717b863d6775c5c4b2654087118b462b713b220f16232446de753273a01e343d` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:176ac835710a9c2c362ba91ae12b9b750770dcc1fd648cf759f2b694fcc046cf` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -28,7 +28,7 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 43256589506 (tag `v0.7.4`).
+onnxruntime 1.31.0. Image digests from release run 43596917775 (tag `v0.7.5`).
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
@@ -207,10 +207,10 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
 ## 13. v0.7.5 (observation-completable keys)
-- Spec `0.7.5`; digests not re-pinned (stay at last published). Profile bake stays
+- Spec `0.7.5`; digests pinned from release v0.7.5 (release.yml run 43596917775). Profile bake stays
   `NIST_PROFILE=v07`. Player interface unchanged (`gym_v1`, 288→5).
 - Fixes Macrocosmos hold on v0.7.4: noisy closeness + wrist detent + retarget pulse;
-  D-flat auto-arm; key weight 3.20 (not ~73%); dead stack→key edge + `_obs_key_yaw` removed;
+  D-flat auto-arm; weights key 6.00, stack 1.20, rework 1.10, screw 0.10, insert/collar/twist 0.04; MAX_HORIZON 870, KEY_HOLD 4; dead stack→key edge + `_obs_key_yaw` removed;
   insert latch documented; honest key path is actions-only. See `CALIBRATION.md` / PR evidence.
 
 ## 13y. v0.7.4 (branching / probe adaptive harden)
