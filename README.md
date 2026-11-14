@@ -12,7 +12,7 @@ platform’s 1% takeover rule. Submit the policy as an ONNX file.
 > key rotation, `regraph` / post-stack retarget, mis-seated rework, stack rings. Observation
 > stays `[B, 288]` with v0.6 encodings extended in-place. Referee image bakes `NIST_PROFILE=v07`.
 > Cost is bounded by sim horizon only (no round/episode wall-clock caps). Policy deadline 80 ms;
-> horizon ≤ 870. Digests stay at the last released pins until Apex cuts the tag. Scores are
+> horizon ≤ 870. Digests pinned from release run 43596917775 (tag `v0.7.5`). Scores are
 > **not** comparable with v0.6.x / v0.7.3 / v0.7.4.
 >
 > Every episode is a random multi-step assembly graph. Four complexity tiers (c1–c4); weighted

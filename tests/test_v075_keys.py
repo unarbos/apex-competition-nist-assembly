@@ -166,9 +166,9 @@ def test_dflat_keys_auto_arm_across_tol_range():
 
 
 def test_obs_key_searcher_completes_keys_seed7():
-    """Obs-only searcher (no true-state in the policy) must complete keys from obs."""
-    # Fixture seats pegs; policy is obs+actions only. 8 eps keeps CI light.
-    # Cue is intentionally noisy — rate can be modest; >0 is the observability bar.
+    """Fixture+obs yaw search: closeness channel is searchable after privileged seat."""
+    # Privileged fixture seats/probes; policy is obs+actions only for the yaw search.
+    # 8 eps keeps CI light. Cue is noisy — rate can be modest; >0 is the observability bar.
     r = OKS.run_eval(seed=7, per=8, episodes=8, start=0, budget=500)
     assert r["keys_total"] > 0
     assert r["keys_done"] > 0, r

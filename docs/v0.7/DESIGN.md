@@ -78,9 +78,12 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
   RNG draw (RNG stream changes — fine for a new version).
 - **Insert latch documented:** insert credit survives deliberate pull-out; only `misseat`
   (done_at = −1) forces a re-seat. Insert weight stays low.
-- Honest privileged key path is **actions only** (no `_peg_probe_frames` writes / key teleports);
-  oracle path remains separate via `oracle=True`.
+- Honest privileged key path is **actions only** for probe/yaw (no `_peg_probe_frames` writes /
+  key teleports); it still uses pose nudges + wrist aim. Oracle snaps stay behind `oracle=True`.
+- Fixture-assisted obs yaw search is **not** miner-path (teleports seat/probe). Actions-only
+  searcher key completion on public seeds is near zero — see `CALIBRATION.md`.
 - Interface unchanged (`[B,288]→[B,5]`); no wall-clock score caps; miner-path latch sealed.
+  Digests pinned from release run 43596917775 (tag `v0.7.5`).
 
 ## v0.7.4 branching / probe harden (vs adaptive conditional scripts)
 

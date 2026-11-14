@@ -86,7 +86,7 @@ def test_honest_solver_actions_only_under_snap_seal(seal_snaps, seal_key_telepor
 
 
 def test_obs_only_key_searcher_completes_keys():
-    """Policy is obs+actions only (fixture seats peg); completes keys on seed 7."""
+    """Fixture seats peg; yaw policy is obs+actions only. Completes keys on seed 7."""
     r = OKS.run_eval(seed=7, per=8, episodes=8, start=0, budget=420)
     assert r["keys_total"] > 0
     assert r["keys_done"] > 0
