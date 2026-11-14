@@ -210,7 +210,7 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
 - Spec `0.7.5`; digests pinned from release v0.7.5 (release.yml run 43596917775). Profile bake stays
   `NIST_PROFILE=v07`. Player interface unchanged (`gym_v1`, 288→5).
 - Fixes Macrocosmos hold on v0.7.4: noisy closeness + wrist detent + retarget pulse;
-  D-flat auto-arm; key weight 3.20 (not ~73%); dead stack→key edge + `_obs_key_yaw` removed;
+  D-flat auto-arm; weights key 6.00, stack 1.20, rework 1.10, screw 0.10, insert/collar/twist 0.04; MAX_HORIZON 870, KEY_HOLD 4; dead stack→key edge + `_obs_key_yaw` removed;
   insert latch documented; honest key path is actions-only. See `CALIBRATION.md` / PR evidence.
 
 ## 13y. v0.7.4 (branching / probe adaptive harden)
