@@ -105,7 +105,7 @@ class CompoundObsScripted:
                 d = float(np.hypot(*(peg_est - hand)))
                 mode = "insert"
                 # Prefer seating pegs that already reveal a key tol (unlocks high-weight key).
-                if 0.25 < float(t[5]) < 0.95:
+                if 0.70 < float(t[5]) < 1.60:
                     d -= 0.35
                 if d < best_d:
                     best, best_d, best_mode = i, d, mode
@@ -121,15 +121,14 @@ class CompoundObsScripted:
                 d = float(np.hypot(*(slot - hand))) - 0.20
                 if d < best_d:
                     best, best_d, best_mode = i, d, "rework"
-            # Key tol packs into t[5] as tol*10 ∈ ~[0.5, 0.9] when no collar flag (1 or 2).
-            # When collar/stack owns t[5]∈{1,2}, fall back to unit-circle sin/cos with cos<0
-            # (twist progress is always ≥0, so negative cos cannot be twist).
+            # v0.7.6: key_tol*10 ∈ ~[0.9, 1.5] when feat5 free; else key-present mark
+            # on feat2 (0.5) / retarget (1.0) / post-probe closeness on feat3.
             s2, s3, s5 = float(t[2]), float(t[3]), float(t[5])
             is_screw = abs(s2) > 1.4
-            unit = s2 * s2 + s3 * s3
             is_key = f[16] > 0.5 and t[4] < 0.5 and (
-                0.25 < s5 < 0.95
-                or (s5 >= 0.95 and unit > 0.7 and abs(s2) <= 1.05 and s3 < -0.05)
+                0.70 < s5 < 1.60
+                or (0.45 <= s2 <= 1.0 + 1e-3 and not is_screw)
+                or s3 > 0.12
             )
             is_twist = (
                 (not is_screw)

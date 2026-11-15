@@ -5,15 +5,13 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.7.5** ("Assembly III", profile `v07`) — observation-completable keys vs the
-> v0.7.4 Macrocosmos hold: noisy closeness + wrist detent + retarget pulse (after press-probe),
-> D-flat auto-arm; key weight **6.00** so missing keys cap score; denser graphs, new step kinds
-> (`rework`, `screw`, `stack`, `key`), press-gated screws, leave/reenter index arm, single-active
-> key rotation, `regraph` / post-stack retarget, mis-seated rework, stack rings. Observation
-> stays `[B, 288]` with v0.6 encodings extended in-place. Referee image bakes `NIST_PROFILE=v07`.
-> Cost is bounded by sim horizon only (no round/episode wall-clock caps). Policy deadline 80 ms;
-> horizon ≤ 870. Digests pinned from release run 43596917775 (tag `v0.7.5`). Scores are
-> **not** comparable with v0.6.x / v0.7.3 / v0.7.4.
+> Version: **v0.7.6** ("Assembly III", profile `v07`) — actions-only key completability on top of
+> v0.7.5 observability cues: key-present marker + usable closeness window, grasped starts inside
+> the hole, key assignment prefers seatable starts. Honest actions-only searcher clears ~15+/64
+> key steps on public seeds 7 and 19 (was 1/64 and 0/64 on v0.7.5). Key weight **6.00**; denser
+> graphs; step kinds `rework` / `screw` / `stack` / `key`. Observation stays `[B, 288]`. Referee
+> image bakes `NIST_PROFILE=v07`. Horizon ≤ 870; no wall-clock score caps. Digests still pin
+> v0.7.5 until a release bake. Scores are **not** comparable with v0.6.x / v0.7.3–v0.7.5.
 >
 > Every episode is a random multi-step assembly graph. Four complexity tiers (c1–c4); weighted
 > partial credit per step (insert/collar/twist 0.04, screw 0.10, rework 1.10, stack 1.20,
@@ -49,7 +47,7 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.7.5 Assembly III)
+## The task (v0.7.6 Assembly III)
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions, slot yaw, and a cross-section per slot from continuous families
@@ -110,9 +108,10 @@ v0.5 layout); every other policy gets all 288.
    direction (±1, 0 = no twist), twist progress (0–1), twist blocked, has-collar flag.
    **v0.7:** screw uses twist channels with direction ±2; late-reveal steps zero those
    channels until the gated prerequisite finishes; stack sets the collar-flag channel to 2.
-   **v0.7.5:** absolute key yaw is **not** published. After reveal + press-probe: feat 2 =
-   retarget/disarm pulse, feat 3 = coarse noisy unsigned closeness, feat 5 = `key_tol × 10`
-   when free; inactive keys report blocked=1. Wrist yaw-torque gets a noisy detent in-window.
+   **v0.7.6:** absolute key yaw is **not** published. After reveal + touch + active: feat 2 =
+   key-present (0.5) or retarget pulse (1.0). After press-probe: feat 3 = coarse noisy unsigned
+   closeness; feat 5 = `key_tol × 10` when free (final pack so stack cannot clobber it).
+   Inactive keys report blocked=1. Wrist yaw-torque gets a noisy detent in-window.
 6. **Collar table (4 × 13 = 52):** presence (0 until it arrives); noisy collar position
    relative to the biased target-slot estimate ×10 (3) + quaternion (4); inner and outer
    radius ×100 (2); target peg row / 8; done; blocked.

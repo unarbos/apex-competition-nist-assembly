@@ -583,11 +583,17 @@ def _draw_peg_starts_with_weights(
         spec = layout[slot]
         keyed = spec.shape != "round"
         if st == "grasped":
-            r = _u(rng, 0.0, 0.01)
+            # Keep the grasped centre inside the hole. A 10 mm disk (legacy) often lands
+            # outside r_hole (~peg radius + clearance), so press-and-release cannot seat
+            # under centimetre-scale observation bias — keys then look unreachable from
+            # actions alone. 0.55× outer radius stays inside typical r_hole.
+            r_max = min(0.010, 0.55 * float(spec.outer_radius()))
+            r = _u(rng, 0.0, max(r_max, 1e-4))
             th = _u(rng, 0, 2 * math.pi)
             off = (r * math.cos(th), r * math.sin(th))
             h = _u(rng, 0.01, 0.04)
-            yaw = _u(rng, -0.3, 0.3) if keyed else 0.0
+            # Keyed yaw must stay near the seat orientation or the peg cannot enter.
+            yaw = _u(rng, -0.08, 0.08) if keyed else 0.0
         elif st == "near_hole":
             base = 2 * spec.outer_radius() + 0.0012 + LAYOUT_WALL
             off = _free_offset(rng, spec, layout, base + 0.012, min(0.058, base + 0.018), 0.004)
@@ -690,8 +696,9 @@ def _easy_peg_starts(rng: np.random.Generator, slot_ids: list[int], layout: list
         st = types[local_i]
         spec = layout[slot]
         if st == "grasped":
-            # Hover near the hole — privileged succeeds; residual bias still bites −rel.
-            r = _u(rng, 0.0, 0.006)
+            # Hover inside the hole — press-and-release can seat; residual bias still bites −rel.
+            r_max = min(0.006, 0.55 * float(spec.outer_radius()))
+            r = _u(rng, 0.0, max(r_max, 1e-4))
             th = _u(rng, 0, 2 * math.pi)
             off = (r * math.cos(th), r * math.sin(th))
             h = _u(rng, 0.012, 0.028)

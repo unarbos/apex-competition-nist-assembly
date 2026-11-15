@@ -26,6 +26,7 @@ from nist_sim.compound_v07 import (  # noqa: E402
     KEY_CLOSE_SOFT,
     KEY_DETENT_TAU,
     KEY_HOLD,
+    KEY_PRESENT_MARK,
     KEY_PROBE_FRAMES,
     KEY_RETARGET_PULSE,
     STEP_WEIGHT_V07,
@@ -86,8 +87,9 @@ def test_key_obs_publishes_noisy_closeness_not_absolute_yaw():
     r = np.random.default_rng(0)
     o = e.observe(r)
     b = OBS_DIM + s.peg * TASK_PEG_FEAT
-    # Absolute yaw still hidden: feat 2 is retarget pulse (0 here), not sin(key_yaw).
-    assert float(o[b + 2]) == 0.0
+    # Absolute yaw still hidden: feat 2 is key-present (0.5) or retarget pulse (1.0),
+    # never sin(key_yaw). Idle (no touch/reveal) stays 0.0.
+    assert abs(float(o[b + 2]) - KEY_PRESENT_MARK) < 1e-5
     close = float(o[b + 3])
     assert close > 0.5, close
     assert KEY_CLOSE_SOFT >= 2.0

@@ -76,8 +76,8 @@ def test_key_obs_hides_absolute_yaw_publishes_closeness():
     r = np.random.default_rng(0)
     o1 = e.observe(r)
     b = OBS_DIM + s.peg * TASK_PEG_FEAT
-    # feat 2 is retarget pulse (0 unless recently retargeted), not sin(key_yaw).
-    assert float(o1[b + 2]) in (0.0, 1.0)
+    # feat 2 is key-present (0.5) or retarget pulse (1.0), not sin(key_yaw).
+    assert float(o1[b + 2]) in (0.0, 0.5, 1.0)
     assert 0.0 <= float(o1[b + 3]) <= 1.0  # noisy closeness
     has_ring = any(t.kind in ("collar", "stack") and t.peg == s.peg for t in e.cs.steps)
     if not has_ring:

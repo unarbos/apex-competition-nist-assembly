@@ -77,7 +77,8 @@ def test_touch_reveal_zeros_key_until_contact():
         e.step_done[p] = True
     e._active_key = next(i for i, ss in enumerate(e.cs.steps) if ss is s)
     o2 = e.observe(r)
-    assert float(o2[b + 2]) in (0.0, 1.0)  # retarget pulse, not sin(key_yaw)
+    # v0.7.6: feat2 is key-present (0.5) or retarget pulse (1.0), never sin(key_yaw).
+    assert float(o2[b + 2]) in (0.0, 0.5, 1.0)
     assert 0.0 <= float(o2[b + 3]) <= 1.0
 
 

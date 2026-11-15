@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.5 (Assembly III)
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.6 (Assembly III)
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
@@ -17,8 +17,8 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.5` | ☑ |
-| `spec.yaml` version `0.7.5`; digests pinned from release v0.7.5 | `spec.yaml` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.5` (v0.7.6 PR open — do not tag yet) | ☑ |
+| `spec.yaml` version `0.7.6`; digests still pin release v0.7.5 until bake | `spec.yaml` | ☑ |
 | Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:80fad6b865c9af2a5731c7d2c3e516a9e465ff9551da053e4e3f740c10ecf324` | ☑ |
 | Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:a55568d56eea8e69af0bfaa9c458a414f587aba231793783cb1842a99625c5b9` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
@@ -206,12 +206,22 @@ Unchanged process: answers withheld from the public repo; available to Macrocosm
   `body_conaffinity` are the only fields it changes besides the mass-derived constants.
   Regression test `test_mass_event_keeps_parked_parts_collidable`; the v0.6.2 mass test still passes.
 
-## 13. v0.7.5 (observation-completable keys)
+## 13. v0.7.6 (actions-only key completability)
+- Spec `0.7.6`; digests still pin v0.7.5 until a release bake. Profile bake stays `NIST_PROFILE=v07`.
+  Player interface unchanged (`gym_v1`, 288→5).
+- Fixes Macrocosmos hold that honest actions-only key completion was near zero on v0.7.5:
+  searcher no longer gates yaw sweep on far-yaw closeness≈0; `KEY_PRESENT_MARK` + softer
+  closeness; grasped starts inside `r_hole`; key assignment prefers seatable starts.
+  Actions-only key steps: **18/64** (seed 7), **17/64** (seed 19). Honest privileged ~0.70–0.76;
+  obs scripted ≤~0.03. See `CALIBRATION.md`.
+
+## 13x. v0.7.5 (observation-completable keys)
 - Spec `0.7.5`; digests pinned from release v0.7.5 (release.yml run 43596917775). Profile bake stays
   `NIST_PROFILE=v07`. Player interface unchanged (`gym_v1`, 288→5).
 - Fixes Macrocosmos hold on v0.7.4: noisy closeness + wrist detent + retarget pulse;
   D-flat auto-arm; weights key 6.00, stack 1.20, rework 1.10, screw 0.10, insert/collar/twist 0.04; MAX_HORIZON 870, KEY_HOLD 4; dead stack→key edge + `_obs_key_yaw` removed;
-  insert latch documented; honest key path is actions-only. See `CALIBRATION.md` / PR evidence.
+  insert latch documented; honest key path is actions-only. Actions-only key completion remained
+  near zero (1/64, 0/64) — fixed in v0.7.6.
 
 ## 13y. v0.7.4 (branching / probe adaptive harden)
 - Spec `0.7.4`; digests pinned from release v0.7.4 (release.yml run 43256589506).

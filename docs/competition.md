@@ -1,6 +1,6 @@
 # NIST Assembly Competition
 
-Docs page text for v0.7.5 (Assembly III). Platform-wide items that Macrocosmos sets
+Docs page text for v0.7.6 (Assembly III). Platform-wide items that Macrocosmos sets
 (submission fee, rate limits) are not repeated here.
 
 ### NIST Assembly Competition
@@ -9,6 +9,14 @@ Docs page text for v0.7.5 (Assembly III). Platform-wide items that Macrocosmos s
 
 The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper on a Cartesian stage** (x, y, z, yaw) through **multi-peg sequential assembly** on a board modelled on the **NIST Assembly Task Board #1**, simulated in MuJoCo on CPU. Miners submit an ONNX policy that outputs incremental stage and gripper commands at 25 Hz. The setup borrows from AlphaNIST (Zhang et al., arXiv 2610.13354): the ATB-1 board, the 1 mm success criterion, 25 Hz control, diverse start states and free-order multi-part episodes. It is much smaller: pegs only, primitive geometry, a 4-DoF stage instead of a 7-DoF arm, and noisy state estimates instead of point clouds. Since v0.6 every episode is a **compound assembly task**; v0.7 adds rework, press-gated screws, stack rings and obs-indexed keys. Scoring gives weighted partial credit per step so that a ranked competition has a gradient. Cost is bounded by the sim horizon only — same policy and seed score the same under any machine load.
 
+**What changed in v0.7.6**
+
+* Actions-only key completability (Macrocosmos hold that miner-path keys stayed near zero on
+  v0.7.5): key-present marker before probe, softer closeness cue, grasped starts inside the
+  hole, key assignment prefers seatable starts. Honest actions-only searcher clears ~15+/64
+  key steps on seeds 7 and 19. Spec version `0.7.6`; digests still pin v0.7.5 until a release
+  bake. Interface unchanged (288→5).
+
 **What changed in v0.7.5**
 
 * Observation-completable keys (Macrocosmos hold on v0.7.4): hand-yaw index with coarse noisy
@@ -16,7 +24,8 @@ The NIST Assembly competition asks miners to drive a **parallel 2-finger gripper
   D-flat auto-arm after probe; key weight **6.00** (stack 1.20, rework 1.10, screw 0.10,
   insert/collar/twist 0.04) so missing keys cap score; horizon 870; dead stack→key edge and
   unused `_obs_key_yaw` RNG removed; insert latch documented. Interface unchanged (288→5).
-  Digests pinned from release run 43596917775 (tag `v0.7.5`).
+  Digests pinned from release run 43596917775 (tag `v0.7.5`). Actions-only key completion
+  remained near zero — fixed in v0.7.6.
 
 **What changed in v0.7.4**
 

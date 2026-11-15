@@ -12,13 +12,14 @@ Encodings in the 288-d observation (v0.6 prefix unchanged):
 - Hidden params: when ``reveal_after`` is set and that step is not done, twist_dir / progress /
   key fields are zeroed in the observation. ``touch_reveal`` also zeros them until the gripper
   has touched that peg (interaction-gated).
-- v0.7.5 key obs: absolute key yaw is still **not** published. The index is **hand yaw**
+- v0.7.6 key obs: absolute key yaw is still **not** published. The index is **hand yaw**
   (wrist) vs the hidden window — soft contacts rarely spin a seated peg. After reveal +
-  press-probe (``KEY_PROBE_FRAMES``), task feat 2 carries a retarget/disarm pulse and feat 3
-  carries a coarse noisy closeness cue (unsigned; no signed yaw). ``key_tol`` may pack into
-  the collar-flag slot when free. Inactive keys report ``blocked=1``. Wrist yaw-torque also
-  gets a noisy detent when pressing inside the window. Completion still needs press-probe
-  + leave/reenter arming (D-flat / n=1 auto-arms after probe — hole play can be too small).
+  touch + active, task feat 2 carries a key-present marker (0.5) or retarget pulse (1.0),
+  and ``key_tol`` packs into feat 5 when the collar/stack flag slot is free (a final pass
+  so later stack steps cannot clobber it). After press-probe, feat 3 carries a coarse noisy
+  closeness cue (unsigned; no signed yaw). Inactive keys report ``blocked=1``. Wrist
+  yaw-torque also gets a noisy detent when pressing inside the window. Completion still
+  needs press-probe + leave/reenter arming (D-flat / n=1 auto-arms after probe).
 
 Insert latch (documented behaviour, low weight): once an ``insert`` step latches
 (``step_done`` + ``step_done_at >= 0``), deliberate pull-out does **not** clear insert
@@ -40,6 +41,17 @@ v0.7.5 observation-completable keys (Macrocosmos v0.7.4 hold review):
 - D-flat (symmetry 1) auto-arms after probe; key weight restored so missing keys cap score
   (key 6.00 / stack 1.20 / rework 1.10); horizon 870 for the 600 s / 64-ep / 2-CPU bar.
 - Dead stack→key edge and unused ``_obs_key_yaw`` RNG draw removed.
+
+v0.7.6 actions-only key completability (honest miner-path bar):
+- Key-present marker + ``key_tol`` after reveal+touch+active (pre-probe), so miners can
+  identify keys even when a stack/collar owns feat 5 or insert feat 0 is already 1.
+- Final key-packing pass so stack steps cannot overwrite ``key_tol``.
+- Slightly wider ``KEY_TOL`` / softer closeness / lower cue noise so the yaw window is
+  reachable under ``DYAW`` actuation and observation noise without becoming trivial.
+- Grasped starts spawn inside ``r_hole`` (not a 10 mm disk past clearance); keyed yaw err
+  tightened so press-and-release can seat under cm-scale obs bias.
+- Key assignment prefers grasped / early-wave near-hole pegs — designed difficulty is the
+  yaw window, not a blind millimetre XY lottery after a far loose/lying pick.
 """
 
 from __future__ import annotations
@@ -194,22 +206,28 @@ EVENT_WEIGHTS_V07 = np.array(
 )
 # Multi-turn press-twists; pitch drawn per step and shown in obs when revealed.
 SCREW_TARGET = (0.30, 0.55)
-KEY_TOL = (0.045, 0.080)  # yaw-index; privileged true-state nudge still reaches
-# Press frames before key completion / key_tol pack / closeness cue.
+# Yaw-index half-width (rad). v0.7.6: ~1.1–1.9× DYAW (0.08) so open-hold is physically
+# reachable under discrete twist steps without making blind snap trivial (still < π/10).
+KEY_TOL = (0.090, 0.150)
+# Press frames before key completion / closeness cue.
 # Leave-and-reenter arming is the main natural-seat freebie killer; probe still blocks
 # pure insert-and-leave with no press. D-flat (symmetry 1) auto-arms after probe.
 KEY_PROBE_FRAMES = 10
 # Soft unsigned closeness: cue rises inside ~KEY_CLOSE_SOFT * tol of the window centre.
 # Additive Gaussian noise (obs units in [0, 1]); absolute yaw is never published.
-# Published only after press-probe so casual contact cannot free-search the window.
-KEY_CLOSE_SOFT = 2.8
-KEY_CLOSE_NOISE = 0.08
+# Closeness publishes only after press-probe so casual contact cannot free-search the window.
+# v0.7.6: softer cue (~4.5× tol ≈ 0.4–0.7 rad) so continuous yaw sweep can lock on before
+# the completion window; KEY_TOL itself stays the hard gate (keys remain non-trivial).
+KEY_CLOSE_SOFT = 4.5
+KEY_CLOSE_NOISE = 0.035
 # Wrist yaw-torque detent while pressing inside the keyed window (N·m before TORQUE_SCALE).
 # Detent also requires press-probe (same gate as the closeness channel).
-KEY_DETENT_TAU = 0.22
-KEY_DETENT_NOISE = 0.05
+KEY_DETENT_TAU = 0.28
+KEY_DETENT_NOISE = 0.04
 # Frames the retarget/disarm pulse stays high in task feat 2 after a window move.
 KEY_RETARGET_PULSE = 20
+# feat 2 value meaning "active key present" (retarget pulse uses 1.0; idle is 0.0).
+KEY_PRESENT_MARK = 0.5
 KEY_HOLD = 4  # ungripped aligned frames
 STACK_SEAT_XY = 0.0026
 STACK_SEAT_Z_CLEAR = 0.0024
@@ -393,17 +411,56 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
     # Keys share the twist obs channels, so never put a key on a twist/screw peg (those would
     # overwrite key sin/cos). Prefer non-rework pegs; round pegs may use any yaw, non-round
     # pegs must index near a seated symmetry of the slot.
+    #
+    # v0.7.6: prefer grasped / early-wave near-hole pegs for keys. The designed difficulty is
+    # the yaw window under obs noise — not a millimetre XY lottery under cm-scale bias after a
+    # far loose/lying pick. Still leave some far starts so insert skill matters.
     twist_or_screw = set(twist_pegs) | set(screw_pegs)
     key_cands = [i for i in range(K) if i not in rework_pegs and i not in twist_or_screw]
     max_keys = int(cfg.get("max_keys", 2))
     n_key = min(len(key_cands), max_keys, max(1, int(round(cfg["key_frac"] * K))))
-    key_pegs = set(rng.choice(key_cands, size=n_key, replace=False).tolist() if n_key and key_cands else [])
+    tier0 = [i for i in key_cands if cond.pegs[i].start_type == "grasped"]
+    tier1 = [
+        i for i in key_cands
+        if i not in tier0 and peg_wave[i] == 0 and cond.pegs[i].start_type == "near_hole"
+    ]
+    tier2 = [
+        i for i in key_cands
+        if i not in tier0 and i not in tier1 and peg_wave[i] == 0
+        and cond.pegs[i].start_type not in ("lying",)
+    ]
+    tier3 = [i for i in key_cands if i not in tier0 and i not in tier1 and i not in tier2]
+    ordered: list[int] = []
+    for cand_tier in (tier0, tier1, tier2, tier3):
+        chunk = list(cand_tier)
+        rng.shuffle(chunk)
+        ordered.extend(chunk)
+    key_pegs = set(ordered[:n_key]) if n_key and ordered else set()
 
     # Guarantee every episode has a key gate — the main anti-king lever (obs-only yaw index).
     if not key_pegs and key_cands:
         key_pegs.add(int(rng.choice(key_cands)))
     if len(key_pegs) > max_keys:
-        key_pegs = set(list(key_pegs)[:max_keys])
+        key_pegs = set(ordered[:max_keys] if ordered else list(key_pegs)[:max_keys])
+
+    # Pull early-wave near-hole / upright key pegs closer to the hole so a short spiral can
+    # seat them under softened v07 bias (~2–4.5 mm). Far lying/tray starts stay hard.
+    for i in list(key_pegs):
+        if peg_wave[i] > 0:
+            continue
+        peg = cond.pegs[i]
+        if peg.start_type == "grasped":
+            continue
+        if peg.start_type in ("lying", "tray"):
+            continue
+        base = float(peg.spec.outer_radius()) + 0.0015
+        r = float(rng.uniform(base, base + 0.005))
+        th = float(rng.uniform(0.0, 2.0 * math.pi))
+        peg.offset_xy = (r * math.cos(th), r * math.sin(th))
+        peg.height = 0.0003
+        if peg.spec.shape != "round":
+            peg.yaw_err = float(rng.uniform(-0.06, 0.06))
+        peg.start_type = "near_hole"
     def _add_stack_on(peg_i: int) -> bool:
         if len(collars) >= MAX_COLLARS:
             return False
@@ -1512,30 +1569,39 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 o[b + 4] = float(self.step_blocked(k))
             elif s.kind == "key":
                 # Keys are never co-assigned with twist/screw, so these channels stay free.
-                # v0.7.5: no absolute key yaw. After reveal + press-probe publish:
-                #   feat 2 = retarget/disarm pulse (1 while pulse > 0)
-                #   feat 3 = coarse noisy unsigned closeness (soft window; hill-climbable)
-                #   feat 4 = blocked (incl. inactive under single-active gate)
-                #   feat 5 = key_tol*10 when the collar-flag slot is free
+                # v0.7.6: no absolute key yaw. Placeholder here; final key pass below packs
+                # identity / closeness after collar-stack flags so stack cannot clobber tol.
                 active = self._key_is_active(k)
                 blocked = float(self.step_blocked(k) or not active)
-                probed = self._peg_probe_frames[s.peg] >= KEY_PROBE_FRAMES
-                touched = bool(self._peg_touched[s.peg])
                 o[b + 2] = 0.0
                 o[b + 3] = 0.0
                 o[b + 4] = blocked
-                # Closeness / retarget pulse only after reveal+active+touch+press-probe.
-                # Pre-probe contact must not leak a searchable cue (anti-king free-search).
-                if revealed and active and touched and probed:
-                    pulse = float(self._key_retarget_pulse[s.peg] > 0)
-                    o[b + 2] = pulse
-                    close = self._key_closeness(s)
-                    noisy = close + float(noise_rng.normal(0.0, KEY_CLOSE_NOISE))
-                    o[b + 3] = float(np.clip(noisy, 0.0, 1.0))
-                    if o[b + 5] == 0.0:
-                        o[b + 5] = float(s.key_tol) * 10.0
             elif s.kind in ("collar", "stack"):
                 o[b + 5] = 1.0 if s.kind == "collar" else 2.0
+        # Final key pass (after collar/stack feat-5 writes): identity before probe, closeness after.
+        for k, s in enumerate(self.cs.steps):
+            if s.kind != "key":
+                continue
+            b = task0 + s.peg * TASK_PEG_FEAT
+            revealed = self._params_revealed(s)
+            active = self._key_is_active(k)
+            blocked = float(self.step_blocked(k) or not active)
+            probed = self._peg_probe_frames[s.peg] >= KEY_PROBE_FRAMES
+            touched = bool(self._peg_touched[s.peg])
+            o[b + 4] = blocked
+            if not (revealed and active and touched):
+                continue
+            # Identity (pre-probe): key-present marker and key_tol when feat 5 is free.
+            # Stack/collar keep 1.0/2.0 on feat 5; miners still see KEY_PRESENT_MARK on feat 2.
+            pulse = self._key_retarget_pulse[s.peg] > 0
+            o[b + 2] = 1.0 if pulse else float(KEY_PRESENT_MARK)
+            if float(o[b + 5]) == 0.0:
+                o[b + 5] = float(s.key_tol) * 10.0
+            # Closeness only after press-probe (anti-king free-search before deliberate press).
+            if probed:
+                close = self._key_closeness(s)
+                noisy = close + float(noise_rng.normal(0.0, KEY_CLOSE_NOISE))
+                o[b + 3] = float(np.clip(noisy, 0.0, 1.0))
         # Collar present channel: 2.0 for stacks.
         col0 = task0 + MAX_PEGS * TASK_PEG_FEAT
         for k, s in enumerate(self.cs.steps):

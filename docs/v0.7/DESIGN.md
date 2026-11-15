@@ -1,4 +1,4 @@
-# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.5)
+# NIST-Lite v0.7 "Assembly III": design (profile `v07`, live as of 0.7.0–0.7.6)
 
 ## Goal
 
@@ -64,6 +64,17 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
 - Stack hold counting no longer fights the parent collar-on-block reset.
 - Key yaw sampling + `key_tol` obs packing; latch so completed hard steps stay completed.
 
+## v0.7.6 actions-only key completability
+
+- Builds on v0.7.5 cues: **key-present marker** (feat 2 = 0.5) after reveal+touch+active
+  *before* press-probe; softer closeness (`KEY_CLOSE_SOFT=4.5`); wider but still hard
+  `KEY_TOL=(0.09,0.15)`.
+- Grasped starts spawn **inside `r_hole`**; key assignment prefers grasped / near-hole pegs so
+  the designed difficulty is the yaw window, not a millimetre XY lottery under cm bias.
+- Honest actions-only searcher: **18/64** (seed 7), **17/64** (seed 19) key steps. Fixture
+  path remains privileged observability-only. See `CALIBRATION.md`.
+- Spec `0.7.6`; digests still pin v0.7.5 until a release bake. Interface unchanged.
+
 ## v0.7.5 observation-completable keys (vs Macrocosmos v0.7.4 hold)
 
 - **No absolute key yaw**, but after reveal + press-probe publish a **coarse noisy unsigned
@@ -81,7 +92,7 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
 - Honest privileged key path is **actions only** for probe/yaw (no `_peg_probe_frames` writes /
   key teleports); it still uses pose nudges + wrist aim. Oracle snaps stay behind `oracle=True`.
 - Fixture-assisted obs yaw search is **not** miner-path (teleports seat/probe). Actions-only
-  searcher key completion on public seeds is near zero — see `CALIBRATION.md`.
+  searcher key completion on public seeds was near zero on v0.7.5 — fixed in v0.7.6.
 - Interface unchanged (`[B,288]→[B,5]`); no wall-clock score caps; miner-path latch sealed.
   Digests pinned from release run 43596917775 (tag `v0.7.5`).
 
