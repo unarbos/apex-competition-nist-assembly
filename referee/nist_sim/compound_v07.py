@@ -52,6 +52,11 @@ v0.7.6 actions-only key completability (honest miner-path bar):
   tightened so press-and-release can seat under cm-scale obs bias.
 - Key assignment prefers grasped / early-wave near-hole pegs — designed difficulty is the
   yaw window, not a blind millimetre XY lottery after a far loose/lying pick.
+
+Key-window accounting (hand-yaw index):
+- Sample key windows in the reachable wrist band, clear of natural seat / idle yaws.
+- Peg cross-section no longer places the window on a slot symmetry (that made seating
+  orientation satisfy key alignment after press-probe).
 """
 
 from __future__ import annotations
@@ -299,34 +304,35 @@ def _draw_event_v07(rng: np.random.Generator) -> dict:
 # Hand yaw joint travels ±~3.1 rad (see env ``target[3]`` clip). Key windows must sit
 # inside that travel or no action sequence can align — wrap does not help at the stop.
 _KEY_YAW_REACH = 2.95
+# Keep hand-yaw windows clear of natural seat / idle poses so insert→press→release at
+# the seating yaw cannot satisfy key completion without a real wrist search.
+_KEY_YAW_SEAT_CLEAR = 0.40
 
 
 def _sample_key_yaw_for(rng: np.random.Generator, cond: EpisodeConditions, peg_i: int) -> float:
     """World-frame yaw window centre that the **hand** can actually reach.
 
-    v0.7.5 indexes keys on hand yaw (not peg spin). Windows outside the wrist travel
-    (±``_KEY_YAW_REACH``) are unreachable by actions. Non-round keys sit on a slot
-    symmetry; freebies from insert-at-seat are blocked by press-probe, not by
-    offsetting into an unreachable yaw.
+    Keys index **hand** yaw (not peg spin). Windows must lie inside wrist travel
+    (±``_KEY_YAW_REACH``). Peg cross-section no longer places the window on a slot
+    symmetry: under hand-yaw indexing that glued the completion pose to the natural
+    insert orientation and let seating credit count as key credit after press-probe.
     """
     peg = cond.pegs[peg_i]
     spec = peg.spec
     slot_yaw = float(spec.yaw + cond.board_yaw)
-    if spec.shape == "round" or spec.symmetry() == 0:
-        # Stay away from 0 so a peg that happens to sit near 0 is not free before probing.
+    forbidden = [0.0, slot_yaw]
+    n = int(spec.symmetry()) if spec.shape != "round" else 0
+    if n > 1:
+        for m in range(n):
+            forbidden.append(slot_yaw + (2.0 * math.pi * m) / n)
+    clear = max(float(_KEY_YAW_SEAT_CLEAR), 2.5 * float(KEY_TOL[1]))
+    for _ in range(32):
         yaw = float(rng.uniform(-_KEY_YAW_REACH, _KEY_YAW_REACH))
-        if abs(wrap(yaw)) < 0.35:
-            yaw = float(wrap(yaw + math.copysign(0.55, yaw if yaw != 0 else 1.0)))
-            yaw = float(np.clip(yaw, -_KEY_YAW_REACH, _KEY_YAW_REACH))
-        return yaw
-    n = max(1, int(spec.symmetry()))
-    k_sym = int(rng.integers(0, n))
-    jitter = float(rng.uniform(-0.03, 0.03))
-    yaw = float(wrap(slot_yaw + (2.0 * math.pi * k_sym) / n + jitter))
-    # Fold into the reachable wrist band (shortest-path equivalent under wrap).
-    if abs(yaw) > _KEY_YAW_REACH:
-        yaw = float(np.clip(yaw, -_KEY_YAW_REACH, _KEY_YAW_REACH))
-    return yaw
+        if all(abs(wrap(yaw - f)) >= clear for f in forbidden):
+            return yaw
+    # Fallback: push off the seat yaw into the reachable band.
+    yaw = float(wrap(slot_yaw + math.copysign(clear + 0.55, 1.0 if slot_yaw >= 0 else -1.0)))
+    return float(np.clip(yaw, -_KEY_YAW_REACH, _KEY_YAW_REACH))
 
 
 def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: str) -> CompoundSpec:
@@ -409,8 +415,8 @@ def make_compound_v07(rng: np.random.Generator, cond: EpisodeConditions, tier: s
 
     # --- key gates ---------------------------------------------------------------------------
     # Keys share the twist obs channels, so never put a key on a twist/screw peg (those would
-    # overwrite key sin/cos). Prefer non-rework pegs; round pegs may use any yaw, non-round
-    # pegs must index near a seated symmetry of the slot.
+    # overwrite key sin/cos). Prefer non-rework pegs. Hand-yaw windows are sampled in the
+    # reachable wrist band (clear of seat yaws); peg cross-section does not place the window.
     #
     # v0.7.6: prefer grasped / early-wave near-hole pegs for keys. The designed difficulty is
     # the yaw window under obs noise — not a millimetre XY lottery under cm-scale bias after a
@@ -1049,22 +1055,19 @@ class AssemblyIIIEpisode(CompoundEpisode):
         if s.kind != "key" or self.step_done[k]:
             return None
         old = float(s.key_yaw)
-        sym = int(self.c.pegs[s.peg].spec.symmetry())
-        # Keep resampling until the window moves outside the old tol (real adaptation).
-        # Symmetry-1 (D-flat): physical yaw cannot move far — redraw tol + pulse instead.
+        # Hand-yaw windows can always move; keep resampling until outside the old tol.
         new = old
-        if sym != 1:
-            for _ in range(8):
-                cand = _sample_key_yaw_for(self.rng, self.c, s.peg)
-                if abs(wrap(cand - old)) > max(0.12, 2.5 * s.key_tol):
-                    new = cand
-                    break
+        for _ in range(8):
+            cand = _sample_key_yaw_for(self.rng, self.c, s.peg)
+            if abs(wrap(cand - old)) > max(0.12, 2.5 * s.key_tol):
                 new = cand
+                break
+            new = cand
         s.key_yaw = new
         # Usually redraw tol; always clear hold so alignment must be re-proven.
         # Keep probe frames — retarget changes the yaw window, not the fact that the peg
         # was already press-probed. Pulse the retarget flag so miners can observe the move.
-        if self.rng.random() < 0.70 or sym == 1:
+        if self.rng.random() < 0.70:
             s.key_tol = float(self.rng.uniform(*KEY_TOL))
         self._key_hold[s.peg] = 0
         # New window: must leave-and-reenter again (natural seat on the old window is useless).

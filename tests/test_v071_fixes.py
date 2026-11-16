@@ -116,14 +116,9 @@ def test_key_yaw_reachable_and_obs_packs_tol():
             peg = c.pegs[s.peg]
             spec = peg.spec
             slot_yaw = float(spec.yaw + c.board_yaw)
-            if spec.shape != "round" and spec.symmetry() > 0:
-                n = spec.symmetry()
-                # Must sit near a seated symmetry of the slot.
-                errs = [
-                    abs(wrap(s.key_yaw - (slot_yaw + 2 * math.pi * k / n)))
-                    for k in range(n)
-                ]
-                assert min(errs) < 0.08 + s.key_tol
+            # Hand-yaw windows stay clear of the natural seat yaw (and reachable).
+            assert abs(s.key_yaw) <= 2.95 + 1e-6
+            assert abs(wrap(s.key_yaw - slot_yaw)) >= 0.35
         if not keys:
             continue
         e = _ep(13, i, per=8)

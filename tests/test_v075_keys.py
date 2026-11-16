@@ -112,9 +112,8 @@ def test_retarget_sets_observable_pulse():
     assert e._key_hold[s.peg] == 0
     assert e._key_index_armed[s.peg] is False
     assert e._key_retarget_pulse[s.peg] == KEY_RETARGET_PULSE
-    # Non-round D-flat may keep yaw and only redraw tol; otherwise window must move.
-    if e._key_symmetry(s.peg) != 1:
-        assert abs(wrap(s.key_yaw - old)) > 0.05
+    # Hand-yaw windows always move on retarget (no longer glued to slot symmetry).
+    assert abs(wrap(s.key_yaw - old)) > 0.05
     # Pulse visible in obs after probe+reveal.
     if s.reveal_after is not None:
         e.step_done[s.reveal_after] = True

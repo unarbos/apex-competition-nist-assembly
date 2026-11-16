@@ -84,9 +84,9 @@ def fixture_seat_key_peg(ep: AssemblyIIIEpisode, key_k: int) -> bool:
     i = s.peg
     hx, hy = ep.slot_xy[i]
     z = BLOCK_H - 0.0005 + PEG_LEN / 2
-    # Peg must seat at a physically reachable yaw (non-round = slot symmetry ≈ key_yaw).
-    # Only the **hand** starts offset so the policy must search the window.
-    peg_yaw = float(s.key_yaw)
+    # Peg seats at a physically valid yaw (slot frame). Key window is hand-yaw and may
+    # differ; only the **hand** starts offset so the policy must search the window.
+    peg_yaw = float(ep.c.pegs[i].spec.yaw + ep.c.board_yaw)
     hand_yaw0 = _wrap(s.key_yaw + math.copysign(max(0.55, 6.0 * s.key_tol), 1.0))
     ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, z], _yaw_quat(peg_yaw))
     mujoco.mj_forward(ep.model, ep.data)

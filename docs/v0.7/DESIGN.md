@@ -14,9 +14,9 @@ must score the same on any machine load.
   - `rework`: peg starts seated in a wrong empty slot; extract, then insert into the true slot.
   - `screw`: twist-while-pressing (multi-regrasp); yaw only counts while the gripper presses down.
   - `stack`: second-level ring that must rest on the *top* of a seated peg (not on the block).
-  - `key`: yaw-indexed mating — a seated peg only counts when peg yaw is inside a random key
-    window. Non-round keys are drawn near a seated symmetry of the slot so the window is
-    reachable; key never shares a peg with twist/screw (shared obs channels).
+  - `key`: yaw-indexed mating — a seated peg only counts when **hand** yaw is inside a random
+    key window in the reachable wrist band (clear of natural seat yaws). Key never shares a
+    peg with twist/screw (shared obs channels).
 - **Denser graphs:** compound-step share, denser random precedence, waves up to **2 on c4**
   (code: `waves=(2, 2)` in `TIER_CFG_V07`; not 5).
 - **Late reveals:** some twist/screw/key parameters are zeroed in the observation until a
@@ -71,6 +71,9 @@ Privileged reference must run with `oracle=False` / `tools/compound_solver.py --
   `KEY_TOL=(0.09,0.15)`.
 - Grasped starts spawn **inside `r_hole`**; key assignment prefers grasped / near-hole pegs so
   the designed difficulty is the yaw window, not a millimetre XY lottery under cm bias.
+- **Key-window accounting:** hand-yaw windows are sampled in the reachable wrist band and kept
+  clear of natural seat / idle yaws so seating orientation alone cannot satisfy key completion
+  after press-probe.
 - Honest actions-only searcher: **18/64** (seed 7), **17/64** (seed 19) key steps. Fixture
   path remains privileged observability-only. See `CALIBRATION.md`.
 - Spec `0.7.6`; digests still pin v0.7.5 until a release bake. Interface unchanged.
