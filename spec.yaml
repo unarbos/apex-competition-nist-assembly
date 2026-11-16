@@ -1,6 +1,6 @@
 schema: apex.competition.v1
 id: nist_lite_assembly
-version: 0.7.5
+version: 0.8.0
 display_name: "NIST-Lite Robot Assembly (RL)"
 kind: solo
 process_type: cpu
@@ -11,7 +11,8 @@ resources:
   mem_limit: 2Gi
   gpu_count: 0
 
-# PLAYER image: digests pinned from release.yml run 43596917775 (tag v0.7.5).
+# PLAYER image: digests stay on last released pins until a v0.8.0 release bake.
+# Do not tag / release / push images from this PR — owner bot handles release.
 image:
   ref: ghcr.io/unarbos/apex-competition-nist-assembly-player
   digest: sha256:80fad6b865c9af2a5731c7d2c3e516a9e465ff9551da053e4e3f740c10ecf324
@@ -42,7 +43,7 @@ entrypoints:
     command: ["python", "/app/launch.py", "--port", "8000"]
     network_disabled: false
     allow_internet: false
-    # 1800 s (since 0.2.1). v0.7 live rounds use 8/stratum (64 episodes). Calibrated projection for a
+    # 1800 s (since 0.2.1). v0.8 live rounds use 8/stratum (64 episodes). Calibrated projection for a
     # ~1 ms/call policy is well under 600 s on 2 CPU; timeout keeps a large margin for slow policies.
     timeout_s: 1800
     http_api:
@@ -54,7 +55,7 @@ referee:
   protocol: gym_v1
   image:
     # Private package; built with reserved.json from the NIST_HELDOUT_SEED build secret.
-    # Digest pinned from release.yml run 43596917775 (tag v0.7.5).
+    # Digests stay on last released pins until a v0.8.0 release bake.
     ref: ghcr.io/unarbos/apex-competition-nist-assembly-referee
     digest: sha256:a55568d56eea8e69af0bfaa9c458a414f587aba231793783cb1842a99625c5b9
   timeout_s: 1800

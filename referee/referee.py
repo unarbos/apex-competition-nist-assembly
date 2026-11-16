@@ -1,17 +1,16 @@
-"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.7.2 Assembly III).
+"""nist_lite REFEREE: compound multi-step assembly simulation and scoring (v0.8 Assembly IV).
 
 Solo competition (NUM_PLAYERS=1). Every episode of the round is derived from the
 platform SEED plus a private build salt (release builds only). Episodes are stepped in lockstep at 25 Hz; at each control step the
 player gets one batched observation for the episodes still running and returns one
 action per episode.
 
-raw_score = mean of per-episode scores (fixed denominator). Live default is Assembly III
-(``NIST_PROFILE=v07`` → nist_sim.compound_v07: inserts / collars / twists plus rework /
-screw / stack / key, denser graphs, weighted partial credit). ``NIST_PROFILE=v06`` still
-selects the previous Assembly II compound task. A fault (NaN / wrong shape / late) ends
-that episode; steps already done keep their credit if still done when it stops. The
-observation is 288-d; its first 184 dims are the v0.5 layout, so 184-input policies keep
-running on the prefix (player/launch.py). Records use ``nist_lite_record/4``.
+raw_score = mean of per-episode scores (fixed denominator). Live default is Assembly IV
+(``NIST_PROFILE=v08`` → nist_sim.compound_v08: long procedural blueprints, equal-weight
+end-state + perturbation scoring, no answer-leaking key cues). ``NIST_PROFILE=v07`` /
+``v06`` remain selectable for A/B. A fault (NaN / wrong shape / late) ends that episode;
+credit requires physically verified end states. Observation is 320-d (288-d Assembly III
+layout + 32-d blueprint encoding). Records use ``nist_lite_record/4``.
 
 Cost is bounded by sim horizon only (no wall-clock round/episode caps). Same policy +
 same seed must score the same on any machine load.
@@ -29,9 +28,9 @@ from typing import Any
 
 import numpy as np
 
-# Live task is Assembly III (v0.7). Set before nist_sim is imported (env.py reads physics_dt).
-# NIST_PROFILE=v06 still selects the previous compound task for A/B and regression.
-os.environ.setdefault("NIST_PROFILE", "v07")
+# Live task is Assembly IV (v0.8). Set before nist_sim is imported (env.py reads physics_dt).
+# NIST_PROFILE=v07 / v06 still select prior compound tasks for A/B and regression.
+os.environ.setdefault("NIST_PROFILE", "v08")
 
 from gym_v1.client import PlayerClient, PlayerError
 from gym_v1.referee import GameResult, Referee, RefereeContext
@@ -51,17 +50,35 @@ from nist_sim.compound_v07 import (
     compound_score_v07,
     sample_compound_v07,
 )
+from nist_sim.compound_v08 import (
+    OBS_DIM_V08,
+    AssemblyIVEpisode,
+    compound_score_v08,
+    sample_compound_v08,
+    step_results_v08,
+)
 from nist_sim.conditions import episode_seed_sequence, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
 from nist_sim.scoring import episode_score, raw_score_from_episodes
 
 # Read the env (not profile.ACTIVE): ACTIVE is fixed at first import of nist_sim.profile and
 # stays stale across NIST_PROFILE changes / importlib.reload in tests.
-_PROFILE_NAME = (os.environ.get("NIST_PROFILE") or "v07").strip().lower()
-COMPOUND = _PROFILE_NAME in ("v06", "v07")
+_PROFILE_NAME = (os.environ.get("NIST_PROFILE") or "v08").strip().lower()
+COMPOUND = _PROFILE_NAME in ("v06", "v07", "v08")
+ASSEMBLY_IV = _PROFILE_NAME == "v08"
 ASSEMBLY_III = _PROFILE_NAME == "v07"
-OBS_W = (OBS_DIM_V07 if ASSEMBLY_III else OBS_DIM_V06) if COMPOUND else OBS_DIM
-compound_score = compound_score_v07 if ASSEMBLY_III else compound_score_v06
+if ASSEMBLY_IV:
+    OBS_W = OBS_DIM_V08
+    compound_score = compound_score_v08
+elif ASSEMBLY_III:
+    OBS_W = OBS_DIM_V07
+    compound_score = compound_score_v07
+elif COMPOUND:
+    OBS_W = OBS_DIM_V06
+    compound_score = compound_score_v06
+else:
+    OBS_W = OBS_DIM
+    compound_score = None  # type: ignore[assignment]
 # /4 = compound records with collars + full task + step_results (v0.6.1+).
 # /2 = v0.5 single-stage records. (/3 was the brief v0.6.0 layout; superseded.)
 RECORD_FORMAT = "nist_lite_record/4" if COMPOUND else "nist_lite_record/2"
@@ -81,6 +98,8 @@ DEFAULTS = {
 
 
 def _sample(seed: int, per_stratum: int, split: str):
+    if ASSEMBLY_IV:
+        return sample_compound_v08(seed, per_stratum, split)
     if ASSEMBLY_III:
         return sample_compound_v07(seed, per_stratum, split)
     if COMPOUND:
@@ -89,6 +108,8 @@ def _sample(seed: int, per_stratum: int, split: str):
 
 
 def _make_episode(cond, rng):
+    if ASSEMBLY_IV:
+        return AssemblyIVEpisode(cond, rng)
     if ASSEMBLY_III:
         return AssemblyIIIEpisode(cond, rng)
     if COMPOUND:
@@ -189,10 +210,11 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                     row["steps_in_order"] = cinfo["n_in_order"]
                     row["n_steps"] = cinfo["n_steps"]
                     row["credit_by_kind"] = cinfo["per_kind"]
-                    row["step_results"] = step_results(e)
+                    row["step_results"] = step_results_v08(e) if ASSEMBLY_IV else step_results(e)
                     row["events"] = record_events(e)
                     row["events_fired"] = cinfo["events"]
                     row["parts_lost"] = int(e.parts_lost)
+                    row["nist_profile"] = _PROFILE_NAME
                 rows.append(row)
             conn.send((rows, traj))
             return
@@ -400,10 +422,17 @@ class NistLiteReferee(Referee):
                 },
             },
         }
-        # Always print the active profile so image/preview logs prove v07 bake.
+        # Always print the active profile so image/preview logs prove the bake.
+        if ASSEMBLY_IV:
+            _asm = "IV"
+        elif ASSEMBLY_III:
+            _asm = "III"
+        elif COMPOUND:
+            _asm = "II"
+        else:
+            _asm = "I"
         print(
-            f"nist_lite profile={_PROFILE_NAME} assembly="
-            f"{'III' if ASSEMBLY_III else ('II' if COMPOUND else 'I')} "
+            f"nist_lite profile={_PROFILE_NAME} assembly={_asm} "
             f"episodes={n} raw_score={raw_score:.4f}",
             flush=True,
         )

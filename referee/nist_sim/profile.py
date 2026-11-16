@@ -1,9 +1,10 @@
 """Task profile switch (``NIST_PROFILE``).
 
-Live default is ``v07`` (Assembly III): the referee image bakes ``NIST_PROFILE=v07`` and
-``referee.py`` uses ``setdefault("NIST_PROFILE", "v07")``. ``v06`` remains selectable for
-A/B and regression. ``v05`` is the library default when nothing sets the env and reproduces
-the v0.5.x single-stage task bit for bit. Code reads the active profile through :data:`ACTIVE`.
+Live default is ``v08`` (Assembly IV): the referee image bakes ``NIST_PROFILE=v08`` and
+``referee.py`` uses ``setdefault("NIST_PROFILE", "v08")``. ``v07`` / ``v06`` remain selectable
+for A/B and regression. ``v05`` is the library default when nothing sets the env and
+reproduces the v0.5.x single-stage task bit for bit. Code reads the active profile through
+:data:`ACTIVE`.
 
 Wired fields: ``physics_dt``, ``action_quant``, and (as of v0.7.1) ``clearance`` via
 ``conditions.active_ranges()``. ``n_slots``, ``k_values``, ``collars``, ``depth_patch`` remain
@@ -68,7 +69,7 @@ PROFILES: dict[str, Profile] = {
         collars=True,
         held_out_families_per_round=2,
     ),
-    # v0.7 "Assembly III" (live default as of 0.7.0): denser graphs, screw/key gates.
+    # v0.7 "Assembly III" (live 0.7.0–0.7.5): denser graphs, screw/key gates.
     "v07": Profile(
         name="v07",
         physics_dt=0.002,
@@ -79,6 +80,24 @@ PROFILES: dict[str, Profile] = {
         # Hi 0.00068 stays below the loose coarse midpoint 0.0007 (record privacy).
         clearance=(0.00020, 0.00068),
         steps_per_part=200,
+        episodes_per_round=64,
+        depth_patch=16,
+        policy_state_dim=256,
+        collars=True,
+        held_out_families_per_round=2,
+    ),
+    # v0.8 "Assembly IV" (live default as of 0.8.0): long procedural blueprints, equal-weight
+    # end-state scoring, no answer-leaking key cues, anti-aligned index windows.
+    "v08": Profile(
+        name="v08",
+        physics_dt=0.002,
+        action_quant=0.0,
+        n_slots=12,
+        k_values=(4, 6, 8),
+        # Tighter than v07; hardness also in dynamics stretch + blueprint length.
+        # Hi 0.00055 stays below mid coarse midpoint 0.0005? mid is 0.0005 — keep hi < 0.0007.
+        clearance=(0.00018, 0.00055),
+        steps_per_part=160,
         episodes_per_round=64,
         depth_patch=16,
         policy_state_dim=256,

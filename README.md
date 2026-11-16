@@ -5,22 +5,17 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.7.5** ("Assembly III", profile `v07`) — observation-completable keys vs the
-> v0.7.4 Macrocosmos hold: noisy closeness + wrist detent + retarget pulse (after press-probe),
-> D-flat auto-arm; key weight **6.00** so missing keys cap score; denser graphs, new step kinds
-> (`rework`, `screw`, `stack`, `key`), press-gated screws, leave/reenter index arm, single-active
-> key rotation, `regraph` / post-stack retarget, mis-seated rework, stack rings. Observation
-> stays `[B, 288]` with v0.6 encodings extended in-place. Referee image bakes `NIST_PROFILE=v07`.
-> Cost is bounded by sim horizon only (no round/episode wall-clock caps). Policy deadline 80 ms;
-> horizon ≤ 870. Digests pinned from release run 43596917775 (tag `v0.7.5`). Scores are
-> **not** comparable with v0.6.x / v0.7.3 / v0.7.4.
+> Version: **v0.8.0** ("Assembly IV", profile `v08`) — hard reset for frontier-lab miners.
+> Long procedural blueprints (~8–28 steps), equal-weight end-state + perturbation scoring,
+> anti-aligned key windows, **no** closeness / detent / retarget cues, per-episode dynamics
+> stretch. Observation is **`[B, 320]`** (288-d Assembly III layout + 32-d blueprint encoding);
+> old 288/184 ONNX policies are rejected. Referee image bakes `NIST_PROFILE=v08`. Cost is
+> bounded by sim horizon only (≤ 920 control steps). Digests stay on the last released pins
+> until a v0.8.0 release bake. Scores are **not** comparable with v0.7.x.
 >
-> Every episode is a random multi-step assembly graph. Four complexity tiers (c1–c4); weighted
-> partial credit per step (insert/collar/twist 0.04, screw 0.10, rework 1.10, stack 1.20,
-> key 6.00). Waves at most 2 on c4. Records `nist_lite_record/4` (include `nist_profile`).
->
-> v0.5.1: harder pose estimates (5–11.5 mm peg-vs-hole offset, drift, glitch bursts) and more
-> lying starts. v0.5.0: board layout and peg shapes are drawn per episode.
+> Every episode is a freshly generated multi-step assembly graph. Four complexity tiers
+> (c1–c4). Records `nist_lite_record/4` (include `nist_profile`). See
+> [docs/v0.8/DESIGN.md](docs/v0.8/DESIGN.md) and [CALIBRATION.md](CALIBRATION.md).
 
 ## Relation to AlphaNIST
 
@@ -49,7 +44,20 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.7.5 Assembly III)
+## The task (v0.8.0 Assembly IV)
+
+- **Blueprint:** random dependency graph of inserts, collars, twists, screws, stacks, keys and
+  reworks (typically ~8–28 steps). Waves, mid-episode physics events, and dynamics stretch
+  (mass / friction / gain / latency) require online system ID and planning.
+- **Scoring:** equal weight per step. Credit only for physically verified end states that
+  survive a perturbation settle, scaled by precision. Out-of-order credit is tiny; unfinished
+  frontier progress is capped. Ceiling 1.0 is effectively unreachable.
+- **Keys:** absolute yaw hidden; no closeness / detent / pulse. Windows are anti-aligned from
+  slot symmetries (no natural-seat freebie). Leave/reenter arming is mandatory (no D-flat
+  auto-arm).
+- **Observation:** `[B, 320]` → `[B, 5]` at 25 Hz. Last 32 dims encode the published blueprint.
+
+### Historical: v0.7.5 Assembly III
 
 - **Board:** one MuJoCo board per episode with 8 peg slots. Every episode draws its own
   layout: slot positions, slot yaw, and a cross-section per slot from continuous families
@@ -88,7 +96,7 @@ One ONNX file (opset 13–21, standard operators only, a single self-contained f
 
 | | shape | contents |
 |---|---|---|
-| input | `[B, 288]` float32 (or `[B, 184]`, see below) | See layout below |
+| input | `[B, 320]` float32 (v0.8; width must match) | See layout below |
 | output | `[B, 5]` float32 in [−1, 1] | `dx, dy, dz` (±4 mm/step), `dyaw` (±0.08 rad/step), gripper (+1 open, −1 close) |
 
 If the policy's input is statically 184 wide, the player passes only the first 184 dims (the
