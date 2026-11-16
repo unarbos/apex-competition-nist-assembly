@@ -80,7 +80,7 @@ def privileged_run(seed: int, per: int, episodes: int, *, honest: bool) -> dict:
 
 
 def red_team(seed: int, per: int, episodes: int = 16) -> list[dict]:
-    """Try common reward-hacks; report scores (should stay near 0)."""
+    """Try common reward-hacks + audit hole-class attacks; report scores (near 0)."""
     strategies = []
 
     def jitter(ep, o, noise, ss, i):
@@ -103,16 +103,110 @@ def red_team(seed: int, per: int, episodes: int = 16) -> list[dict]:
     def extreme(ep, o, noise, ss, i):
         return np.array([1e6, -1e6, 1e6, -1e6, 1e6])
 
+    def cue_hillclimb_sweep(ep, o, noise, ss, i):
+        """v0.7.5-style closeness/detent sweep: continuous yaw search while pressing.
+
+        On v0.8 there is no closeness/detent gradient, so this should not farm keys.
+        """
+        a = np.zeros(5)
+        a[2] = -0.7
+        a[3] = 0.85 if (ep.steps % 40) < 20 else -0.85
+        a[4] = -1.0
+        return a
+
     for name, fn in [
         ("jitter", jitter),
         ("vibrate_parts", vibrate),
         ("slam_down", slam),
         ("yaw_spin", spin),
         ("extreme_actions", extreme),
+        ("cue_hillclimb_sweep", cue_hillclimb_sweep),
     ]:
         r = _run_policy(seed, per, episodes, fn)
         strategies.append({"name": name, "mean": r["mean"], "wall_s": r["wall_s"], "n": len(r["scores"])})
+
+    # Privileged seat-at-symmetry freebie attack (audit hole class 2).
+    strategies.append(red_team_natural_seat_freebie(seed, per, episodes))
+    # Single-kind dominance probe (audit hole class 3) — analytic over sampled graphs.
+    strategies.append(red_team_single_kind_cap(seed, per, episodes))
     return strategies
+
+
+def red_team_natural_seat_freebie(seed: int, per: int, episodes: int) -> dict:
+    """After seating, hold hand at slot symmetry yaw and press-probe; keys must not complete."""
+    from nist_sim.compound import wrap
+    from nist_sim.compound_v07 import KEY_HOLD, KEY_PROBE_FRAMES
+    from nist_sim.compound_v08 import KEY_ANTI_ALIGN
+
+    _, conds = sample_compound_v08(seed, per, "live")
+    key_attempts = key_done = 0
+    t0 = time.time()
+    for i in range(min(len(conds), episodes)):
+        ss = episode_seed_sequence(seed, i)
+        r1, _ = (np.random.default_rng(s) for s in ss.spawn(2))
+        ep = AssemblyIVEpisode(conds[i], r1)
+        for k, s in enumerate(ep.cs.steps):
+            if s.kind != "key":
+                continue
+            peg = s.peg
+            slot_yaw = float(ep.c.pegs[peg].spec.yaw + ep.c.board_yaw)
+            if abs(wrap(s.key_yaw - slot_yaw)) < KEY_ANTI_ALIGN - 1e-6:
+                continue  # would be a generator bug
+            for p in s.prereq:
+                ep.step_done[p] = True
+                ep.step_done_at[p] = 1
+            ep.seated_now[peg] = True
+            ep._peg_touched[peg] = True
+            ep._peg_probe_frames[peg] = KEY_PROBE_FRAMES + 5
+            ep._key_index_armed[peg] = True
+            ep._active_key = k
+            ep.data.qpos[3] = float(slot_yaw)
+            ep._key_hold[peg] = 0
+            key_attempts += 1
+            for _ in range(KEY_HOLD + 3):
+                done, _ = ep._step_state(k)
+                if done:
+                    key_done += 1
+                    break
+    rate = (key_done / key_attempts) if key_attempts else 0.0
+    return {
+        "name": "natural_seat_key_freebie",
+        "mean": float(rate),  # fraction of keys completed by freebie (target 0)
+        "wall_s": time.time() - t0,
+        "n": key_attempts,
+        "note": "fraction of keys completed at slot-symmetry yaw after probe/hold",
+    }
+
+
+def red_team_single_kind_cap(seed: int, per: int, episodes: int) -> dict:
+    """Max score obtainable by finishing only one step kind (equal-weight seal)."""
+    _, conds = sample_compound_v08(seed, per, "live")
+    worst = 0.0
+    t0 = time.time()
+    for i in range(min(len(conds), episodes)):
+        ss = episode_seed_sequence(seed, i)
+        r1, _ = (np.random.default_rng(s) for s in ss.spawn(2))
+        ep = AssemblyIVEpisode(conds[i], r1)
+        n = len(ep.cs.steps)
+        for kind in ("key", "insert", "stack", "rework", "screw", "collar", "twist"):
+            for k, s in enumerate(ep.cs.steps):
+                ep.step_done[k] = s.kind == kind
+                ep.step_in_order[k] = s.kind == kind
+                ep.step_done_at[k] = 10 if s.kind == kind else None
+                ep.step_progress[k] = 0.0
+                ep._stability_ok[k] = True
+                ep._precision[k] = 1.0
+            ep._finalized = True
+            ep.done = True
+            sc = float(compound_score_v08(ep)["score"])
+            worst = max(worst, sc)
+    return {
+        "name": "single_kind_dominance_cap",
+        "mean": worst,
+        "wall_s": time.time() - t0,
+        "n": min(len(conds), episodes),
+        "note": "max score if only one step kind is finished (target << 1, ideally <0.55)",
+    }
 
 
 def leaders_eval(leaders_dir: Path, seed: int, per: int, episodes: int) -> list[dict]:

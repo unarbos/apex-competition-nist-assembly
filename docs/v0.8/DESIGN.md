@@ -6,6 +6,10 @@ A hard reset for miners with frontier-lab RL skill and compute. Prefer too hard
 (near-impossible ceiling) over another easy saturation. Procedural generalization
 over memorization; exploit-resistant end-state scoring; no answer-leaking cues.
 
+Closes the v0.7.5 R32 hole classes from audit draft PR #40 by design: (1) no
+hill-climbable per-step cues, (2) no key windows on natural seat / slot symmetries,
+(3) no single heavily weighted subtask that can carry the score.
+
 ## What changes vs v0.7.x
 
 - **Longer blueprints:** typically ~8–28 steps (mean ~12 on public seeds) with denser
