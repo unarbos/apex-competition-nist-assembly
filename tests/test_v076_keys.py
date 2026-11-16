@@ -96,8 +96,9 @@ def test_grasped_key_starts_inside_hole():
 
 def test_actions_only_searcher_completes_some_keys():
     """Miner-path observe→act→step completes keys on seed 7 (short CI slice)."""
-    # 12 eps keeps CI light; full 64-ep bar is ~15+ (see CALIBRATION.md).
-    r = OKS.run_eval_actions_only(seed=7, per=8, episodes=12, start=0)
+    # 24 eps keeps CI light but avoids a flaky 12-ep edge under seat-clear windows;
+    # full 64-ep bar is still ~15+ (see CALIBRATION.md).
+    r = OKS.run_eval_actions_only(seed=7, per=8, episodes=24, start=0)
     assert r["path"] == "actions_only"
     assert r["keys_total"] > 0
     assert r["keys_done"] >= 1, r
