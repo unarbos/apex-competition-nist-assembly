@@ -38,6 +38,10 @@ def main():
     args = ap.parse_args()
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    # CI prepares this directory for the image's non-root UID. Keep the host
+    # directory writable by this process for player/referee logs as well.
+    if not os.access(out, os.W_OK):
+        raise RuntimeError("wall output directory must be writable")
     port = free_port()
     env = dict(os.environ)
     env.update(NIST_POLICY_PATH=str(Path(args.policy).resolve()), PYTHONPATH=str(ROOT / "player"))

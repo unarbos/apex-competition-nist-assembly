@@ -49,6 +49,7 @@ out = pathlib.Path(sys.argv[sys.argv.index('-v') + 1].split(':')[0])
     assert result["episodes"] == 64
     assert result["under_600s"] is True
     assert result["built_image"] == "unit-stub"
+    assert (tmp_path / "out" / "result.json").is_file()
 
 
 def test_wall_harness_rejects_timeout_and_cleans_player(tmp_path):
