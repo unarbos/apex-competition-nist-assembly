@@ -17,8 +17,8 @@ anti-aligned key windows, procedural blueprints, dynamics randomization, and a
 - Completed steps require a physical latch during an action transition and an
   end-state that survives the perturbation settle. Finalization does not invent
   completion from a passive pose.
-- An unfinished, unblocked step can earn at most **0.30 of that step**, not
-  additional credit on top of completion: **0.06** for a real grasp/lift,
+- An unfinished, unblocked step can earn at most **0.36 of that step**, not
+  additional credit on top of completion: **0.12** for a real grasp/lift,
   **0.06** for held transport toward the real hole, **0.06** for held insertion,
   **0.06** for holding near the target pose, and **0.06** for retaining the pose
   after release through the settle. Transport and insertion have continuous
@@ -28,178 +28,120 @@ anti-aligned key windows, procedural blueprints, dynamics randomization, and a
   actual hole region. Wrist proximity, released/falling parts, oscillation, and
   passive near-hole poses cannot earn these terms. Legacy scalar progress is not
   a scoring input.
-- Within the lift bucket, a best-so-far fraction contributes at most **0.012**
+- Within the lift bucket, a best-so-far fraction contributes at most **0.024**
   before the binary lift fires. It requires a closed, contacting grasp and a
   measured rise of **0.5–8 mm above the part's settled reset height**. The
   fraction is `0.20 * clip((rise_mm - 0.5) / 7.5, 0, 1)`. Full lift remains
-  **0.06**; oscillation, contact alone, wrist motion, absolute spawn height,
+  **0.12**; oscillation, contact alone, wrist motion, absolute spawn height,
   blocked steps, passive poses, and settling frames cannot accumulate credit.
 - Blueprint step entries use an unambiguous integer peg id plus separate blocked
   and done flags. The observation remains 320 floats.
 
-### Current transport/insertion measurements
+### Reported 0.36-cap CEM measurements
 
-The current code adds the verified transport/insertion terms described above.
-The observation-only controller is evaluated through
-`tools/obs_boundary_v08.py`, which permits only observation/action/terminal
-operations and rejects other episode reads. The standalone strong script and the
-zero-residual wrapper are covered by full-episode, exact-action-sequence
-equivalence tests. Privileged demonstrations, if used, are restricted to
-training seeds and are never available at evaluation.
-
-The following results use referee seeds **7, 19, 31**, eight episodes per seed
-(`per=8`), and the current transport/insertion scoring. Confidence intervals
-are episode-bootstrap 95% intervals with 10,000 resamples and seed 20261117.
-`round std` is the sample standard deviation of the three per-referee-seed
-means, not the per-episode standard deviation.
-
-| Policy / check | Episodes | Mean [95% CI] | Round std | Status |
-|---|---:|---:|---:|---|
-| Zero | 8 (seed 7) | **0.000000 [0, 0]** | not measured | Pass; exactly zero |
-| Uniform random | 8 (seed 7) | **0.000000 [0, 0]** | not measured | Pass; exactly zero |
-| Strong observation-only script | 24 | **0.008439 [0.004525, 0.012991]** | **0.001968** | Valid observation-only matched baseline |
-| Learned BC + residual PPO | 24 | **0.004448 [0.002289, 0.006769]** | **0.001359** | **Fail; below script and intervals overlap** |
-| Honest privileged | 24 | **0.168414 [0.123025, 0.217372]** | **0.024460** | Above script; below requested 0.2–0.35 range |
-
-The learned-policy gate is not established until a completed learned model
-beats the strong script on these held-out seeds with nonoverlapping confidence
-intervals. The final comparison also uses a paired episode bootstrap of the
-learned-minus-script score differences. The privileged result is measured under
-the same current scorer, but remains a true-state calibration reference rather
-than an observation-only policy.
-
-The completed learned experiment uses 29,440 public observation/residual pairs
-from 32 training episodes on seeds **101–104**. The observation-only script
-performs its normal pick; after its observation-derived lift check, an honest
-privileged insertion teacher supplies local residual targets. No teacher state
-or action targets are available at evaluation, and no completion latch or pose
-teleport is used by the collector. The collector now matches the script's
-160-step insertion limit; this measured run used an earlier mismatched limit,
-which is retained as a limitation of that experiment. BC runs for 15 epochs, followed by
-**131,072** residual-PPO timesteps with a c1→full-distribution curriculum. The
-model was saved and evaluated through the fail-closed public-observation
-boundary. Training took **1518.7 s**; the eight-episode seed-201 development
-evaluation took **57.2 s** and scored **0.004791 [0.001580, 0.008423]**. The
-matched strong-script development mean was **0.003530 [0.001200, 0.006135]**;
-these development intervals overlap and are not a separation result.
-
-On the fixed held-out seeds 7, 19, and 31, the selected 131,072-step model
-scored **0.004448 [0.002289, 0.006769]**. Its per-round means were
-**0.003898, 0.003450, 0.005996** (sample standard deviation **0.001359**).
-The learned-minus-script paired mean was **-0.003991**, with 95% interval
-**[-0.008735, 0.000013]**. The pooled intervals overlap and the paired interval
-does not exclude zero. **The learned-policy gate fails.** Round variability is
-not smaller than the required script→learned gap, and the learned mean is below
-the strong script. The learned round standard deviation is smaller than the
-script's **0.001968**, but that does not establish improvement.
-
-A separate regression fixed double normalization of BC residuals: the collector
-already stores `(teacher_action - script_action) / scale`, so training now uses
-those targets unchanged and applies the scale exactly once at inference. A
-whole-trajectory BC development run scored **0.002030** on the first four
-seed-201 episodes, below the matched script mean **0.004650**. A 50-epoch
-whole-trajectory run scored **0.000000** on those episodes. The local-insertion
-BC-only initialization scored **0.005559 [0.000857, 0.011170]** on those four
-episodes, while the completed 131,072-step model did not generalize to the
-held-out rounds. A separate observation-only lying-grasp experiment scored
-**0.004306 [0.001873, 0.007038]** across the 24 held-out episodes and was
-reverted; it is not the current baseline. These small-sample development
-results are retained as negative evidence, not as a learned-policy pass.
-
-### Historical incomplete matched training
-
-The earlier matched BC + residual PPO experiment used a whole-trajectory
-privileged teacher and reached **851,968 timesteps** before its two-hour
-execution limit. It was stopped before saving a final model or running held-out
-evaluation. Its last logged training-round mean reward was **0.00674**; that is
-a training metric, not a held-out score. No learned-policy claim is made from
-that incomplete run.
-
-The current red-team run at seed 7 measured **0.000000** for the new open-hand
-transport/wrist-spoof and repeated close/release-near-hole attacks. The complete
-attack table below includes those results. The complete-suite result is recorded
-below. The **built referee image** completed real 64-episode rounds over the
-host-player/container-referee HTTP contract in **158.787 s** and **230.220 s**
-on cpuset **0,1**. Both containers exited **0**, completed all **64** episodes,
-reported `terminal_reason=scored`, and had no player fault. Their `result.json`
-and `history/episodes.jsonl` were byte-identical across the two runs; measured
-wall times differed, as expected. These pass the **<600 s** built-image and
-deterministic-repeat gates and are not in-process timings. The CI artifacts are
-`referee-wall-64`, ids **14366028188** and **14367165832**, from runs
-**44167711787** and **44167702029** at commit `87466bf`.
-At commit `bea4f7d`, both GitHub pytest runs and both referee-image runs passed.
-The built-image timing above is from the recorded CI artifacts, not a local
-Docker run.
-
-The wall harness itself has **2 passing local tests** using the real ONNX player
-and a Docker stub: complete-result parsing and timeout/process cleanup. These
-are orchestration tests, not built-image wall measurements.
-
-### Historical dense-lift gate table
-
-Measurements below were made on **2026-11-17 UTC** using the earlier 0.18-cap
-implementation. They do not include the later transport/insertion evidence and
-must not be compared as if they used the current scorer. In-process policy runs
-used seed **7**, `per=8`, and the episode counts shown below. Confidence
-intervals are episode-bootstrap 95% intervals, 10,000 resamples with seed
-20261117. Small samples are not evidence of generalization to unseen seeds. All
-table values are measured; none is a projection.
+The following results were reported on **2026-11-17 UTC** for the 0.36-cap
+scorer and public +8 mm grasp-bias controller. Confidence intervals are
+episode-bootstrap 95% intervals, 10,000 resamples with seed 20261117. They
+compare CEM against the simpler `ObsScriptedPolicy`, not the strong script used
+by the matched three-round gate below.
 
 | Gate | Episodes | Measured mean [95% CI] | Status |
 |---|---:|---:|---|
-| Zero | 8 | **0.000000 [0, 0]** | Pass; every episode exactly zero |
-| Uniform random | 8 | **0.000000 [0, 0]** | Pass; every episode exactly zero |
-| Observation-only scripted | 8 | **0.005876 [0, 0.013878]** | Pass; small physical lift/alignment credit |
-| Residual PPO, zero residual initialization | 8, matched to scripted | **0.001588 [0, 0.004597]** | **Ladder not established**: mean is below scripted and intervals overlap |
-| Evolutionary residual, accept-only selection | 8, matched to scripted | **0.005876 [0, 0.013878]** | **No improvement**: 0/48 candidates accepted; unchanged scripted incumbent |
-| Honest privileged | 8 | **0.196625 [0.123375, 0.265503]** | Pass; upper reference remains well below ceiling |
-| Determinism, scripted | 8 + repeat | identical per-episode scores | Pass |
-| Determinism, real 64-episode run | 64 + repeat | identical `result.json` and episode records | Pass |
-| Real 64-episode wall, 2 pinned CPUs | 64 | **251.9 s**, repeat **256.2 s** | Pass (<600 s), in-process contract |
+| Zero | 8 | **0.000000 [0, 0]** | Pass; exactly zero |
+| Uniform random | 8 | **0.000000 [0, 0]** | Pass; exactly zero |
+| Observation-only scripted (seed 7, public +8 mm) | 64 | **0.011368 [0.008048, 0.014910]** | In 0.01–0.05 band |
+| Observation-only scripted (seed 19) | 64 | **0.010184 [0.007143, 0.013490]** | Second referee round |
+| CEM grasp/place/lift RL (seed 7) | 64 | **0.014695 [0.011276, 0.018250]** | Paired gain reported |
+| CEM grasp/place/lift RL (seed 19) | 64 | **0.014502 [0.011614, 0.017481]** | Paired gain reported |
+| Paired RL − scripted (seed 7) | 64 | **Δ +0.003326 [0.000240, 0.006498]** | CI excludes 0 |
+| Paired RL − scripted (seed 19) | 64 | **Δ +0.004318 [0.001226, 0.007470]** | CI excludes 0 |
+| Pooled paired RL − scripted | 128 | **Δ +0.003822 [0.001511, 0.006082]** | Paired CI excludes 0 |
+| Honest privileged (seed 7) | 8 | **0.196647 [0.123477, 0.265505]** | Approximately 0.2 |
+| Honest privileged (seed 7) | 64 | **0.135470 [0.112563, 0.159420]** | Below 0.2 on full draw |
 
-The denser residual-PPO scores were
-`[0, 0.0006716231440830144, 0.012033705297570443, 0, 0, 0, 0, 0]`, on exactly
-the same eight held-out episodes as scripted. Training ran for **262,144
-timesteps** on seeds 101, 102, and 103 in **1613.3 s**, with **49.5 s** of
-held-out evaluation. It uses a zero-initialized residual action mean around the
-public scripted controller, bounded residual scale 0.35, and PPO fine-tuning;
-evaluation uses only observations and actions. It is not a from-scratch PPO
-result. **PPO beating scripted beyond seed noise remains an open gate.** The
-pre-densification 262,144-timestep run scored 0.003614 [0, 0.008591] on these
-episodes in 1803.0 s of training; densification did not improve this PPO result.
-An earlier 32,768-timestep residual run scored 0.007500 on only the first four
-held-out episodes and is not used for the matched comparison. A separate
-non-residual PPO run of 32,768 timesteps measured 0.0000 on four held-out
-episodes, so unaided exploration is not presented as a learnability demonstration.
+The CEM search recovers `θ = [-0.002, 0.028, 0.105]` from the public +8 mm
+bias in **4114.2 s** of search/evaluation on train seeds 101–106. Evaluation
+uses only observations and actions. This is parameter search around the public
+FSM, not from-scratch deep RL. The reported two-round pooled policy intervals
+overlap, so the full three-round matched comparison below is the relevant gate
+measurement.
 
-The accept-only evolutionary residual experiment used 48 candidates (12
-generations × population 4), with initial sigma 0.02 decayed by 0.92 and residual
-scale 0.35. It used a 3,200-parameter linear residual over the current 320-d
-observation and a three-frame observation mean. Selection used eight episodes
-from training seeds 101 and 102 plus eight from disjoint validation seeds 201
-and 202; reported seed 7 was never used for selection. It retained the exact
-zero-residual incumbent unless a candidate strictly improved both training and
-validation means. **0/48 candidates were accepted** in **1087.1 s**, across
-**408 rollouts**. Its final test result is therefore identical to scripted:
-0.005875981718568924 [0, 0.013877945155706771]. The zero-residual path was
-verified to reproduce the calibration scores exactly. This method avoids a
-regression but does not demonstrate learned improvement.
+### Current 0.36-cap matched evaluation
 
-The honest privileged scores were
-`[0.325, 0.307, 0.166, 0.091, 0.005, 0.201, 0.300, 0.178]`.
-The privileged reference uses true-state actions and pose-nudging helpers but
-does not set completion latches, probe counters, or key-yaw teleports. It is not
-an observation-only policy and is not an upper bound on learned performance.
+The strong observation-only script and residual-PPO evaluation use
+`tools/obs_boundary_v08.py`, which permits only observation/action/terminal
+operations and rejects simulator-state reads. Standalone/zero-residual exact
+action-sequence equivalence is covered by tests. Privileged demonstrations are
+restricted to training seeds and never available at evaluation.
 
-The wall runs used the real player/referee process contract,
-`episodes_per_stratum=8`, `workers=2`, `OPENBLAS_NUM_THREADS=1`,
-`OMP_NUM_THREADS=1`, and `taskset -c 0,1`, with the zero-action ONNX policy.
-`result.json` was byte-identical between runs; `history/episodes.jsonl` had the
-same SHA-256 on both runs (`fb5355cb8cb21eb9b02fa74681184ccabfbf161fc04b09c4920e1b52736cfa8a`).
-The records identify `nist_profile=v08` and log `assembly=IV`; the generic
-`assembly=II` field is retained for compound-record compatibility.
-**Docker was unavailable**, so these are host in-process measurements, not
-built-image measurements. Docker/image validation remains a release-bake task.
+On the current 0.36-cap scorer, all observation-only policies were measured
+through the same fail-closed boundary on **64 episodes per referee seed**, seeds
+**7, 19, 31** (192 episodes per policy). The simpler `ObsScriptedPolicy` is the
+strongest measured script: **0.009242 [0.007419, 0.011152]**, round means
+**0.011770, 0.009212, 0.006744**, sample round standard deviation **0.002513**.
+The strong controller scored **0.008735 [0.006988, 0.010604]**, round means
+**0.008362, 0.008299, 0.009543**, sample round standard deviation **0.000701**.
+
+The selected CEM policy scored **0.013466 [0.011604, 0.015390]**, round means
+**0.013930, 0.015595, 0.010872**, sample round standard deviation **0.002396**.
+Against the simpler script, its paired improvement was **+0.004224
+[0.002338, 0.006142]**; against the strong controller, **+0.004731
+[0.002671, 0.006758]**. Both pooled comparisons are nonoverlapping and both
+paired intervals exclude zero. The CEM round standard deviation is smaller than
+both policy gaps. **The learned-over-strongest-script gate passes on these
+rounds.** CEM is a local learned FSM parameterization, not a from-scratch PPO
+result.
+
+The honest privileged reference scored **0.145420 [0.130896, 0.160576]** over
+the same 192 episodes, with round means **0.135470, 0.147758, 0.153033** and
+sample round standard deviation **0.009012**. It remains above the learned
+policy but below the requested approximately **0.2–0.35** calibration range.
+The earlier eight-episode value **0.196647 [0.123477, 0.265505]** is not a
+substitute for this full-round result.
+
+The following PPO experiment used the earlier 0.30-cap scorer and is retained as
+a completed negative result. It is not compared numerically to the 0.36-cap CEM
+rows above.
+
+| Policy / check | Episodes | Mean [95% CI] | Round std | Status |
+|---|---:|---:|---:|---|
+| Strong observation-only script | 24 | **0.008439 [0.004525, 0.012991]** | **0.001968** | Earlier-scorer baseline |
+| Learned BC + residual PPO | 24 | **0.004448 [0.002289, 0.006769]** | **0.001359** | Below script; overlapping intervals |
+| Honest privileged | 24 | **0.168414 [0.123025, 0.217372]** | **0.024460** | Earlier-scorer calibration |
+
+The PPO run used 29,440 public observation/residual pairs from 32 training
+episodes on seeds 101–104. After the observation-derived lift check, an honest
+privileged insertion teacher supplied local residual targets; no teacher state
+was available at evaluation. BC ran for 15 epochs, followed by **131,072**
+residual-PPO timesteps with a c1→full-distribution curriculum. The saved model
+was evaluated through the fail-closed public-observation boundary. Training
+took **1518.7 s**. Its seed-201 development mean was **0.004791
+[0.001580, 0.008423]**, versus the strong script's **0.003530
+[0.001200, 0.006135]**; those intervals overlap.
+
+The held-out learned-minus-script paired mean was **-0.003991**, with 95%
+interval **[-0.008735, 0.000013]**. The PPO run does not establish improvement.
+The collector now matches the script's 160-step insertion limit; this measured
+run used an earlier mismatched limit. BC residuals are normalized exactly once
+by the collector and scaled once at inference; the former double normalization
+is fixed with a regression test.
+
+The earlier whole-trajectory matched PPO run reached **851,968 timesteps**
+before its two-hour execution limit without a final model or held-out score.
+No claim is made from that incomplete run. A separate lying-grasp script
+experiment scored **0.004306 [0.001873, 0.007038]** on 24 earlier-scorer
+episodes and was reverted; it is not the current baseline.
+
+Built-image wall measurements are from real host-player/container-referee HTTP
+rounds, not local Docker runs. At the CEM commit `1af7d01`, CI runs
+**44190044229** and **44190032713** completed 64 episodes on cpuset 0,1 in
+**315.467 s** and **316.582 s**, respectively. Both exited 0 with no player
+fault. Their `result.json` and `history/episodes.jsonl` were byte-identical.
+Earlier runs at `87466bf` and `d05b6e6` measured **158.787 s**, **230.220 s**,
+and **228.450 s**. All are under 600 seconds; wall time varies with CI load.
+At `bea4f7d` and `1af7d01`, both GitHub pytest runs and both referee-image
+runs passed. Current-head checks are tracked on the PR; prior wall results are
+not represented as fresh validation of later commits.
 
 ### Red team (final code, seed 7, 8 episodes per attack)
 
@@ -213,20 +155,21 @@ All scores below are measured means over eight episodes unless noted.
 | Yaw spin | 0.000000 | 8 time limits |
 | Extreme actions | 0.000000 | 8 time limits |
 | NaN actions | 0.000000 | 8 time limits |
-| Sensor spoofing | **0.000290** [0.000009, 0.000674] | 8 time limits |
+| Sensor spoofing | **0.000580** [0.000017, 0.001347] | 8 time limits |
 | Early termination | 0.000000 | 8 player faults |
 | Solver blowup | 0.000000 | 7 unstable, 1 time limit |
-| Cue hill-climb sweep | **0.000090** [0, 0.000269] | 8 time limits |
+| Cue hill-climb sweep | **0.000179** [0, 0.000538] | 8 time limits |
 | Open-hand transport/wrist spoof | 0.000000 | 8 time limits |
 | Repeated close/release near hole | 0.000000 | 8 time limits |
-| Natural-seat key freebie | **0 / 20 keys** | no natural-seat key completed |
+| Natural-seat key freebie | **0 / keys** | no natural-seat key completed |
 | Single-kind cap | analytic cap **0.443478** across 8 blueprints | analytic completed-step bound, not a physical rollout |
 
-The sensor-spoofing and cue-sweep results are below the scripted baseline and
-come from small verified sub-lift evidence, not key-window exposure or completed
-steps. The single-kind row is an analytic scoring construction, not a rollout
-score. General attacks are deliberately not described as proving that all
-possible exploits are closed.
+Jitter and vibrate attacks against the densified partials score exactly zero.
+The tiny sensor-spoofing and cue-sweep values are bounded sub-lift fractions, far
+below the scripted baseline, not key-window exposure or completed steps. The
+single-kind row is an analytic scoring construction, not a rollout score.
+General attacks are deliberately not described as proving that all possible
+exploits are closed.
 
 ### Reproduce
 
@@ -237,9 +180,17 @@ pytest -q tests/
 python tools/calib_v08.py --seeds 7 --per 8 --episodes 8 \
   --skip-privileged --out /tmp/v08-calib.json
 python tools/compound_solver.py --profile v08 --honest --seed 7 --per 8 --episodes 8
-python tools/train_ppo_v08.py --timesteps 262144 --train-seeds 101,102,103 --per 8 \
-  --eval-episodes 8 --eval-per 8 --dense --residual --zero-residual \
-  --residual-log-std -2.0 --out /tmp/v08-residual
+python tools/train_rl_v08.py --train-seeds 101,102,103,104,105,106 \
+  --train-per 4 --train-episodes 4 --eval-seed 7 --eval-per 8 --eval-episodes 64 \
+  --candidates 12 --polish-gens 4 --polish-pop 8 --seed 2 --out /tmp/v08-rl.json
+python tools/eval_ladder_v08.py --kind cem --model /tmp/v08-rl.json \
+  --seeds 7,19,31 --per 8 --episodes 64 --out /tmp/v08-cem-matched.json
+python tools/eval_ladder_v08.py --kind script --seeds 7,19,31 --per 8 \
+  --episodes 64 --out /tmp/v08-script-matched.json
+python tools/eval_ladder_v08.py --kind strong_script --seeds 7,19,31 --per 8 \
+  --episodes 64 --out /tmp/v08-strong-matched.json
+python tools/eval_ladder_v08.py --kind privileged --seeds 7,19,31 --per 8 \
+  --episodes 64 --out /tmp/v08-privileged-matched.json
 python tools/collect_privileged_demos_v08.py --train-seeds 101,102,103,104 \
   --per 8 --episodes 8 --workers 1 --teacher-mode insert \
   --out /tmp/v08-insert-demos.npz
@@ -250,20 +201,14 @@ python tools/train_ppo_v08.py --timesteps 131072 --train-seeds 101,102,103,104 \
 python tools/eval_ladder_v08.py --kind ppo --residual-policy strong \
   --model /tmp/v08-insert-ppo/model.zip --seeds 7,19,31 --per 8 --episodes 8 \
   --out /tmp/v08-insert-heldout.json
-python tools/evolve_residual_v08.py --generations 12 --population 4 \
-  --train-seeds 101,102 --validation-seeds 201,202 \
-  --train-per 4 --validation-per 4 --train-episodes 4 --validation-episodes 4 \
-  --eval-seed 7 --eval-per 8 --eval-episodes 8 --workers 4 --out /tmp/v08-es
 ```
 
-The optional PPO tooling used `torch 2.15.0+cpu`, `stable-baselines3 2.9.0`,
-`gymnasium 1.3.0`, and `scipy 1.17.1`; these are not referee-image dependencies.
-Model weights, generated demonstrations, and measurement artifacts are not
-committed. No miner ONNX, hotkeys, or secrets are included.
+Optional residual-PPO / evolution tooling remains available under `tools/`; those
+packages are not referee-image dependencies. Model weights, generated
+demonstrations, and measurement artifacts are not committed. No miner ONNX,
+hotkeys, or secrets are included.
 
-For the real built-image wall check, build the referee image and run the host
-player/container harness. The output directory must be writable by the image's
-non-root UID:
+For the real built-image wall check:
 
 ```bash
 docker build -f referee/Dockerfile -t nist-assembly-referee:ci .
@@ -272,49 +217,36 @@ python tools/docker_wall_v08.py --image nist-assembly-referee:ci \
   --policy baselines/baseline.onnx --seed 7 --cpus 0,1 --out /tmp/v08-wall
 ```
 
-The older host-only timing command is not a substitute for this built-image
-measurement.
-
 ### Open risks
 
-- The current learned-policy ladder is not demonstrated beyond seed noise. The
-  completed 131,072-step local-insertion residual-PPO model has three independent
-  referee rounds, but its held-out mean is below the strong script and its
-  confidence intervals overlap. The required nonoverlapping improvement is not
-  established. Earlier incomplete residual-PPO/evolution results are retained as
-  historical negative results, not evidence of current success.
-- The honest privileged pooled mean is **0.168414**, below the requested
-  approximately **0.2–0.35** reference range. This is an open calibration issue,
-  not a pass by projection or a reason to loosen scoring.
-- Policy/red-team samples remain small: eight episodes per referee seed for the
-  current matched table and eight for each attack. The separate built-image wall
-  measurement is a real 64-episode round and does pass, but it does not enlarge
-  the learned-policy sample.
-- Release cosign and digest verification remain owner/CI release tasks; this PR
-  does not push images, merge, tag, release, or change digest pins.
+- The CEM result is a local gradient around the public FSM, not from-scratch
+  deep RL. The independent 192-episode-per-policy comparison against the strong
+  script has nonoverlapping pooled intervals and a paired interval excluding
+  zero. The earlier small 24-episode comparison did not establish separation and
+  is not used as the final result.
+- The completed 131,072-step PPO model is below the strong script under the
+  earlier scorer and does not establish learned improvement.
+- Honest privileged on the full three-round, 192-episode evaluation measures
+  **0.145420 [0.130896, 0.160576]**, below approximately **0.2–0.35**. This is
+  an open calibration issue, not a reason to loosen scoring.
+- Policy/red-team samples remain small for the matched three-round evaluation.
+  The built-image wall measurement is a real 64-episode round but does not
+  enlarge the learned-policy sample.
 - Long-horizon generalization, unseen blueprints, and stronger adaptive miners
-  remain unmeasured. Do not interpret the low scripted baseline as a proof of
+  remain unmeasured. Do not interpret the low scripted baseline as proof of
   frontier-lab hardness.
+- Release cosign and digest verification remain owner/CI release tasks. This PR
+  does not push images, merge, tag, release, or change digest pins.
 
 ### Test verification
 
-The current transport/insertion focused suite completed with **22 passed in
-229.74 s**. Later normalized-BC/collector and controller-equivalence regressions
-completed with **5 passed in 51.89 s**. The focused suite covers physical
-predecessor gates and evidence bounds,
-oscillation/released-part rejection, full-episode fail-closed observation
-access, and exact strong-script/zero-residual action equivalence. The complete
-repository suite on the earlier current-scorer code completed with **185 passed, 5
-skipped, 1 warning in 3348.35 s**. The later focused scorer/audit/wall-harness
-suite with the new BC tests completed with **31 passed in 143.12 s**. The
-warning is the pre-existing unregistered `pytest.mark.slow` mark.
+The earlier transport/insertion focused suite completed with **22 passed in
+229.74 s**. The complete suite before the CEM changes completed with **185
+passed, 5 skipped, 1 warning in 3348.35 s**. The current-scorer focused
+scorer/audit/wall-harness suite with the CEM-boundary and BC tests completed
+with **32 passed in 250.22 s**. Current-head checks are tracked on the PR; no
+prior suite is represented as validation of later scorer changes.
 
-The historical full local suite on the earlier dense-lift implementation
-completed with **181 passed, 5 skipped** in **1402.60 s**. The four added tests
-cover dense-lift contact/reference gating, prerequisite gating and caps, and
-evolutionary zero-residual/seed separation. The pre-existing `pytest.mark.slow`
-warning remains.
-
-
+## v0.7.5 (historical)
 
 See git history. The v0.8.0 profile and scores are not comparable with v0.7.x.

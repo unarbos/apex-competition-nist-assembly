@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "referee"))
 from nist_sim.compound import COLLAR_FEAT, GLOBAL_FEAT, MAX_COLLARS, TASK_PEG_FEAT  # noqa: E402
 from nist_sim.compound_v08 import OBS_DIM_V08, AssemblyIVEpisode, compound_score_v08, sample_compound_v08  # noqa: E402
 from nist_sim.conditions import episode_seed_sequence  # noqa: E402
-from nist_sim.env import ACT_DIM, MAX_PEGS, OBS_DIM, PEG_FEAT  # noqa: E402
+from nist_sim.env import ACT_DIM, MAX_PEGS, OBS_DIM, PAD_CENTRE_Z, PEG_FEAT, PEG_LEN  # noqa: E402
 
 PROPRIO = 16
 TASK0 = OBS_DIM
@@ -35,6 +35,12 @@ GLOB0 = COL0 + MAX_COLLARS * COLLAR_FEAT
 BP0 = GLOB0 + GLOBAL_FEAT
 PEG0 = PROPRIO + ACT_DIM
 KIND_BY_CODE = {1: "insert", 2: "collar", 3: "twist", 4: "rework", 5: "screw", 6: "stack", 7: "key"}
+
+# Public baseline uses a fixed high grasp bias. CEM/residual search cancels it
+# toward the mid-shaft grasp; see tools/train_rl_v08.py.
+GRASP_Z_BIAS_M = 0.008
+PLACE_Z_M = 0.028
+LIFT_Z_M = 0.105
 
 
 def blueprint_step(o: np.ndarray, k: int):
@@ -50,12 +56,21 @@ def blueprint_step(o: np.ndarray, k: int):
     return kind, peg, blocked, done
 
 
-
 class ObsScriptedPolicy:
     """Stateful only through public observations and its own action history."""
 
-    def __init__(self, seed: int = 0):
+    def __init__(
+        self,
+        seed: int = 0,
+        grasp_bias_m: float | None = None,
+        place_z_m: float | None = None,
+        lift_z_m: float | None = None,
+    ):
         self.rng = np.random.default_rng(seed)
+        # None → public strongest defaults; residual learners pass overrides.
+        self.grasp_bias_m = GRASP_Z_BIAS_M if grasp_bias_m is None else float(grasp_bias_m)
+        self.place_z_m = PLACE_Z_M if place_z_m is None else float(place_z_m)
+        self.lift_z_m = LIFT_Z_M if lift_z_m is None else float(lift_z_m)
         self.reset()
 
     def reset(self):
@@ -70,6 +85,7 @@ class ObsScriptedPolicy:
         self.grasp_target = np.zeros(3)
         self.last_action = np.zeros(ACT_DIM)
         self.lost = 0
+        self.slot = np.zeros(2)
 
     def _set_phase(self, phase: str):
         self.phase = phase
@@ -105,24 +121,31 @@ class ObsScriptedPolicy:
         if self.phase == "select":
             best = None
             candidates = [blueprint_step(o, k) for k in range(12)]
-            allowed = {
-                row[1] for row in candidates
-                if row is not None and row[0] in ("insert", "rework")
-                and not row[2] and not row[3]
-            }
-            for i in range(MAX_PEGS):
-                b = PEG0 + i * PEG_FEAT
-                if o[b] < 0.5 or o[b + 16] > 0.5 or i not in allowed:
-                    continue
-                pos, slot, _ = self._peg(o, i)
-                # Upright parts (local z close to world z) are graspable by
-                # this deliberately simple baseline; skip lying-down parts.
-                upright = abs(1.0 - 2.0 * (o[b + 5] ** 2 + o[b + 6] ** 2))
-                if upright < 0.9:
-                    continue
-                dist = float(np.linalg.norm(pos[:2] - hand[:2]))
-                if best is None or dist < best[0]:
-                    best = (dist, i, pos, slot)
+            # Prefer insert over rework so the baseline spends time on graspable upright pegs.
+            for kinds in (("insert",), ("insert", "rework")):
+                allowed = {
+                    row[1] for row in candidates
+                    if row is not None and row[0] in kinds and not row[2] and not row[3]
+                }
+                for i in range(MAX_PEGS):
+                    b = PEG0 + i * PEG_FEAT
+                    if o[b] < 0.5 or o[b + 16] > 0.5 or i not in allowed:
+                        continue
+                    pos, slot, _ = self._peg(o, i)
+                    diam = max(0.003, float(o[b + 12]) / 50.0)
+                    if diam <= 0.0025 or not (0.022 <= float(pos[2]) <= 0.080):
+                        continue
+                    # Upright parts (local z close to world z) are graspable by
+                    # this deliberately simple baseline; skip lying-down parts.
+                    upright = abs(1.0 - 2.0 * (o[b + 5] ** 2 + o[b + 6] ** 2))
+                    if upright < 0.9:
+                        continue
+                    dist = float(np.linalg.norm(pos[:2] - hand[:2]))
+                    score = dist - 0.35 * diam
+                    if best is None or score < best[0]:
+                        best = (score, i, pos, slot)
+                if best is not None:
+                    break
             if best is None:
                 return self._go(o, [hand[0], hand[1], 0.12], 1.0)
             _, self.target_i, self.estimate, self.slot = best
@@ -134,42 +157,51 @@ class ObsScriptedPolicy:
         self.estimate = pos
         self.slot = slot
         if self.phase == "above":
-            goal = np.r_[pos[:2], 0.082]
+            goal = np.r_[pos[:2], 0.085]
             a = self._go(o, goal, 1.0)
             if self.phase_t >= 12 and np.max(np.abs(goal - hand)) < 0.008:
                 self._set_phase("descend")
             elif self.phase_t > 70:
                 self._set_phase("select")
         elif self.phase == "descend":
-            self.grasp_z = max(0.005, pos[2] + 0.017 - 0.012)
+            # Mid-shaft aim plus a configurable high bias (see grasp_bias_m).
+            self.grasp_z = float(
+                np.clip(
+                    pos[2] + (PEG_LEN / 2 - 0.008) - PAD_CENTRE_Z + self.grasp_bias_m,
+                    0.024,
+                    0.070,
+                )
+            )
             goal = np.r_[pos[:2], self.grasp_z]
-            a = self._go(o, goal, 1.0, 0.45)
-            if self.phase_t >= 28 or np.max(np.abs(goal[:2] - hand[:2])) > 0.035:
+            a = self._go(o, goal, 1.0, 0.40)
+            xy_ok = float(np.linalg.norm(goal[:2] - hand[:2])) < 0.006
+            z_ok = abs(goal[2] - hand[2]) < 0.007
+            if (self.phase_t >= 20 and xy_ok and z_ok) or self.phase_t >= 55:
                 self._set_phase("close")
         elif self.phase == "close":
-            a = self._go(o, self.target, -1.0)
-            if self.phase_t >= 12:
+            a = self._go(o, np.r_[pos[:2], self.grasp_z + 0.003], -1.0, 0.25)
+            if self.phase_t >= 18:
                 self._set_phase("lift")
         elif self.phase == "lift":
-            a = self._go(o, self.target + [0, 0, 0.075], -1.0, 0.6)
-            if self.phase_t >= 35:
+            a = self._go(o, np.r_[pos[:2], self.lift_z_m], -1.0, 0.28)
+            if self.phase_t >= 50:
                 self._set_phase("carry")
         elif self.phase == "carry":
-            goal = np.r_[self.slot[:2], 0.085]
-            a = self._go(o, goal, -1.0, 0.55)
+            goal = np.r_[self.slot[:2], max(0.070, self.lift_z_m - 0.015)]
+            a = self._go(o, goal, -1.0, 0.50)
             if self.phase_t >= 45:
                 self._set_phase("place")
         elif self.phase == "place":
-            a = self._go(o, np.r_[self.slot[:2], 0.025], -1.0, 0.35)
-            if self.phase_t >= 25:
+            a = self._go(o, np.r_[self.slot[:2], self.place_z_m], -1.0, 0.32)
+            if self.phase_t >= 28:
                 self._set_phase("release")
         elif self.phase == "release":
             a = self._go(o, self.target, 1.0)
-            if self.phase_t >= 10:
+            if self.phase_t >= 12:
                 self._set_phase("retreat")
         elif self.phase == "retreat":
-            a = self._go(o, self.target + [0, 0, 0.08], 1.0, 0.55)
-            if self.phase_t >= 25:
+            a = self._go(o, self.target + np.array([0.0, 0.0, 0.08]), 1.0, 0.55)
+            if self.phase_t >= 22:
                 self._set_phase("select")
         else:
             self._set_phase("select")

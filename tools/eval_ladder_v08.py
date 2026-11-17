@@ -39,6 +39,14 @@ def run(seed, per, episodes, kind, model_path="", residual_scale=0.35, residual_
     if kind == "ppo":
         from stable_baselines3 import PPO
         model = PPO.load(model_path, device="cpu")
+    elif kind == "cem":
+        from train_rl_v08 import ResidualPolicy
+        if model_path:
+            artifact = json.loads(Path(model_path).read_text())
+            theta = np.asarray(artifact["theta"], dtype=np.float64)
+        else:
+            from train_rl_v08 import PUBLIC_THETA
+            theta = PUBLIC_THETA.copy()
     scores, rows = [], []
     t0 = time.monotonic()
     for i in range(min(episodes, len(conds))):
@@ -65,11 +73,13 @@ def run(seed, per, episodes, kind, model_path="", residual_scale=0.35, residual_
                         strong.post_step(False, obs, action=action)
             else:
                 base = ObsScriptedPolicy(int(ss.generate_state(1)[0])) if kind in ("script", "ppo") else None
+                if kind == "cem":
+                    base = ResidualPolicy(int(ss.generate_state(1)[0]), theta)
                 while not boundary.done:
                     obs = boundary.observe(r2)
                     if kind == "zero":
                         action = np.zeros(5)
-                    elif kind == "script":
+                    elif kind in ("script", "cem"):
                         action = base.act(obs)
                     else:
                         residual, _ = model.predict(obs, deterministic=True)
@@ -87,8 +97,8 @@ def main():
     ap.add_argument("--seeds", default="7,19,31")
     ap.add_argument("--per", type=int, default=8)
     ap.add_argument("--episodes", type=int, default=8)
-    ap.add_argument("--kind", choices=("zero", "script", "strong_script", "ppo", "privileged"), required=True)
-    ap.add_argument("--model", default="")
+    ap.add_argument("--kind", choices=("zero", "script", "strong_script", "ppo", "cem", "privileged"), required=True)
+    ap.add_argument("--model", default="", help="PPO model or CEM JSON with theta")
     ap.add_argument("--residual-scale", type=float, default=0.35)
     ap.add_argument("--residual-policy", choices=("script", "strong"), default="script")
     ap.add_argument("--out", required=True)
