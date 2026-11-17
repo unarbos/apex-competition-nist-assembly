@@ -70,9 +70,13 @@ than an observation-only policy.
 
 The current red-team run at seed 7 measured **0.000000** for the new open-hand
 transport/wrist-spoof and repeated close/release-near-hole attacks. The complete
-attack table below includes those results. The current complete-suite and
-built-image 64-episode wall results are recorded in the final gate section once
-available; the older in-process timing is not a substitute for the built image.
+attack table below includes those results. The complete-suite result is recorded
+below. The **built referee image** completed a real 64-episode round over the
+host-player/container-referee HTTP contract in **158.787 s** on cpuset **0,1**:
+container exit **0**, all **64** episodes complete, `terminal_reason=scored`,
+and no player fault. This passes the **<600 s** built-image gate. It is not an
+in-process timing. The CI artifact is `referee-wall-64`, artifact id
+**14366028188**, from run **44167711787** at commit `87466bf`.
 The wall harness itself has **2 passing local tests** using the real ONNX player
 and a Docker stub: complete-result parsing and timeout/process cleanup. These
 are orchestration tests, not built-image wall measurements.
@@ -193,27 +197,36 @@ The optional PPO tooling used `torch 2.15.0+cpu`, `stable-baselines3 2.9.0`,
 Model weights, generated demonstrations, and measurement artifacts are not
 committed. No miner ONNX, hotkeys, or secrets are included.
 
-For the real wall check, run the following twice on the same two CPUs and
-compare `result.json` and `history/episodes.jsonl`:
+For the real built-image wall check, build the referee image and run the host
+player/container harness. The output directory must be writable by the image's
+non-root UID:
 
 ```bash
-taskset -c 0,1 python tools/local_run.py --policy baselines/baseline.onnx \
-  --seed 7 --input fixtures/input.json --out /tmp/v08-wall \
-  --override '{"episodes_per_stratum":8,"workers":2}'
+docker build -f referee/Dockerfile -t nist-assembly-referee:ci .
+mkdir -p /tmp/v08-wall && chmod 0777 /tmp/v08-wall
+python tools/docker_wall_v08.py --image nist-assembly-referee:ci \
+  --policy baselines/baseline.onnx --seed 7 --cpus 0,1 --out /tmp/v08-wall
 ```
+
+The older host-only timing command is not a substitute for this built-image
+measurement.
 
 ### Open risks
 
-- The RL ladder is not demonstrated beyond seed noise. The matched residual-PPO
-  mean is below scripted on eight held-out episodes, with overlapping intervals.
-  Accept-only evolution found no candidate that improved both disjoint
-  training/validation means, so it returned the scripted incumbent unchanged.
-- The policy/red-team tables use eight-episode slices, not the complete 64-episode
-  policy ladder or additional held-out seeds. The wall gate itself was measured
-  on a real 64-episode run and repeated.
-- No Docker daemon was available locally. Image-level wall, cosign, and release
-  digest verification must be performed by the owner/CI without changing pins in
-  this PR.
+- The current learned-policy ladder is not demonstrated beyond seed noise. The
+  strong script and privileged reference have three independent referee rounds,
+  but a completed learned model must still beat the strong script with
+  nonoverlapping held-out intervals. Earlier residual-PPO/evolution results are
+  retained below as historical negative results, not evidence of current success.
+- The honest privileged pooled mean is **0.168414**, below the requested
+  approximately **0.2–0.35** reference range. This is an open calibration issue,
+  not a pass by projection or a reason to loosen scoring.
+- Policy/red-team samples remain small: eight episodes per referee seed for the
+  current matched table and eight for each attack. The separate built-image wall
+  measurement is a real 64-episode round and does pass, but it does not enlarge
+  the learned-policy sample.
+- Release cosign and digest verification remain owner/CI release tasks; this PR
+  does not push images, merge, tag, release, or change digest pins.
 - Long-horizon generalization, unseen blueprints, and stronger adaptive miners
   remain unmeasured. Do not interpret the low scripted baseline as a proof of
   frontier-lab hardness.
