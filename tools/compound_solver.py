@@ -98,11 +98,13 @@ def _nudge_seat_peg(ep: CompoundEpisode, i: int, *, min_prog: float = 0.08) -> b
 
     Proves the normal seat predicate can fire; miners never get true-state teleports.
     """
-    # Find insert/rework step progress for this peg as engagement evidence.
+    # Find insert/rework engagement evidence. v0.8 deliberately leaves the
+    # legacy scalar progress array at zero; its physical milestones replace it.
     engaged = False
     for sk, ss in enumerate(ep.cs.steps):
         if ss.kind in ("insert", "rework") and ss.peg == i:
-            if float(ep.step_progress[sk]) >= min_prog or ep._gripper_touching(ep.peg_body[i]):
+            evidence = getattr(ep, "_milestones_v08", [{} for _ in ep.cs.steps])[sk]
+            if float(ep.step_progress[sk]) >= min_prog or evidence.get("lift", False) or ep._gripper_touching(ep.peg_body[i]):
                 engaged = True
             break
     if not engaged:
@@ -147,6 +149,7 @@ def _aim_key_hand(ep: CompoundEpisode, yaw: float) -> None:
     on the next ``step`` (qpos-only writes are overwritten by the controller).
     """
     y = float(np.clip(yaw, -YAW_LIMIT + 0.05, YAW_LIMIT - 0.05))
+    ep._touching_bodies_cache = None
     ep.data.qpos[3] = y
     if hasattr(ep, "target") and len(ep.target) > 3:
         ep.target[3] = y
@@ -190,6 +193,7 @@ def _finish_key_actions(ep: CompoundEpisode, k: int) -> None:
 
     def _park_clear(dx: float = 0.032, dz: float = 0.088) -> None:
         """Open-grip park clear of the peg; sync hand target so the servo holds pose."""
+        ep._touching_bodies_cache = None
         ep.data.qpos[0] = hx + dx
         ep.data.qpos[1] = hy + dx
         ep.data.qpos[2] = dz

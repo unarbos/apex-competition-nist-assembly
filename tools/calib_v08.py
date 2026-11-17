@@ -32,13 +32,27 @@ from nist_sim.compound_v08 import (  # noqa: E402
 )
 from nist_sim.conditions import episode_seed_sequence  # noqa: E402
 from compound_solver import solve_compound  # noqa: E402
-from obs_scripted_v08 import act_from_obs  # noqa: E402
+from obs_scripted_v08 import ObsScriptedPolicy  # noqa: E402
+
+
+def _summary(scores, *, bootstrap: int = 10000) -> dict:
+    arr = np.asarray(scores, dtype=np.float64)
+    if len(arr) == 0:
+        return {"n": 0, "mean": 0.0, "ci95": [0.0, 0.0]}
+    rng = np.random.default_rng(20261117)
+    means = np.mean(rng.choice(arr, (bootstrap, len(arr)), replace=True), axis=1)
+    return {
+        "n": len(arr), "mean": float(np.mean(arr)),
+        "ci95": [float(x) for x in np.quantile(means, [0.025, 0.975])],
+        "ci_method": f"episode bootstrap, {bootstrap} resamples, seed 20261117",
+    }
 
 
 def _run_policy(seed: int, per: int, episodes: int, policy_fn) -> dict:
     _, conds = sample_compound_v08(seed, per, "live")
     scores = []
-    t0 = time.time()
+    rows = []
+    t0 = time.monotonic()
     for i in range(min(len(conds), episodes)):
         ss = episode_seed_sequence(seed, i)
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
@@ -49,7 +63,8 @@ def _run_policy(seed: int, per: int, episodes: int, policy_fn) -> dict:
             a = policy_fn(ep, o, noise, ss, i)
             ep.step(np.asarray(a, dtype=np.float64))
         scores.append(float(compound_score_v08(ep)["score"]))
-    return {"mean": float(np.mean(scores)), "scores": scores, "wall_s": time.time() - t0}
+        rows.append({"episode": i, "score": scores[-1], "terminal_reason": ep.terminal_reason, "steps": ep.steps})
+    return {**_summary(scores), "scores": scores, "episodes": rows, "wall_s": time.monotonic() - t0}
 
 
 def zero_policy(ep, o, noise, ss, i):
@@ -62,21 +77,25 @@ def random_policy(ep, o, noise, ss, i):
 
 
 def scripted_policy(ep, o, noise, ss, i):
-    rng = np.random.default_rng(ss.spawn(1)[0])
-    return act_from_obs(o, rng)
+    if ep.steps == 0:
+        scripted_policy._controllers[i] = ObsScriptedPolicy(int(ss.generate_state(1)[0]))
+    return scripted_policy._controllers[i].act(o)
+
+
+scripted_policy._controllers = {}
 
 
 def privileged_run(seed: int, per: int, episodes: int, *, honest: bool) -> dict:
     _, conds = sample_compound_v08(seed, per, "live")
     scores = []
-    t0 = time.time()
+    t0 = time.monotonic()
     for i in range(min(len(conds), episodes)):
         ss = episode_seed_sequence(seed, i)
         r1, _ = (np.random.default_rng(s) for s in ss.spawn(2))
         ep = AssemblyIVEpisode(conds[i], r1)
         r = solve_compound(ep, oracle=not honest)
         scores.append(float(r["score"]))
-    return {"mean": float(np.mean(scores)), "scores": scores, "wall_s": time.time() - t0}
+    return {**_summary(scores), "scores": scores, "wall_s": time.monotonic() - t0}
 
 
 def red_team(seed: int, per: int, episodes: int = 16) -> list[dict]:
@@ -114,20 +133,46 @@ def red_team(seed: int, per: int, episodes: int = 16) -> list[dict]:
         a[4] = -1.0
         return a
 
+    def nan_actions(ep, o, noise, ss, i):
+        return np.array([np.nan, 0.0, 0.0, 0.0, 0.0])
+
+    def sensor_spoofing(ep, o, noise, ss, i):
+        # Adversary can falsify its own sensor estimate, but receives no hidden
+        # state or reward. A blind target-directed spoof should not earn credit.
+        return np.array([0.65 * np.sin(0.09 * ep.steps), 0.65 * np.cos(0.11 * ep.steps), -0.4, 0.5, -1.0])
+
+    def early_termination(ep, o, noise, ss, i):
+        if ep.steps == 20:
+            ep.fail("player_fault")
+        return np.zeros(5)
+
+    def solver_blowup(ep, o, noise, ss, i):
+        if ep.steps == 5:
+            ep.data.qvel[ep.peg_vadr[0]] = 1e6
+        return np.array([1e100, -1e100, 1e100, -1e100, 1e100])
+
     for name, fn in [
         ("jitter", jitter),
         ("vibrate_parts", vibrate),
         ("slam_down", slam),
         ("yaw_spin", spin),
         ("extreme_actions", extreme),
+        ("nan_actions", nan_actions),
+        ("sensor_spoofing", sensor_spoofing),
+        ("early_termination", early_termination),
+        ("solver_blowup", solver_blowup),
         ("cue_hillclimb_sweep", cue_hillclimb_sweep),
     ]:
         r = _run_policy(seed, per, episodes, fn)
-        strategies.append({"name": name, "mean": r["mean"], "wall_s": r["wall_s"], "n": len(r["scores"])})
+        strategies.append({
+            "name": name, "mean": r["mean"], "ci95": r["ci95"], "wall_s": r["wall_s"], "n": len(r["scores"]),
+            "terminal_reasons": {reason: sum(row["terminal_reason"] == reason for row in r["episodes"]) for reason in sorted({row["terminal_reason"] for row in r["episodes"]})},
+        })
 
     # Privileged seat-at-symmetry freebie attack (audit hole class 2).
     strategies.append(red_team_natural_seat_freebie(seed, per, episodes))
-    # Single-kind dominance probe (audit hole class 3) — analytic over sampled graphs.
+    # Single-kind cap is an analytic construction, not a physical rollout. It
+    # deliberately isolates the equal-weight formula and is labelled as such.
     strategies.append(red_team_single_kind_cap(seed, per, episodes))
     return strategies
 
@@ -187,6 +232,7 @@ def red_team_single_kind_cap(seed: int, per: int, episodes: int) -> dict:
         ss = episode_seed_sequence(seed, i)
         r1, _ = (np.random.default_rng(s) for s in ss.spawn(2))
         ep = AssemblyIVEpisode(conds[i], r1)
+        ep._action_earned_v08 = True  # analytic completed-step bound, not reset credit
         n = len(ep.cs.steps)
         for kind in ("key", "insert", "stack", "rework", "screw", "collar", "twist"):
             for k, s in enumerate(ep.cs.steps):
@@ -258,7 +304,14 @@ def main() -> int:
     for s in seeds:
         zero[s] = _run_policy(s, a.per, eps, zero_policy)
         print(f"zero seed={s} mean={zero[s]['mean']:.4f} wall={zero[s]['wall_s']:.1f}s", flush=True)
-    report["gates"]["zero"] = {str(k): {"mean": v["mean"], "wall_s": v["wall_s"]} for k, v in zero.items()}
+    report["gates"]["zero"] = {str(k): {key: v[key] for key in ("mean", "ci95", "wall_s", "scores")} for k, v in zero.items()}
+
+    # Uniform random actions on exactly the same sampled episodes.
+    random = {}
+    for s in seeds:
+        random[s] = _run_policy(s, a.per, eps, random_policy)
+        print(f"random seed={s} mean={random[s]['mean']:.4f} wall={random[s]['wall_s']:.1f}s", flush=True)
+    report["gates"]["random"] = {str(k): {key: v[key] for key in ("mean", "ci95", "wall_s", "scores")} for k, v in random.items()}
 
     # Scripted
     scripted = {}
@@ -266,7 +319,7 @@ def main() -> int:
         scripted[s] = _run_policy(s, a.per, eps, scripted_policy)
         print(f"scripted seed={s} mean={scripted[s]['mean']:.4f} wall={scripted[s]['wall_s']:.1f}s", flush=True)
     report["gates"]["obs_scripted"] = {
-        str(k): {"mean": v["mean"], "wall_s": v["wall_s"]} for k, v in scripted.items()
+        str(k): {key: v[key] for key in ("mean", "ci95", "wall_s", "scores")} for k, v in scripted.items()
     }
 
     # Privileged honest
@@ -276,17 +329,17 @@ def main() -> int:
             priv[s] = privileged_run(s, a.per, eps, honest=True)
             print(f"privileged_honest seed={s} mean={priv[s]['mean']:.4f} wall={priv[s]['wall_s']:.1f}s", flush=True)
         report["gates"]["privileged_honest"] = {
-            str(k): {"mean": v["mean"], "wall_s": v["wall_s"]} for k, v in priv.items()
+            str(k): {key: v[key] for key in ("mean", "ci95", "wall_s", "scores")} for k, v in priv.items()
         }
 
     # Determinism
-    d1 = _run_policy(seeds[0], a.per, min(8, eps), zero_policy)
-    d2 = _run_policy(seeds[0], a.per, min(8, eps), zero_policy)
-    report["gates"]["determinism_zero"] = {
+    d1 = _run_policy(seeds[0], a.per, min(8, eps), scripted_policy)
+    d2 = _run_policy(seeds[0], a.per, min(8, eps), scripted_policy)
+    report["gates"]["determinism_scripted"] = {
         "match": d1["scores"] == d2["scores"],
         "scores": d1["scores"],
     }
-    print(f"determinism match={report['gates']['determinism_zero']['match']}", flush=True)
+    print(f"determinism match={report['gates']['determinism_scripted']['match']}", flush=True)
 
     if not a.skip_redteam:
         rt = red_team(seeds[0], a.per, min(16, eps))

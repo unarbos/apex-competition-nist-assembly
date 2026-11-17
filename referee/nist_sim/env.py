@@ -405,6 +405,7 @@ class Episode:
         self.grip_bodies = {
             mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, n) for n in ("hand", "fl", "fr")
         }
+        self._touching_bodies_cache = None
         self.slot_xy = [
             slot_world_xy(cond.board_xy, cond.board_yaw, peg.spec) for peg in cond.pegs
         ]
@@ -480,6 +481,7 @@ class Episode:
 
     # ---- hand / part helpers -------------------------------------------------
     def _set_hand(self, xyz, yaw, open_frac):
+        self._touching_bodies_cache = None
         d = self.data
         d.qpos[0:3] = xyz
         d.qpos[3] = yaw
@@ -488,6 +490,7 @@ class Episode:
         self.grip = open_frac * MAX_OPEN
 
     def _set_free(self, qadr: int, vadr: int, xyz, quat):
+        self._touching_bodies_cache = None
         self.data.qpos[qadr : qadr + 3] = xyz
         self.data.qpos[qadr + 3 : qadr + 7] = quat
         self.data.qvel[vadr : vadr + 6] = 0
@@ -773,13 +776,17 @@ class Episode:
         return abs(1.0 - 2.0 * (x * x + y * y)) >= math.cos(MAX_SEAT_TILT)
 
     def _gripper_touching(self, body_id: int) -> bool:
-        m, d = self.model, self.data
-        for i in range(d.ncon):
-            con = d.contact[i]
-            b1, b2 = m.geom_bodyid[con.geom1], m.geom_bodyid[con.geom2]
-            if body_id in (b1, b2) and (b1 in self.grip_bodies or b2 in self.grip_bodies):
-                return True
-        return False
+        if self._touching_bodies_cache is None:
+            m, d = self.model, self.data
+            touching = set()
+            for i in range(d.ncon):
+                con = d.contact[i]
+                b1, b2 = m.geom_bodyid[con.geom1], m.geom_bodyid[con.geom2]
+                if b1 in self.grip_bodies or b2 in self.grip_bodies:
+                    touching.add(int(b1))
+                    touching.add(int(b2))
+            self._touching_bodies_cache = touching
+        return int(body_id) in self._touching_bodies_cache
 
     def _peg_seated(self, i: int) -> bool:
         ppos, pquat = self.peg_pose(i)
@@ -999,6 +1006,7 @@ class Episode:
     def step(self, action: np.ndarray) -> None:
         if self.done:
             return
+        self._touching_bodies_cache = None
         a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
         if self.action_quant > 0.0:
             a = _profile.quantize_action(a, self.action_quant)

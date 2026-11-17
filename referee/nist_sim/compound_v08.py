@@ -6,10 +6,11 @@ Hard reset vs v0.7.x. Design goals (Macrocosmos / crux + owner brief):
 - Randomized geometry, tolerances, and dynamics (mass / friction / gain / latency).
 - Partial observability: blueprint structure is published; answer-leaking cues are not.
   No key closeness, wrist detent, or retarget pulse. Absolute key yaw stays hidden.
-- Exploit-resistant scoring: equal per-step weight; credit only for physically verified
-  end states that survive an end-of-episode perturbation; unfinished frontier progress
-  is small and monotone so a learnable gradient remains; ceiling of 1.0 is essentially
-  unreachable.
+- Exploit-resistant scoring: equal per-step weight; completed credit requires a
+  physically verified end state that survives an end-of-episode perturbation.
+  Unfinished steps have three small, action-earned physical milestones (lift,
+  target alignment, stable release), with no credit for reset-only states.
+  Ceiling of 1.0 is essentially unreachable.
 - Closes the v0.7.5 hole class: slot-aligned key freebies, D-flat auto-arm, and cue
   hill-climbs that completed keys without a real index search.
 
@@ -21,6 +22,7 @@ Eval cost stays sim-horizon bounded (``MAX_HORIZON_V08``) for the ~600 s / 64-ep
 
 from __future__ import annotations
 
+import copy
 import math
 
 import mujoco
@@ -30,7 +32,9 @@ from . import conditions as C
 from . import profile as _profile
 from .compound import (
     COLLAR_FEAT,
+    COLLAR_H,
     COLLAR_MAX_PEG_OUTER,
+    COLLAR_SEAT_XY,
     COLLAR_T,
     GLOBAL_FEAT,
     LYING_EXTRA,
@@ -57,12 +61,17 @@ from .compound_v07 import (
     REWORK_EXTRA,
     SCREW_TARGET,
     STACK_INTERFERENCE,
+    STACK_SEAT_XY,
     AssemblyIIIEpisode,
     _KEY_YAW_REACH,
 )
 from .conditions import EpisodeConditions, sample_episodes
 from .env import (
+    BLOCK_H,
     MAX_PEGS,
+    MAX_OPEN,
+    PEG_LEN,
+    SUBSTEPS,
 )
 
 # ---- vocabulary / scoring -----------------------------------------------------------------------
@@ -79,10 +88,20 @@ STEP_BUDGET_V08 = {
     "key": 120,
 }
 MAX_HORIZON_V08 = 920
-# Unfinished frontier progress cap (smooth gradient; keeps scripted scores near 0).
-PARTIAL_CAP_V08 = 0.18
+# Bounded, action-earned milestones on an unfinished step. Full completion still
+# requires the end-state and perturbation checks below. These are fractions of a step,
+# not additional reward on top of a completed step.
+LIFT_CREDIT_V08 = 0.06
+ALIGN_CREDIT_V08 = 0.06
+STABLE_CREDIT_V08 = 0.06
+PARTIAL_CAP_V08 = LIFT_CREDIT_V08 + ALIGN_CREDIT_V08 + STABLE_CREDIT_V08
+PARTIAL_WEIGHTS_V08 = {"lift": LIFT_CREDIT_V08, "align": ALIGN_CREDIT_V08, "stable": STABLE_CREDIT_V08}
+LIFT_CLEARANCE_V08 = 0.008  # part bottom above its support plane, in metres
+GRASP_MIN_FRAMES_V08 = 2  # reject a single-frame contact transient
+POSE_TOL_SCALE_V08 = 2.0  # near-target alignment is deliberately not a seat
+STABLE_MIN_FRAMES_V08 = 8  # final 8 of 12 perturbation-settle frames
 # Out-of-order completed steps earn almost nothing (dependency order matters).
-OOO_CREDIT_V08 = 0.05
+OOO_CREDIT_V08 = 0.03
 # End-state done credit floor/ceiling before precision × stability.
 DONE_BASE_V08 = 0.80
 DONE_TIME_V08 = 0.20
@@ -140,7 +159,8 @@ TIER_CFG_V08 = {
     ),
 }
 # Stronger perception noise than v0.7 (still secondary to graph/dynamics hardness).
-NOISE_SCALE_V08 = dict(slot_bias=0.85, peg_delta=0.80, glitch=0.75, drift=0.80)
+# Drift retains the inherited easy-tier cap: the v0.8 public range itself is wider.
+NOISE_SCALE_V08 = dict(slot_bias=0.85, peg_delta=0.80, glitch=0.75, drift=0.625)
 # Dynamics event mix: emphasize physics identity changes over cue-facing retargets.
 EVENT_WEIGHTS_V08 = np.array(
     # friction, gain, mass, delay, rebias, shove, swap_bias, misseat,
@@ -182,7 +202,55 @@ def _harden_noise_v08(cond: EpisodeConditions) -> None:
     cond.clutter_bias_list = [(x * s["slot_bias"], y * s["slot_bias"]) for x, y in cond.clutter_bias_list]
     cond.peg_bias_delta_list = [(x * s["peg_delta"], y * s["peg_delta"]) for x, y in cond.peg_bias_delta_list]
     cond.glitch_rate *= s["glitch"]
+    # Keep the v0.5 tier invariant: easy drift <= half the global range. The
+    # global CI suite intentionally samples raw conditions as well as v08 graphs.
+    # Preserve the easy-tier invariant even when LHS draw × tier scale is 0.8.
     cond.bias_drift *= s["drift"]
+
+
+def _harden_starts_v08(cond: EpisodeConditions) -> None:
+    """No held, near-hole, or correct-hole part at reset.
+
+    Regenerate those starts through the normal loose/lying/tray sampler and then
+    revalidate every peg against the actual slot geometry. This does not weaken
+    v0.5's easy-tier distribution: that historical distribution is covered by
+    ``tests/test_conditions.py``; v0.8 deliberately has no free-start stratum.
+    """
+    loose_w = np.array([0.68, 0.24, 0.08, 0.0, 0.0])
+    for i, p in enumerate(cond.pegs):
+        if p.start_type not in ("grasped", "near_hole"):
+            continue
+        fresh = C._draw_peg_starts_with_weights(
+            np.random.default_rng(np.random.SeedSequence([
+                0x53544152, i, p.slot, len(cond.pegs),
+            ])),
+            [p.slot], cond.slots, loose_w,
+        )[0]
+        p.start_type = fresh.start_type
+        p.offset_xy = fresh.offset_xy
+        p.height = fresh.height
+        p.yaw_err = fresh.yaw_err
+    # Independent geometry check (the sampler can make clearance tradeoffs in
+    # dense boards). Move any too-close start onto a known clear grid cell.
+    rng = np.random.default_rng(np.random.SeedSequence([
+        0x464c4f4f, len(cond.pegs), len(cond.slots),
+    ]))
+    for p in cond.pegs:
+        if p.start_type not in ("loose", "tray", "lying"):
+            raise RuntimeError("v08 free-start sampler returned a privileged start")
+        if str(p.drawn_start_type) in ("grasped", "near_hole"):
+            p.drawn_start_type = p.start_type  # reflect the effective reset layout
+        need = 2.0 * p.spec.outer_radius() + C.LAYOUT_WALL + 0.006
+        if math.hypot(*p.offset_xy) >= need:
+            continue
+        for _try in range(256):
+            off = (float(rng.uniform(-0.15, 0.15)), float(rng.uniform(-0.12, 0.12)))
+            if C._start_clear(p.spec.x + off[0], p.spec.y + off[1], p.spec.outer_radius(), cond.slots, 0.006):
+                p.offset_xy = off
+                p.height = 0.0003 if p.start_type != "tray" else p.height
+                break
+        else:
+            raise RuntimeError("v08 could not find an interaction-required peg spawn")
 
 
 def _stretch_dynamics_v08(rng: np.random.Generator, cond: EpisodeConditions) -> None:
@@ -263,8 +331,10 @@ def sample_key_yaw_v08(rng: np.random.Generator, cond: EpisodeConditions, peg_i:
 def make_compound_v08(rng: np.random.Generator, cond: EpisodeConditions, tier: str) -> CompoundSpec:
     cfg = TIER_CFG_V08[tier]
     _harden_noise_v08(cond)
+    _harden_starts_v08(cond)
     _stretch_dynamics_v08(rng, cond)
     _extend_pegs(rng, cond, cfg["extra_pegs"])
+    _harden_starts_v08(cond)  # extra pegs must obey the same no-free-start rule
     K = cond.n_pegs
     W = int(rng.integers(cfg["waves"][0], cfg["waves"][1] + 1))
     W = max(1, min(W, K))
@@ -515,12 +585,101 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
     """v0.8 episode: anti-aligned keys, no answer cues, end-state + perturbation scoring hooks."""
 
     def __init__(self, cond: EpisodeConditions, rng: np.random.Generator):
+        # Parent spawn fallbacks and dynamics events mutate conditions. Keep
+        # sampled round definitions immutable across workers and repeat evals.
+        cond = copy.deepcopy(cond)
         super().__init__(cond, rng)
         self._stability_ok = [True] * len(cond.compound.steps)
         self._precision = [1.0] * len(cond.compound.steps)
         self._finalized = False
+        self._milestones_v08 = [dict(lift=False, align=False, stable=False) for _ in cond.compound.steps]
+        self._grasp_run_v08 = {}
+        # Only post-action states may earn progress; the reset state is never a baseline.
+        self._action_earned_v08 = False
         # Patch tier cfg lookups used by parent retarget helpers.
         self._tier_cfg_override = TIER_CFG_V08
+
+    def _step_state(self, k: int) -> tuple[bool, float]:
+        """v0.8 physical latch; scoring uses explicit, bounded evidence separately."""
+        done, _ = super()._step_state(k)
+        return bool(done), 0.0
+
+    def _snapshot_parts_v08(self) -> None:
+        self._part_prev_z_v08 = {}
+        for k, s in enumerate(self.cs.steps):
+            ev = self._part_evidence_v08(s)
+            if ev is not None:
+                self._part_prev_z_v08[k] = float(ev[1][2])
+
+    def _part_evidence_v08(self, s: TaskStep):
+        if s.kind in ("collar", "stack"):
+            j = s.part
+            if self.collar_parked[j]:
+                return None
+            p, q = self.collar_pose(j)
+            return self.collar_body[j], p, q, COLLAR_H, self.cs.collars[j].peg
+        i = s.peg
+        if self.peg_parked[i]:
+            return None
+        p, q = self.peg_pose(i)
+        return self.peg_body[i], p, q, PEG_LEN, i
+
+    def _update_milestones_v08(self, *, settling: bool = False) -> None:
+        """Record action-earned grasp/lift and near-target evidence.
+
+        A lift requires a closed jaw, a clear part bottom, and upward part motion
+        relative to its pre-action state. Contact alone, wrist motion alone, and
+        spawn height do not qualify. Near-target credit requires a prior earned
+        lift for that part and a held upright part, never a passive near-hole part.
+        """
+        if not self._action_earned_v08:
+            return
+        for k, s in enumerate(self.cs.steps):
+            ms = self._milestones_v08[k]
+            ev = self._part_evidence_v08(s)
+            if ev is None or self.step_done[k]:
+                self._grasp_run_v08[k] = 0
+                continue
+            body, p, q, length, peg_i = ev
+            touching = self._gripper_touching(body)
+            closed = float(self.data.qpos[4] + self.data.qpos[5]) < 0.014
+            bottom = float(p[2]) - length / 2.0
+            support = BLOCK_H if s.kind == "stack" else 0.0
+            lifted = bottom >= support + LIFT_CLEARANCE_V08
+            prev_z = getattr(self, "_part_prev_z_v08", {}).get(k)
+            rising = prev_z is not None and float(p[2]) - prev_z > 0.00015
+            if touching and closed and lifted and rising and not settling:
+                self._grasp_run_v08[k] = self._grasp_run_v08.get(k, 0) + 1
+            else:
+                self._grasp_run_v08[k] = 0
+            if self._grasp_run_v08[k] >= GRASP_MIN_FRAMES_V08:
+                ms["lift"] = True
+            hx, hy = self.slot_xy[peg_i]
+            dxy = float(np.hypot(p[0] - hx, p[1] - hy))
+            if s.kind == "collar":
+                tol = POSE_TOL_SCALE_V08 * COLLAR_SEAT_XY
+                target_z = BLOCK_H + length / 2.0
+                ztol = 0.008
+            elif s.kind == "stack":
+                tol = POSE_TOL_SCALE_V08 * STACK_SEAT_XY
+                pp, _ = self.peg_pose(peg_i)
+                target_z = float(pp[2]) + PEG_LEN / 2.0 + length / 2.0
+                ztol = 0.008
+            else:
+                tol = max(0.003, POSE_TOL_SCALE_V08 * float(self.r_hole[peg_i]))
+                target_z = BLOCK_H + PEG_LEN / 2.0
+                ztol = 0.010
+            near_pose = dxy <= tol and abs(float(p[2]) - target_z) <= ztol and self._upright(q)
+            # Target alignment while held follows a real lift; no reset-time or
+            # vibration-only path can earn it.
+            if ms["lift"] and touching and closed and near_pose and not settling:
+                ms["align"] = True
+            # Final stability is evaluated after release, not inferred from a latch.
+            # ``_finalize_stability`` calls this only for the last settle frames.
+            if settling and near_pose and not touching and ms["align"]:
+                ms["stable_frames"] = ms.get("stable_frames", 0) + 1
+                if ms["stable_frames"] >= STABLE_MIN_FRAMES_V08:
+                    ms["stable"] = True
 
     def _key_auto_arm(self, peg_i: int) -> bool:
         """v0.8: never auto-arm. Leave/reenter is mandatory for every key family."""
@@ -584,6 +743,8 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
     def step(self, action: np.ndarray) -> None:
         if self.done:
             return
+        self._snapshot_parts_v08()
+        self._action_earned_v08 = True
         # Run parent Assembly III step, then strip answer-leaking detent torque.
         wrist_before = float(self._wrist_torque[2]) if hasattr(self, "_wrist_torque") else 0.0
         super().step(action)
@@ -603,6 +764,7 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                     self._wrist_torque[2] = wrist_before
             except Exception:
                 pass
+        self._update_milestones_v08()
         # No insert latch that survives pull-out for *scoring* — physical verify at finalize.
         # (Parent may still latch step_done; finalize / score re-check end state.)
         if self.done and not self._finalized:
@@ -610,6 +772,8 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
 
     def _physical_step_ok(self, k: int) -> tuple[bool, float]:
         """End-state physical check for step k. Returns (ok, precision in [0,1])."""
+        if not self._action_earned_v08:
+            return False, 0.0
         s = self.cs.steps[k]
         if s.kind == "insert":
             i = s.part
@@ -687,6 +851,11 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
         if self._finalized:
             return
         self._finalized = True
+        if not self._action_earned_v08:
+            # Reset-only probes can inspect state, but cannot earn score.
+            self.step_done = [False] * len(self.cs.steps)
+            self._stability_ok = [False] * len(self.cs.steps)
+            return
         n = len(self.cs.steps)
         self._stability_ok = [True] * n
         self._precision = [0.0] * n
@@ -698,12 +867,9 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             if ok and self.step_done[k]:
                 claimed.append(k)
             elif ok and not self.step_done[k]:
-                # Physical success without latch: allow credit (end-state truth).
-                self.step_done[k] = True
-                if self.step_done_at[k] is None or int(self.step_done_at[k]) < 0:
-                    self.step_done_at[k] = self.steps
-                self.step_in_order[k] = all(self.step_done[p] for p in self.cs.steps[k].prereq)
-                claimed.append(k)
+                # Do not synthesize completion from a passive end pose. The
+                # physical latch must have fired during an action transition.
+                self._stability_ok[k] = False
             elif self.step_done[k] and not ok:
                 # Latch lied (e.g. insert pull-out) — clear for scoring.
                 self.step_done[k] = False
@@ -731,24 +897,33 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             self.data.qvel[adr] += vx
             self.data.qvel[adr + 1] += vy
         mujoco.mj_forward(self.model, self.data)
-        zero = np.zeros(5, dtype=np.float64)
         # Settle with open gripper, no motion (does not advance episode score clock meaningfully —
         # episode already done; we only mutate poses for the stability check).
         saved_steps = self.steps
         saved_done = self.done
+        saved_ctrl = self.data.ctrl.copy()
+        saved_grip = float(self.grip)
+        self.grip = MAX_OPEN
+        self._apply_ctrl()  # open the jaws; ctrl=0 would command a closed grasp
         self.done = False  # allow physics substeps via a private settle
-        for _ in range(PERTURB_FRAMES):
+        for settle_i in range(PERTURB_FRAMES):
+            self._touching_bodies_cache = None
             # Direct physics settle without full control bookkeeping.
-            self.data.ctrl[:] = 0
-            for _s in range(int(getattr(self, "substeps", 20) or 20)):
+            for _s in range(SUBSTEPS):
                 mujoco.mj_step(self.model, self.data)
             # Refresh seated flags lightly.
             for i in range(self.n_pegs):
                 if self.peg_parked[i]:
                     continue
                 self.seated_now[i] = bool(self._peg_in_hole(i) and self._upright(self.peg_pose(i)[1]))
+            if settle_i >= PERTURB_FRAMES - STABLE_MIN_FRAMES_V08:
+                self._update_milestones_v08(settling=True)
         self.done = saved_done
         self.steps = saved_steps
+        self.grip = saved_grip
+        self.data.ctrl[:] = saved_ctrl
+        self._touching_bodies_cache = None
+        mujoco.mj_forward(self.model, self.data)
 
         for k in claimed:
             ok, prec = self._physical_step_ok(k)
@@ -791,11 +966,13 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
         out[1] = {"c1": 0.25, "c2": 0.50, "c3": 0.75, "c4": 1.0}.get(self.cs.tier, 0.0)
         out[2] = self.cs.n_waves / 4.0
         out[3] = sum(self.step_done) / max(1, n)
-        # Up to 12 steps × 2 floats: kind_code/10, peg/8 + 0.5*blocked + 0.25*done
+        # Up to 12 steps × 2 floats: kind_code/10, integer peg id + 0.5*blocked + 0.25*done
         for i, s in enumerate(steps[:12]):
             out[4 + 2 * i] = KIND_CODE.get(s.kind, 0.0) / 10.0
-            flags = (s.peg / max(1, MAX_PEGS)) + 0.5 * float(self.step_blocked(i)) + 0.25 * float(self.step_done[i])
-            out[4 + 2 * i + 1] = float(np.clip(flags, 0.0, 1.5))
+            # Integer peg id plus disjoint flag bits. The old peg/8 packing
+            # aliased (peg 1 + done + blocked) with (peg 3 + blocked).
+            flags = float(s.peg) + 0.5 * float(self.step_blocked(i)) + 0.25 * float(self.step_done[i])
+            out[4 + 2 * i + 1] = flags
         # Remaining: mean prereq count, active-key index (normalized), horizon fraction.
         out[28] = float(np.mean([len(s.prereq) for s in steps])) / 4.0 if steps else 0.0
         ak = -1 if self._active_key is None else int(self._active_key)
@@ -814,7 +991,7 @@ def step_credit_v08(
     in_order: bool,
     done_at: int | None,
     horizon: int,
-    progress: float,
+    progress: float | dict | None = None,
     *,
     precision: float = 1.0,
     stable: bool = True,
@@ -827,7 +1004,19 @@ def step_credit_v08(
         if in_order:
             return float(base * (0.70 + 0.30 * float(np.clip(precision, 0.0, 1.0))))
         return float(OOO_CREDIT_V08)
-    return float(min(PARTIAL_CAP_V08, progress))
+    if isinstance(progress, dict):
+        return float(sum(PARTIAL_WEIGHTS_V08[name] for name in PARTIAL_WEIGHTS_V08 if progress.get(name, False)))
+    # Legacy numeric progress is not a valid v0.8 evidence source.
+    return 0.0
+
+
+def _partial_credit_v08(ep: AssemblyIVEpisode | CompoundEpisode, k: int) -> float:
+    if not isinstance(ep, AssemblyIVEpisode) or not ep._action_earned_v08:
+        return 0.0
+    if not all(ep.step_done[p] for p in ep.cs.steps[k].prereq):
+        return 0.0
+    evidence = ep._milestones_v08[k]
+    return float(sum(w for name, w in PARTIAL_WEIGHTS_V08.items() if evidence.get(name, False)))
 
 
 def step_results_v08(ep: AssemblyIVEpisode | CompoundEpisode) -> list[dict]:
@@ -837,23 +1026,27 @@ def step_results_v08(ep: AssemblyIVEpisode | CompoundEpisode) -> list[dict]:
     precision = getattr(ep, "_precision", [1.0] * len(ep.cs.steps))
     rows = []
     for k, s in enumerate(ep.cs.steps):
-        cr = step_credit_v08(
-            bool(ep.step_done[k]),
-            bool(ep.step_in_order[k]),
-            ep.step_done_at[k],
-            ep.c.max_steps,
-            float(ep.step_progress[k]),
-            precision=float(precision[k]),
-            stable=bool(stability[k]),
+        phys_done = bool(ep.step_done[k] and stability[k])
+        cr = (
+            step_credit_v08(
+                True, bool(ep.step_in_order[k]), ep.step_done_at[k], ep.c.max_steps,
+                precision=float(precision[k]), stable=True,
+            )
+            if phys_done else _partial_credit_v08(ep, k)
         )
+        evidence = getattr(ep, "_milestones_v08", [{} for _ in ep.cs.steps])[k]
         rows.append(
             {
-                "done": bool(ep.step_done[k] and stability[k]),
+                "done": phys_done,
                 "done_at": ep.step_done_at[k],
                 "in_order": bool(ep.step_in_order[k]),
                 "credit": round(float(cr), 5),
                 "precision": round(float(precision[k]), 5),
                 "stable": bool(stability[k]),
+                "partial": {
+                    name: bool(evidence.get(name, False))
+                    for name in PARTIAL_WEIGHTS_V08
+                },
             }
         )
     return rows
@@ -885,7 +1078,7 @@ def compound_score_v08(ep: AssemblyIVEpisode | AssemblyIIIEpisode | CompoundEpis
     for k, s in enumerate(ep.cs.steps):
         # Re-verify physical state for non-IV episodes (tools may pass III).
         if isinstance(ep, AssemblyIVEpisode):
-            phys_ok = bool(ep.step_done[k]) and bool(stability[k])
+            phys_ok = bool(ep._action_earned_v08 and ep.step_done[k] and stability[k])
             prec = float(precision[k]) if phys_ok else 0.0
         else:
             phys_ok = bool(ep.step_done[k])
@@ -902,11 +1095,8 @@ def compound_score_v08(ep: AssemblyIVEpisode | AssemblyIIIEpisode | CompoundEpis
             else:
                 cr = OOO_CREDIT_V08
         else:
-            # Frontier partial only: prerequisites done, small progress.
-            prereq_ok = all(ep.step_done[p] for p in s.prereq)
-            prog = float(ep.step_progress[k]) if prereq_ok else 0.0
-            # Keys/stacks/rework: no free partial without interaction progress already tracked.
-            cr = min(PARTIAL_CAP_V08, prog)
+            # Only explicit post-action physical evidence earns partial credit.
+            cr = _partial_credit_v08(ep, k)
 
         total += cr
         per_kind.setdefault(s.kind, []).append(cr)

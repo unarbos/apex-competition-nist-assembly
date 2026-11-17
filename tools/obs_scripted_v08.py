@@ -1,15 +1,18 @@
-"""Strong observation-only scripted controller for v0.8 calibration (≤~0.03 gate).
+"""Observation-only pick/place baseline for v0.8 calibration.
 
-Uses only the published observation (and the public blueprint encoding). No env
-internals, no true poses, no key yaw. Tries insert → collar/stack heuristics from
-biased peg/slot estimates.
+Uses only the 320-d public observation. It does not read the simulator, true
+part poses, hidden key yaw, or task object state. Each peg is approached above
+its estimated position, grasped, lifted, and placed using the independently
+biased slot estimate. This is a baseline, not a reference solution.
 
-    NIST_PROFILE=v08 python tools/obs_scripted_v08.py --seed 7 --per 8 --episodes 64
+    NIST_PROFILE=v08 python tools/obs_scripted_v08.py --seed 7 --episodes 8
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 import sys
 import time
@@ -21,89 +24,184 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "referee"))
 
 from nist_sim.compound import COLLAR_FEAT, GLOBAL_FEAT, MAX_COLLARS, TASK_PEG_FEAT  # noqa: E402
-from nist_sim.compound_v08 import (  # noqa: E402
-    BLUEPRINT_FEAT,
-    OBS_DIM_V08,
-    AssemblyIVEpisode,
-    compound_score_v08,
-    sample_compound_v08,
-)
+from nist_sim.compound_v08 import OBS_DIM_V08, AssemblyIVEpisode, compound_score_v08, sample_compound_v08  # noqa: E402
 from nist_sim.conditions import episode_seed_sequence  # noqa: E402
 from nist_sim.env import ACT_DIM, MAX_PEGS, OBS_DIM, PEG_FEAT  # noqa: E402
 
 PROPRIO = 16
-TASK0 = OBS_DIM  # 184
+TASK0 = OBS_DIM
 COL0 = TASK0 + MAX_PEGS * TASK_PEG_FEAT
 GLOB0 = COL0 + MAX_COLLARS * COLLAR_FEAT
 BP0 = GLOB0 + GLOBAL_FEAT
+PEG0 = PROPRIO + ACT_DIM
+KIND_BY_CODE = {1: "insert", 2: "collar", 3: "twist", 4: "rework", 5: "screw", 6: "stack", 7: "key"}
+
+
+def blueprint_step(o: np.ndarray, k: int):
+    """Decode only public blueprint channels; no simulator task access."""
+    if k >= 12:
+        return None
+    kind = KIND_BY_CODE.get(int(round(float(o[BP0 + 4 + 2 * k] * 10.0))))
+    packed = float(o[BP0 + 5 + 2 * k])
+    peg = min(MAX_PEGS - 1, int(math.floor(packed + 1e-6)))
+    flags = packed - peg
+    blocked = flags >= 0.49
+    done = (flags - 0.5 * blocked) >= 0.20
+    return kind, peg, blocked, done
+
+
+
+class ObsScriptedPolicy:
+    """Stateful only through public observations and its own action history."""
+
+    def __init__(self, seed: int = 0):
+        self.rng = np.random.default_rng(seed)
+        self.reset()
+
+    def reset(self):
+        self.t = 0
+        self.phase = "select"
+        self.phase_t = 0
+        self.target_i = -1
+        self.target = np.zeros(3)
+        self.command = None
+        self.estimate = np.zeros(3)
+        self.grasp_z = 0.0
+        self.grasp_target = np.zeros(3)
+        self.last_action = np.zeros(ACT_DIM)
+        self.lost = 0
+
+    def _set_phase(self, phase: str):
+        self.phase = phase
+        self.phase_t = 0
+
+    def _peg(self, o: np.ndarray, i: int):
+        b = PEG0 + i * PEG_FEAT
+        hand = o[:3] / 10.0
+        slot = o[b + 13:b + 15] / 10.0
+        rel = o[b + 1:b + 4] / 10.0
+        pos = np.r_[slot + rel[:2], 0.020 + rel[2]]
+        return pos, slot, rel
+
+    def _go(self, o: np.ndarray, goal, grip: float, speed: float = 1.0):
+        hand = o[:3] / 10.0
+        if self.command is None:
+            self.command = hand.copy()
+        # Actions increment the controller target; they are not absolute poses.
+        delta = np.clip((np.asarray(goal) - self.command) / 0.004, -speed, speed)
+        self.command = np.clip(self.command + 0.004 * delta, [-0.25, -0.25, -0.003], [0.25, 0.25, 0.25])
+        self.target = self.command.copy()
+        a = np.zeros(ACT_DIM)
+        a[:3] = delta
+        a[4] = grip
+        self.last_action = a
+        return a
+
+    def act(self, o: np.ndarray):
+        self.t += 1
+        self.phase_t += 1
+        hand = o[:3] / 10.0
+        gap = float(o[8]) / 50.0
+        if self.phase == "select":
+            best = None
+            candidates = [blueprint_step(o, k) for k in range(12)]
+            allowed = {
+                row[1] for row in candidates
+                if row is not None and row[0] in ("insert", "rework")
+                and not row[2] and not row[3]
+            }
+            for i in range(MAX_PEGS):
+                b = PEG0 + i * PEG_FEAT
+                if o[b] < 0.5 or o[b + 16] > 0.5 or i not in allowed:
+                    continue
+                pos, slot, _ = self._peg(o, i)
+                # Upright parts (local z close to world z) are graspable by
+                # this deliberately simple baseline; skip lying-down parts.
+                upright = abs(1.0 - 2.0 * (o[b + 5] ** 2 + o[b + 6] ** 2))
+                if upright < 0.9:
+                    continue
+                dist = float(np.linalg.norm(pos[:2] - hand[:2]))
+                if best is None or dist < best[0]:
+                    best = (dist, i, pos, slot)
+            if best is None:
+                return self._go(o, [hand[0], hand[1], 0.12], 1.0)
+            _, self.target_i, self.estimate, self.slot = best
+            self._set_phase("above")
+
+        if self.target_i < 0:
+            return self._go(o, [hand[0], hand[1], 0.12], 1.0)
+        pos, slot, _ = self._peg(o, self.target_i)
+        self.estimate = pos
+        self.slot = slot
+        if self.phase == "above":
+            goal = np.r_[pos[:2], 0.082]
+            a = self._go(o, goal, 1.0)
+            if self.phase_t >= 12 and np.max(np.abs(goal - hand)) < 0.008:
+                self._set_phase("descend")
+            elif self.phase_t > 70:
+                self._set_phase("select")
+        elif self.phase == "descend":
+            self.grasp_z = max(0.005, pos[2] + 0.017 - 0.012)
+            goal = np.r_[pos[:2], self.grasp_z]
+            a = self._go(o, goal, 1.0, 0.45)
+            if self.phase_t >= 28 or np.max(np.abs(goal[:2] - hand[:2])) > 0.035:
+                self._set_phase("close")
+        elif self.phase == "close":
+            a = self._go(o, self.target, -1.0)
+            if self.phase_t >= 12:
+                self._set_phase("lift")
+        elif self.phase == "lift":
+            a = self._go(o, self.target + [0, 0, 0.075], -1.0, 0.6)
+            if self.phase_t >= 35:
+                self._set_phase("carry")
+        elif self.phase == "carry":
+            goal = np.r_[self.slot[:2], 0.085]
+            a = self._go(o, goal, -1.0, 0.55)
+            if self.phase_t >= 45:
+                self._set_phase("place")
+        elif self.phase == "place":
+            a = self._go(o, np.r_[self.slot[:2], 0.025], -1.0, 0.35)
+            if self.phase_t >= 25:
+                self._set_phase("release")
+        elif self.phase == "release":
+            a = self._go(o, self.target, 1.0)
+            if self.phase_t >= 10:
+                self._set_phase("retreat")
+        elif self.phase == "retreat":
+            a = self._go(o, self.target + [0, 0, 0.08], 1.0, 0.55)
+            if self.phase_t >= 25:
+                self._set_phase("select")
+        else:
+            self._set_phase("select")
+            a = self._go(o, [hand[0], hand[1], 0.10], 1.0)
+        return np.clip(a, -1.0, 1.0)
 
 
 def act_from_obs(o: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Heuristic: chase the first unfinished insert-like peg using biased relative pose."""
-    a = np.zeros(ACT_DIM, dtype=np.float64)
-    hand = o[0:3] / 10.0
-    # Find a peg row that looks present and not seated.
-    best_i, best_score = -1, -1e9
-    for i in range(MAX_PEGS):
-        b = PROPRIO + ACT_DIM + i * PEG_FEAT
-        present = float(o[b + 0])
-        if present < 0.5:
-            continue
-        seated = float(o[b + 16])
-        if seated > 0.5:
-            continue
-        rel = o[b + 1 : b + 4] / 10.0  # est peg - something; use as chase vector
-        # Prefer smaller XY error (closer).
-        score = -float(np.hypot(rel[0], rel[1])) + 0.1 * present
-        if score > best_score:
-            best_score, best_i = score, i
-    if best_i < 0:
-        # Nothing to do: random small jitter (does not farm score).
-        a[:3] = rng.normal(0, 0.05, 3)
-        a[4] = 1.0
-        return np.clip(a, -1, 1)
-
-    b = PROPRIO + ACT_DIM + best_i * PEG_FEAT
-    rel = o[b + 1 : b + 4] / 10.0
-    # Servo toward peg estimate, then press and open.
-    a[0] = float(np.clip(rel[0] / 0.004, -1, 1))
-    a[1] = float(np.clip(rel[1] / 0.004, -1, 1))
-    z_err = float(rel[2])
-    if abs(rel[0]) < 0.008 and abs(rel[1]) < 0.008:
-        a[2] = -0.8 if z_err > -0.01 else 0.4
-        a[4] = -1.0 if z_err > -0.005 else 1.0
-    else:
-        a[2] = 0.3
-        a[4] = -1.0
-    # Mild yaw search — no closeness cue to guide it (blind).
-    a[3] = float(np.clip(0.35 * np.sin(0.15 * (o[GLOB0] * 100.0 + best_i)), -1, 1))
-    return np.clip(a, -1, 1)
+    """Compatibility wrapper; use ``ObsScriptedPolicy`` for stateful evaluation."""
+    if not hasattr(act_from_obs, "_policy"):
+        act_from_obs._policy = ObsScriptedPolicy(int(rng.integers(2**31)))
+    return act_from_obs._policy.act(o)
 
 
 def eval_seed(seed: int, per: int, episodes: int, start: int = 0) -> dict:
     _, conds = sample_compound_v08(seed, per, "live")
     scores = []
-    t0 = time.time()
+    t0 = time.monotonic()
     n = min(len(conds), start + episodes)
     for i in range(start, n):
         ss = episode_seed_sequence(seed, i)
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
         ep = AssemblyIVEpisode(conds[i], r1)
-        noise = r2
-        act_rng = np.random.default_rng(ss.spawn(1)[0])
+        policy = ObsScriptedPolicy(int(ss.generate_state(1)[0]))
         while not ep.done:
-            o = ep.observe(noise)
+            o = ep.observe(r2)
             assert o.shape[0] == OBS_DIM_V08
-            a = act_from_obs(o, act_rng)
-            ep.step(a)
+            ep.step(policy.act(o))
         sc = compound_score_v08(ep)["score"]
         scores.append(sc)
-    return {
-        "mean": float(np.mean(scores)) if scores else 0.0,
-        "scores": scores,
-        "wall_s": time.time() - t0,
-        "n": len(scores),
-    }
+        print(f"episode={i} score={sc:.6f} terminal={ep.terminal_reason}", flush=True)
+    return {"mean": float(np.mean(scores)) if scores else 0.0, "scores": scores, "wall_s": time.monotonic() - t0, "n": len(scores)}
 
 
 def main() -> int:
@@ -115,7 +213,7 @@ def main() -> int:
     a = ap.parse_args()
     os.environ.setdefault("NIST_PROFILE", "v08")
     r = eval_seed(a.seed, a.per, a.episodes, a.start)
-    print(f"obs_scripted_v08 seed={a.seed} mean={r['mean']:.4f} n={r['n']} wall={r['wall_s']:.1f}s")
+    print(json.dumps(r))
     return 0
 
 

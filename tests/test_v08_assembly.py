@@ -32,6 +32,52 @@ def conds():
     return c
 
 
+def test_blueprint_decoder_preserves_peg_id():
+    sys.path.insert(0, str(ROOT / "tools"))
+    from obs_scripted_v08 import blueprint_step
+
+    obs = np.zeros(320)
+    obs[288 + 4] = 0.1
+    obs[288 + 5] = 3 + 0.5  # peg 3, blocked, not done
+    assert blueprint_step(obs, 0) == ("insert", 3, True, False)
+    obs[288 + 5] = 2 + 0.25  # peg 2, unblocked, done
+    assert blueprint_step(obs, 0) == ("insert", 2, False, True)
+    for peg in range(8):
+        for blocked in (False, True):
+            for done in (False, True):
+                obs[288 + 5] = peg + 0.5 * blocked + 0.25 * done
+                assert blueprint_step(obs, 0) == ("insert", peg, blocked, done)
+
+
+def test_obs_blueprint_round_trip(conds):
+    from obs_scripted_v08 import blueprint_step
+
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(8))
+    obs = ep.observe(np.random.default_rng(9))
+    for k, step in enumerate(ep.cs.steps[:12]):
+        assert blueprint_step(obs, k) == (
+            step.kind, step.peg, ep.step_blocked(k), ep.step_done[k]
+        )
+
+
+def test_contact_cache_matches_direct_scan(conds):
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(10))
+    for _ in range(4):
+        ep.step(np.array([0.0, 0.0, -0.4, 0.0, -1.0]))
+    m, d = ep.model, ep.data
+    expected = set()
+    for i in range(d.ncon):
+        con = d.contact[i]
+        b1, b2 = m.geom_bodyid[con.geom1], m.geom_bodyid[con.geom2]
+        if b1 in ep.grip_bodies or b2 in ep.grip_bodies:
+            expected.update((int(b1), int(b2)))
+    ep._touching_bodies_cache = None
+    assert {b for b in range(m.nbody) if ep._gripper_touching(b)} == expected
+    assert ep._touching_bodies_cache is not None
+    ep._set_free(ep.peg_qadr[0], ep.peg_vadr[0], [0.0, 0.0, 0.1], [1.0, 0, 0, 0])
+    assert ep._touching_bodies_cache is None
+
+
 def test_obs_dim_is_320(conds):
     ss = episode_seed_sequence(7, 0)
     r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
@@ -39,6 +85,15 @@ def test_obs_dim_is_320(conds):
     o = ep.observe(r2)
     assert o.shape == (OBS_DIM_V08,)
     assert OBS_DIM_V08 == 320
+
+
+def test_v08_conditions_keep_easy_drift_invariant(conds):
+    """Compound-specific v08 noise scaling must not break the raw v05 invariant."""
+    from nist_sim.conditions import RANGES
+
+    for c in conds:
+        if c.difficulty_tier == "easy":
+            assert c.bias_drift <= 0.5 * RANGES["bias_drift"][1] + 1e-12
 
 
 def test_blueprint_longer_than_v07(conds):
@@ -110,16 +165,64 @@ def test_equal_weight_scoring_caps_insert_only(conds):
     assert sc < 0.55  # blueprints are dense enough that inserts alone stay mid/low
 
 
-def test_zero_policy_near_zero(conds):
-    ss = episode_seed_sequence(7, 2)
-    r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
-    ep = AssemblyIVEpisode(conds[2], r1)
-    z = np.zeros(5)
-    while not ep.done:
-        ep.observe(r2)
-        ep.step(z)
-    sc = compound_score_v08(ep)["score"]
-    assert sc < 0.15
+def test_zero_policy_exactly_zero_on_sampled_round():
+    _, sampled = sample_compound_v08(11, 1, "live")
+    for i, c in enumerate(sampled):
+        ss = episode_seed_sequence(11, i)
+        r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
+        ep = AssemblyIVEpisode(c, r1)
+        assert all(p.start_type not in ("grasped", "near_hole") for p in c.pegs)
+        assert not any(ep.step_done)
+        assert compound_score_v08(ep)["score"] == 0.0
+        while not ep.done:
+            ep.step(np.zeros(5))
+        assert compound_score_v08(ep)["score"] == 0.0, (i, ep.terminal_reason)
+
+
+def test_random_and_invalid_actions_cannot_earn_credit(conds):
+    for i, action in enumerate((np.ones(5), np.full(5, np.nan), np.full(5, 1e100))):
+        ss = episode_seed_sequence(7, i)
+        r1, _ = (np.random.default_rng(s) for s in ss.spawn(2))
+        ep = AssemblyIVEpisode(conds[i], r1)
+        while not ep.done:
+            ep.step(action)
+        assert compound_score_v08(ep)["score"] == 0.0, (i, ep.terminal_reason)
+
+
+def test_reset_and_passive_pose_do_not_complete_or_partially_credit():
+    _, sampled = sample_compound_v08(23, 1, "live")
+    ep = AssemblyIVEpisode(sampled[0], np.random.default_rng(3))
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert")
+    ep.step_done[k] = True
+    ep.step_in_order[k] = True
+    ep.step_progress[k] = 1.0  # inherited array must not be a reward backdoor
+    ep._finalized = True
+    ep.done = True
+    assert compound_score_v08(ep)["score"] == 0.0
+
+
+def test_partial_requires_prerequisites_and_never_uses_legacy_progress():
+    from nist_sim.compound_v08 import step_credit_v08
+
+    assert step_credit_v08(False, False, None, 100, 1.0) == 0.0
+    assert step_credit_v08(False, False, None, 100, {"lift": True}) == 0.06
+    assert step_credit_v08(False, False, None, 100, {"lift": True, "align": True, "stable": True}) == 0.18
+    assert step_credit_v08(True, False, 10, 100, None) == 0.03
+
+
+def test_bounded_physical_milestones(conds):
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(4))
+    ep._action_earned_v08 = True
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert" and not s.prereq)
+    ep._milestones_v08[k] = dict(lift=True, align=True, stable=True)
+    ep.done = True
+    ep._finalize_stability()
+    result = compound_score_v08(ep)
+    assert 0.0 < result["score"] <= 0.18 / len(ep.cs.steps)
+    from nist_sim.compound_v08 import step_results_v08
+    row = step_results_v08(ep)[k]
+    assert row["partial"] == {"lift": True, "align": True, "stable": True}
+    assert row["credit"] <= 0.18
 
 
 def test_sample_key_yaw_helper_reachable():

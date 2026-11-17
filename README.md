@@ -49,9 +49,11 @@ families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 - **Blueprint:** random dependency graph of inserts, collars, twists, screws, stacks, keys and
   reworks (typically ~8–28 steps). Waves, mid-episode physics events, and dynamics stretch
   (mass / friction / gain / latency) require online system ID and planning.
-- **Scoring:** equal weight per step. Credit only for physically verified end states that
-  survive a perturbation settle, scaled by precision. Out-of-order credit is tiny; unfinished
-  frontier progress is capped. Ceiling 1.0 is effectively unreachable.
+- **Scoring:** equal weight per step. Completed credit requires a physically verified end
+  state that survives a perturbation settle, scaled by precision. Unfinished steps can earn
+  0.06 each for a real grasp/lift, holding that part near its target, and stable release
+  through the settle (maximum 0.18 of the step). Reset-only states and passive end poses
+  earn zero; no grasped or near-hole starts are used in v0.8. Ceiling 1.0 is effectively unreachable.
 - **Keys:** absolute yaw hidden; no closeness / detent / pulse. Windows are anti-aligned from
   slot symmetries (no natural-seat freebie). Leave/reenter arming is mandatory (no D-flat
   auto-arm).

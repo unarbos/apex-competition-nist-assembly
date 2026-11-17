@@ -12,6 +12,9 @@ hill-climbable per-step cues, (2) no key windows on natural seat / slot symmetri
 
 ## What changes vs v0.7.x
 
+- **No free-start credit.** v0.8 removes grasped and near-hole spawns, including
+  extra pegs added by graph generation. Reset-only states and passive end poses
+  do not complete a step or earn partial credit.
 - **Longer blueprints:** typically ~8–28 steps (mean ~12 on public seeds) with denser
   precedence, more keys (up to 3), stacks, screws, reworks, and waves (up to 4 on c4).
 - **Equal per-step weight.** Farming inserts/collars cannot dominate. Score is the mean
@@ -38,8 +41,13 @@ For each blueprint step:
 1. Physically verify the end state (and stability after perturbation).
 2. If verified and completed in dependency order:  
    `credit = (0.80 + 0.20 · time_term) · (0.70 + 0.30 · precision)`.
-3. If verified but out of order: `credit = 0.05`.
-4. If unfinished but prerequisites are done: `credit ≤ 0.18` from frontier progress.
+3. If verified but out of order: `credit = 0.03`.
+4. If unfinished but prerequisites are done, at most `0.18` from three bounded,
+   action-earned physical milestones: `0.06` for a sustained closed-jaw grasp
+   that lifts the part, `0.06` for holding that previously lifted part within
+   tolerance of its target pose, and `0.06` for retaining that pose after release
+   through the final perturbation-settle window. Legacy scalar progress is not a
+   scoring input. These milestones are alternatives to, not additions to, done credit.
 5. Episode score = mean over steps. Round score = mean over episodes.
 
 A perfect 1.0 requires every step done early, in order, with perfect precision and
