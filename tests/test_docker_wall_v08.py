@@ -25,6 +25,8 @@ def _stub(tmp_path, body):
 
 def _run(tmp_path, stub_dir):
     out = tmp_path / "out"
+    out.mkdir()
+    out.chmod(0o777)
     env = dict(os.environ)
     env["PATH"] = f"{stub_dir}:/usr/bin:/bin"
     proc = subprocess.run(

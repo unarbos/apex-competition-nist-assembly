@@ -42,6 +42,10 @@ def main():
     # directory writable by this process for player/referee logs as well.
     if not os.access(out, os.W_OK):
         raise RuntimeError("wall output directory must be writable")
+    if hasattr(os, "geteuid") and os.geteuid() != 1000:
+        mode = out.stat().st_mode
+        if not (mode & 0o002):
+            raise RuntimeError("wall output directory must be writable by referee UID 1000")
     port = free_port()
     env = dict(os.environ)
     env.update(NIST_POLICY_PATH=str(Path(args.policy).resolve()), PYTHONPATH=str(ROOT / "player"))

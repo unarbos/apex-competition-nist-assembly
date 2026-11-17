@@ -64,7 +64,7 @@ jobs:
       - name: Make wall output writable by non-root referee
         run: |
           mkdir -p artifacts/referee-wall-64
-          chown 1000:1000 artifacts/referee-wall-64
+          chmod 0777 artifacts/referee-wall-64
       - name: Measure 64-episode wall inside built referee image
         run: >-
           python tools/docker_wall_v08.py
