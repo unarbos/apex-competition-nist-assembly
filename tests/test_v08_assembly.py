@@ -207,7 +207,71 @@ def test_partial_requires_prerequisites_and_never_uses_legacy_progress():
     assert step_credit_v08(False, False, None, 100, 1.0) == 0.0
     assert step_credit_v08(False, False, None, 100, {"lift": True}) == 0.06
     assert step_credit_v08(False, False, None, 100, {"lift": True, "align": True, "stable": True}) == 0.18
+    assert step_credit_v08(False, False, None, 100, {"lift_fraction": 0.5}) == 0.03
+    assert step_credit_v08(False, False, None, 100, {"lift": True, "lift_fraction": 0.5}) == 0.06
+    assert step_credit_v08(False, False, None, 100, {"lift_fraction": 100.0}) == 0.06
+    assert step_credit_v08(False, False, None, 100, {"lift_fraction": 1.0, "align": True, "stable": True}) == 0.18
     assert step_credit_v08(True, False, 10, 100, None) == 0.03
+
+
+def test_dense_lift_requires_held_part_and_settled_reference(conds):
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(4))
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert" and not s.prereq)
+    i = ep.cs.steps[k].peg
+    body = ep.peg_body[i]
+    ep.peg_parked[i] = False
+    ep._refresh_part_support_v08()
+    reference = ep._part_reference_v08[k]
+    ep._gripper_touching = lambda b: b == body  # physical-contact fixture
+    ep.data.qpos[4] = ep.data.qpos[5] = 0.002
+    ep._action_earned_v08 = True
+    ep._update_milestones_v08()
+    assert ep._milestones_v08[k].get("lift_fraction", 0.0) == 0.0
+    # A vertical wrist/part fixture at spawn height earns nothing. A small
+    # measured rise above settled height earns only a bounded partial fraction.
+    ep.data.qpos[ep.peg_qadr[i] + 2] = reference + 0.00425
+    ep._update_milestones_v08()
+    fraction = ep._milestones_v08[k]["lift_fraction"]
+    assert 0.0 < fraction == pytest.approx(0.10)
+    ep.data.qpos[ep.peg_qadr[i] + 2] = reference
+    ep._update_milestones_v08()
+    assert ep._milestones_v08[k]["lift_fraction"] == fraction  # best-so-far, not oscillation farm
+    ep._gripper_touching = lambda _b: False
+    ep.data.qpos[ep.peg_qadr[i] + 2] = reference + 0.00425
+    ep._update_milestones_v08()
+    assert ep._milestones_v08[k]["lift_fraction"] == fraction
+    ep._gripper_touching = lambda b: b == body
+    for prereq in ep.cs.steps[k].prereq:
+        ep.step_done[prereq] = False
+    if ep.cs.steps[k].prereq:
+        ep._milestones_v08[k] = dict(lift=False, align=False, stable=False)
+        ep._update_milestones_v08()
+        assert "lift_fraction" not in ep._milestones_v08[k]
+        for prereq in ep.cs.steps[k].prereq:
+            ep.step_done[prereq] = True
+    ep._action_earned_v08 = False
+    ep._milestones_v08[k] = dict(lift=False, align=False, stable=False)
+    ep._update_milestones_v08()
+    assert compound_score_v08(ep)["score"] == 0.0
+
+
+def test_dense_lift_is_bounded_and_prerequisite_gated(conds):
+    from nist_sim.compound_v08 import step_results_v08
+
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(4))
+    ep._action_earned_v08 = True
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert")
+    ep._milestones_v08[k] = dict(lift=False, align=False, stable=False, lift_fraction=0.5)
+    if ep.cs.steps[k].prereq:
+        assert step_results_v08(ep)[k]["credit"] == 0.0
+        for p in ep.cs.steps[k].prereq:
+            ep.step_done[p] = True
+    ep.done = True
+    ep._finalize_stability()
+    row = step_results_v08(ep)[k]
+    assert row["lift_fraction"] == 0.5
+    assert row["credit"] == 0.03
+    assert compound_score_v08(ep)["score"] <= 0.18 / len(ep.cs.steps)
 
 
 def test_bounded_physical_milestones(conds):
@@ -222,7 +286,24 @@ def test_bounded_physical_milestones(conds):
     from nist_sim.compound_v08 import step_results_v08
     row = step_results_v08(ep)[k]
     assert row["partial"] == {"lift": True, "align": True, "stable": True}
-    assert row["credit"] <= 0.18
+    assert row["lift_fraction"] == 0.0
+    assert row["credit"] == 0.18
+
+
+def test_evolution_zero_residual_and_disjoint_selection():
+    sys.path.insert(0, str(ROOT / "tools"))
+    from evolve_residual_v08 import Evaluator
+
+    train = Evaluator([101, 102], 2, 2, 0.35, 1)
+    validation = Evaluator([201, 202], 2, 2, 0.35, 1)
+    test = Evaluator([7], 2, 2, 0.35, 1)
+    assert set(train.seed).isdisjoint(validation.seed)
+    assert set(train.seed).isdisjoint(test.seed)
+    assert set(validation.seed).isdisjoint(test.seed)
+    assert train.zero.shape == (2 * OBS_DIM_V08 * 5,)
+    assert np.count_nonzero(train.zero) == 0
+    assert len(train.conditions) == 4
+    assert len(test.conditions) == 2
 
 
 def test_sample_key_yaw_helper_reachable():

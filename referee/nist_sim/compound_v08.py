@@ -98,6 +98,8 @@ PARTIAL_CAP_V08 = LIFT_CREDIT_V08 + ALIGN_CREDIT_V08 + STABLE_CREDIT_V08
 PARTIAL_WEIGHTS_V08 = {"lift": LIFT_CREDIT_V08, "align": ALIGN_CREDIT_V08, "stable": STABLE_CREDIT_V08}
 LIFT_CLEARANCE_V08 = 0.008  # part bottom above its support plane, in metres
 GRASP_MIN_FRAMES_V08 = 2  # reject a single-frame contact transient
+DENSE_LIFT_START_V08 = 0.0005  # 0.5 mm: above contact/settle noise, below the lift milestone
+DENSE_LIFT_GAIN_V08 = 0.20  # continuous sub-lift credit, within LIFT_CREDIT_V08
 POSE_TOL_SCALE_V08 = 2.0  # near-target alignment is deliberately not a seat
 STABLE_MIN_FRAMES_V08 = 8  # final 8 of 12 perturbation-settle frames
 # Out-of-order completed steps earn almost nothing (dependency order matters).
@@ -594,6 +596,9 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
         self._finalized = False
         self._milestones_v08 = [dict(lift=False, align=False, stable=False) for _ in cond.compound.steps]
         self._grasp_run_v08 = {}
+        self._part_support_v08 = {}
+        self._part_reference_v08 = {}
+        self._refresh_part_support_v08()
         # Only post-action states may earn progress; the reset state is never a baseline.
         self._action_earned_v08 = False
         # Patch tier cfg lookups used by parent retarget helpers.
@@ -617,36 +622,57 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             if self.collar_parked[j]:
                 return None
             p, q = self.collar_pose(j)
-            return self.collar_body[j], p, q, COLLAR_H, self.cs.collars[j].peg
+            # Axis-aligned extent, not a fixed upright length: a lying ring has
+            # its actual support height rather than a fictitious free lift.
+            ext = abs(1.0 - 2.0 * (q[1] ** 2 + q[2] ** 2)) * COLLAR_H
+            return self.collar_body[j], p, q, ext, self.cs.collars[j].peg
         i = s.peg
         if self.peg_parked[i]:
             return None
         p, q = self.peg_pose(i)
-        return self.peg_body[i], p, q, PEG_LEN, i
+        # For a vertical part, z extent is PEG_LEN; for a lying part it is its
+        # diameter. Use the same geometry for support and current clearance.
+        vertical = abs(1.0 - 2.0 * (q[1] ** 2 + q[2] ** 2))
+        ext = float(np.clip(vertical * PEG_LEN, 2.0 * self.c.pegs[i].spec.outer_radius(), PEG_LEN))
+        return self.peg_body[i], p, q, ext, i
+
+    def _refresh_part_support_v08(self) -> None:
+        """Capture settled support/height only on reset or a real wave arrival."""
+        for k, s in enumerate(self.cs.steps):
+            ev = self._part_evidence_v08(s)
+            if ev is None or k in self._part_reference_v08:
+                continue
+            _, p, _, ext, _ = ev
+            self._part_reference_v08[k] = float(p[2])
+            self._part_support_v08[k] = float(p[2] - ext / 2.0)
 
     def _update_milestones_v08(self, *, settling: bool = False) -> None:
-        """Record action-earned grasp/lift and near-target evidence.
+        """Record verified partial lift plus grasp/lift, alignment and stability.
 
-        A lift requires a closed jaw, a clear part bottom, and upward part motion
-        relative to its pre-action state. Contact alone, wrist motion alone, and
-        spawn height do not qualify. Near-target credit requires a prior earned
-        lift for that part and a held upright part, never a passive near-hole part.
+        Sub-lift credit is a best-so-far fraction of the lift bucket. It requires
+        a sustained closed contacting grasp and upward motion of the part above
+        its settled support height. Wrist motion, contact alone, spawn height,
+        lying-part vertical extent, and settling frames cannot earn it. The
+        original full-lift milestone remains unchanged and caps this component.
         """
         if not self._action_earned_v08:
             return
+        self._refresh_part_support_v08()
         for k, s in enumerate(self.cs.steps):
             ms = self._milestones_v08[k]
             ev = self._part_evidence_v08(s)
-            if ev is None or self.step_done[k]:
+            if ev is None or self.step_done[k] or self.step_blocked(k):
                 self._grasp_run_v08[k] = 0
                 continue
             body, p, q, length, peg_i = ev
             touching = self._gripper_touching(body)
             closed = float(self.data.qpos[4] + self.data.qpos[5]) < 0.014
             bottom = float(p[2]) - length / 2.0
-            support = BLOCK_H if s.kind == "stack" else 0.0
-            lifted = bottom >= support + LIFT_CLEARANCE_V08
+            support = self._part_support_v08.get(k, BLOCK_H if s.kind == "stack" else 0.0)
+            clearance = bottom - support
+            lifted = clearance >= LIFT_CLEARANCE_V08
             prev_z = getattr(self, "_part_prev_z_v08", {}).get(k)
+            reference_z = self._part_reference_v08.get(k, float(p[2]))
             rising = prev_z is not None and float(p[2]) - prev_z > 0.00015
             if touching and closed and lifted and rising and not settling:
                 self._grasp_run_v08[k] = self._grasp_run_v08.get(k, 0) + 1
@@ -654,6 +680,16 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 self._grasp_run_v08[k] = 0
             if self._grasp_run_v08[k] >= GRASP_MIN_FRAMES_V08:
                 ms["lift"] = True
+            # A held part can make incremental, verified progress before the
+            # binary lift fires. Best-so-far cannot be farmed by oscillation.
+            if touching and closed and not settling:
+                relative_lift = float(p[2]) - reference_z
+                dense = DENSE_LIFT_GAIN_V08 * np.clip(
+                    (relative_lift - DENSE_LIFT_START_V08)
+                    / max(LIFT_CLEARANCE_V08 - DENSE_LIFT_START_V08, 1e-6),
+                    0.0, 1.0,
+                )
+                ms["lift_fraction"] = max(float(ms.get("lift_fraction", 0.0)), float(dense))
             hx, hy = self.slot_xy[peg_i]
             dxy = float(np.hypot(p[0] - hx, p[1] - hy))
             if s.kind == "collar":
@@ -1005,7 +1041,13 @@ def step_credit_v08(
             return float(base * (0.70 + 0.30 * float(np.clip(precision, 0.0, 1.0))))
         return float(OOO_CREDIT_V08)
     if isinstance(progress, dict):
-        return float(sum(PARTIAL_WEIGHTS_V08[name] for name in PARTIAL_WEIGHTS_V08 if progress.get(name, False)))
+        lift = LIFT_CREDIT_V08 if progress.get("lift", False) else LIFT_CREDIT_V08 * float(
+            np.clip(progress.get("lift_fraction", 0.0), 0.0, 1.0)
+        )
+        other = sum(
+            PARTIAL_WEIGHTS_V08[name] for name in ("align", "stable") if progress.get(name, False)
+        )
+        return float(min(PARTIAL_CAP_V08, lift + other))
     # Legacy numeric progress is not a valid v0.8 evidence source.
     return 0.0
 
@@ -1016,7 +1058,9 @@ def _partial_credit_v08(ep: AssemblyIVEpisode | CompoundEpisode, k: int) -> floa
     if not all(ep.step_done[p] for p in ep.cs.steps[k].prereq):
         return 0.0
     evidence = ep._milestones_v08[k]
-    return float(sum(w for name, w in PARTIAL_WEIGHTS_V08.items() if evidence.get(name, False)))
+    return step_credit_v08(
+        False, bool(ep.step_in_order[k]), ep.step_done_at[k], ep.c.max_steps, evidence
+    )
 
 
 def step_results_v08(ep: AssemblyIVEpisode | CompoundEpisode) -> list[dict]:
@@ -1047,6 +1091,7 @@ def step_results_v08(ep: AssemblyIVEpisode | CompoundEpisode) -> list[dict]:
                     name: bool(evidence.get(name, False))
                     for name in PARTIAL_WEIGHTS_V08
                 },
+                "lift_fraction": round(float(np.clip(evidence.get("lift_fraction", 0.0), 0.0, 1.0)), 5),
             }
         )
     return rows

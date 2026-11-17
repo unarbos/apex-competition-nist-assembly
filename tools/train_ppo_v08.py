@@ -80,7 +80,7 @@ def train_and_eval(args):
             if not self.ep.done:
                 reward = 0.0
                 if self.dense:
-                    current = np.array([sum(r["partial"].values()) * 0.06 for r in step_results_v08(self.ep)])
+                    current = np.array([r["credit"] for r in step_results_v08(self.ep)])
                     reward = float(np.sum(current - self.prev))
                     self.prev = current
                 return self.ep.observe(self.noise), reward, False, False, {}

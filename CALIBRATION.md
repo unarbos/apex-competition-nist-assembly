@@ -21,6 +21,12 @@ anti-aligned key windows, procedural blueprints, dynamics randomization, and a
   for holding that part near its target pose, and **0.06** for retaining the pose
   after release through the settle: at most **0.18 of that step**, not additional
   credit on top of completion. Legacy scalar progress is not a scoring input.
+- Within the lift bucket, a best-so-far fraction contributes at most **0.012**
+  before the binary lift fires. It requires a closed, contacting grasp and a
+  measured rise of **0.5–8 mm above the part's settled reset height**. The
+  fraction is `0.20 * clip((rise_mm - 0.5) / 7.5, 0, 1)`. Full lift remains
+  **0.06**; oscillation, contact alone, wrist motion, absolute spawn height,
+  blocked steps, passive poses, and settling frames cannot accumulate credit.
 - Blueprint step entries use an unambiguous integer peg id plus separate blocked
   and done flags. The observation remains 320 floats.
 
@@ -36,29 +42,44 @@ to unseen seeds. All table values are measured; none is a projection.
 |---|---:|---:|---|
 | Zero | 8 | **0.000000 [0, 0]** | Pass; every episode exactly zero |
 | Uniform random | 8 | **0.000000 [0, 0]** | Pass; every episode exactly zero |
-| Observation-only scripted | 8 | **0.005795 [0, 0.013636]** | Pass; small physical lift/alignment credit |
-| Residual PPO, zero residual initialization | 8, matched to scripted | **0.003614 [0, 0.008591]** | **Ladder not established**: mean is below scripted and intervals overlap |
-| Honest privileged | 8 | **0.199250 [0.124000, 0.270878]** | Pass; upper reference remains well below ceiling |
+| Observation-only scripted | 8 | **0.005876 [0, 0.013878]** | Pass; small physical lift/alignment credit |
+| Residual PPO, zero residual initialization | 8, matched to scripted | **0.001588 [0, 0.004597]** | **Ladder not established**: mean is below scripted and intervals overlap |
+| Evolutionary residual, accept-only selection | 8, matched to scripted | **0.005876 [0, 0.013878]** | **No improvement**: 0/48 candidates accepted; unchanged scripted incumbent |
+| Honest privileged | 8 | **0.196625 [0.123375, 0.265503]** | Pass; upper reference remains well below ceiling |
 | Determinism, scripted | 8 + repeat | identical per-episode scores | Pass |
 | Determinism, real 64-episode run | 64 + repeat | identical `result.json` and episode records | Pass |
-| Real 64-episode wall, 2 pinned CPUs | 64 | **416.3 s**, repeat **404.2 s** | Pass (<600 s), in-process contract |
+| Real 64-episode wall, 2 pinned CPUs | 64 | **251.9 s**, repeat **256.2 s** | Pass (<600 s), in-process contract |
 
-The longer residual-PPO scores were
-`[0, 0.010909090909090908, 0.018, 0, 0, 0, 0, 0]`, on exactly the same eight
-held-out episodes as scripted. Training ran for **262,144 timesteps** on seeds
-101, 102, and 103 in **1803.0 s**, with **48.2 s** of held-out evaluation. It
-uses a zero-initialized residual action mean around the public scripted
-controller, bounded residual scale 0.35, and PPO fine-tuning; evaluation uses
-only observations and actions. It is not a from-scratch PPO result. **PPO beating
-scripted beyond seed noise remains an open gate.** An earlier 32,768-timestep
-residual run on seeds 101 and 102 scored 0.007500 [0, 0.022500] on only the
-first four held-out episodes in 863.3 s of training, so it is not used for the
-matched comparison. A separate dense-shaped, non-residual PPO run of 32,768
-timesteps measured 0.0000 on four held-out episodes (609.4 s training), so
-unaided exploration is not presented as a learnability demonstration.
+The denser residual-PPO scores were
+`[0, 0.0006716231440830144, 0.012033705297570443, 0, 0, 0, 0, 0]`, on exactly
+the same eight held-out episodes as scripted. Training ran for **262,144
+timesteps** on seeds 101, 102, and 103 in **1613.3 s**, with **49.5 s** of
+held-out evaluation. It uses a zero-initialized residual action mean around the
+public scripted controller, bounded residual scale 0.35, and PPO fine-tuning;
+evaluation uses only observations and actions. It is not a from-scratch PPO
+result. **PPO beating scripted beyond seed noise remains an open gate.** The
+pre-densification 262,144-timestep run scored 0.003614 [0, 0.008591] on these
+episodes in 1803.0 s of training; densification did not improve this PPO result.
+An earlier 32,768-timestep residual run scored 0.007500 on only the first four
+held-out episodes and is not used for the matched comparison. A separate
+non-residual PPO run of 32,768 timesteps measured 0.0000 on four held-out
+episodes, so unaided exploration is not presented as a learnability demonstration.
+
+The accept-only evolutionary residual experiment used 48 candidates (12
+generations × population 4), with initial sigma 0.02 decayed by 0.92 and residual
+scale 0.35. It used a 3,200-parameter linear residual over the current 320-d
+observation and a three-frame observation mean. Selection used eight episodes
+from training seeds 101 and 102 plus eight from disjoint validation seeds 201
+and 202; reported seed 7 was never used for selection. It retained the exact
+zero-residual incumbent unless a candidate strictly improved both training and
+validation means. **0/48 candidates were accepted** in **1087.1 s**, across
+**408 rollouts**. Its final test result is therefore identical to scripted:
+0.005875981718568924 [0, 0.013877945155706771]. The zero-residual path was
+verified to reproduce the calibration scores exactly. This method avoids a
+regression but does not demonstrate learned improvement.
 
 The honest privileged scores were
-`[0.335, 0.318, 0.166, 0.091, 0.005, 0.201, 0.300, 0.178]`.
+`[0.325, 0.307, 0.166, 0.091, 0.005, 0.201, 0.300, 0.178]`.
 The privileged reference uses true-state actions and pose-nudging helpers but
 does not set completion latches, probe counters, or key-yaw teleports. It is not
 an observation-only policy and is not an upper bound on learned performance.
@@ -67,7 +88,7 @@ The wall runs used the real player/referee process contract,
 `episodes_per_stratum=8`, `workers=2`, `OPENBLAS_NUM_THREADS=1`,
 `OMP_NUM_THREADS=1`, and `taskset -c 0,1`, with the zero-action ONNX policy.
 `result.json` was byte-identical between runs; `history/episodes.jsonl` had the
-same SHA-256 on both runs (`c23fcb4f62a8743f8f50f5a0dddab48d1a105888f9b1fb6c1b897b215edc80e1`).
+same SHA-256 on both runs (`fb5355cb8cb21eb9b02fa74681184ccabfbf161fc04b09c4920e1b52736cfa8a`).
 The records identify `nist_profile=v08` and log `assembly=IV`; the generic
 `assembly=II` field is retained for compound-record compatibility.
 **Docker was unavailable**, so these are host in-process measurements, not
@@ -85,17 +106,18 @@ All scores below are measured means over eight episodes unless noted.
 | Yaw spin | 0.000000 | 8 time limits |
 | Extreme actions | 0.000000 | 8 time limits |
 | NaN actions | 0.000000 | 8 time limits |
-| Sensor spoofing | **0.000682** [0, 0.002045] | 8 time limits |
+| Sensor spoofing | **0.000290** [0.000009, 0.000674] | 8 time limits |
 | Early termination | 0.000000 | 8 player faults |
 | Solver blowup | 0.000000 | 7 unstable, 1 time limit |
-| Cue hill-climb sweep | 0.000000 | 8 time limits |
+| Cue hill-climb sweep | **0.000090** [0, 0.000269] | 8 time limits |
 | Natural-seat key freebie | **0 / 20 keys** | no natural-seat key completed |
 | Single-kind cap | analytic cap **0.443478** across 8 blueprints | analytic completed-step bound, not a physical rollout |
 
-The sensor-spoofing result is below the scripted baseline and does not expose a
-key window. The single-kind row is an analytic scoring construction, not a
-rollout score. General attacks are deliberately not described as proving that
-all possible exploits are closed.
+The sensor-spoofing and cue-sweep results are below the scripted baseline and
+come from small verified sub-lift evidence, not key-window exposure or completed
+steps. The single-kind row is an analytic scoring construction, not a rollout
+score. General attacks are deliberately not described as proving that all
+possible exploits are closed.
 
 ### Reproduce
 
@@ -109,6 +131,10 @@ python tools/compound_solver.py --profile v08 --honest --seed 7 --per 8 --episod
 python tools/train_ppo_v08.py --timesteps 262144 --train-seeds 101,102,103 --per 8 \
   --eval-episodes 8 --eval-per 8 --dense --residual --zero-residual \
   --residual-log-std -2.0 --out /tmp/v08-residual
+python tools/evolve_residual_v08.py --generations 12 --population 4 \
+  --train-seeds 101,102 --validation-seeds 201,202 \
+  --train-per 4 --validation-per 4 --train-episodes 4 --validation-episodes 4 \
+  --eval-seed 7 --eval-per 8 --eval-episodes 8 --workers 4 --out /tmp/v08-es
 ```
 
 The optional PPO tooling used `torch 2.15.0+cpu`, `stable-baselines3 2.9.0`,
@@ -129,6 +155,8 @@ taskset -c 0,1 python tools/local_run.py --policy baselines/baseline.onnx \
 
 - The RL ladder is not demonstrated beyond seed noise. The matched residual-PPO
   mean is below scripted on eight held-out episodes, with overlapping intervals.
+  Accept-only evolution found no candidate that improved both disjoint
+  training/validation means, so it returned the scripted incumbent unchanged.
 - The policy/red-team tables use eight-episode slices, not the complete 64-episode
   policy ladder or additional held-out seeds. The wall gate itself was measured
   on a real 64-episode run and repeated.
@@ -141,10 +169,10 @@ taskset -c 0,1 python tools/local_run.py --policy baselines/baseline.onnx \
 
 ### Test verification
 
-The full local suite on implementation commit
-`357727675e0a2b9c69af3a7d154b24996065cc0a` completed with **178 passed,
-5 skipped** in **2077.94 s**. The subsequent calibration-only edit does not
-change simulation, policy, or test code.
+The full local suite on the denser physical-credit implementation completed with
+**181 passed, 5 skipped** in **1402.60 s**. The four added tests cover dense-lift
+contact/reference gating, prerequisite gating and caps, and evolutionary
+zero-residual/seed separation. The pre-existing `pytest.mark.slow` warning remains.
 
 
 
