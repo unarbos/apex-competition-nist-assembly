@@ -71,12 +71,15 @@ than an observation-only policy.
 The current red-team run at seed 7 measured **0.000000** for the new open-hand
 transport/wrist-spoof and repeated close/release-near-hole attacks. The complete
 attack table below includes those results. The complete-suite result is recorded
-below. The **built referee image** completed a real 64-episode round over the
-host-player/container-referee HTTP contract in **158.787 s** on cpuset **0,1**:
-container exit **0**, all **64** episodes complete, `terminal_reason=scored`,
-and no player fault. This passes the **<600 s** built-image gate. It is not an
-in-process timing. The CI artifact is `referee-wall-64`, artifact id
-**14366028188**, from run **44167711787** at commit `87466bf`.
+below. The **built referee image** completed real 64-episode rounds over the
+host-player/container-referee HTTP contract in **158.787 s** and **230.220 s**
+on cpuset **0,1**. Both containers exited **0**, completed all **64** episodes,
+reported `terminal_reason=scored`, and had no player fault. Their `result.json`
+and `history/episodes.jsonl` were byte-identical across the two runs; measured
+wall times differed, as expected. These pass the **<600 s** built-image and
+deterministic-repeat gates and are not in-process timings. The CI artifacts are
+`referee-wall-64`, ids **14366028188** and **14367165832**, from runs
+**44167711787** and **44167702029** at commit `87466bf`.
 The wall harness itself has **2 passing local tests** using the real ONNX player
 and a Docker stub: complete-result parsing and timeout/process cleanup. These
 are orchestration tests, not built-image wall measurements.
