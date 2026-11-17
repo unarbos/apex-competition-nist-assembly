@@ -37,21 +37,25 @@ to unseen seeds. All table values are measured; none is a projection.
 | Zero | 8 | **0.000000 [0, 0]** | Pass; every episode exactly zero |
 | Uniform random | 8 | **0.000000 [0, 0]** | Pass; every episode exactly zero |
 | Observation-only scripted | 8 | **0.005795 [0, 0.013636]** | Pass; small physical lift/alignment credit |
-| Residual PPO, zero residual initialization | 4 | **0.007500 [0, 0.022500]** | **Ladder not established**: advantage is within seed noise |
+| Residual PPO, zero residual initialization | 8, matched to scripted | **0.003614 [0, 0.008591]** | **Ladder not established**: mean is below scripted and intervals overlap |
 | Honest privileged | 8 | **0.199250 [0.124000, 0.270878]** | Pass; upper reference remains well below ceiling |
 | Determinism, scripted | 8 + repeat | identical per-episode scores | Pass |
 | Determinism, real 64-episode run | 64 + repeat | identical `result.json` and episode records | Pass |
 | Real 64-episode wall, 2 pinned CPUs | 64 | **416.3 s**, repeat **404.2 s** | Pass (<600 s), in-process contract |
 
-The residual-PPO scores were `[0, 0, 0.03, 0]`, trained for **32,768 timesteps**
-on seeds 101 and 102 in **863.3 s**, with **57.7 s** of held-out evaluation. It
+The longer residual-PPO scores were
+`[0, 0.010909090909090908, 0.018, 0, 0, 0, 0, 0]`, on exactly the same eight
+held-out episodes as scripted. Training ran for **262,144 timesteps** on seeds
+101, 102, and 103 in **1803.0 s**, with **48.2 s** of held-out evaluation. It
 uses a zero-initialized residual action mean around the public scripted
 controller, bounded residual scale 0.35, and PPO fine-tuning; evaluation uses
-only observations and actions. It is not a from-scratch PPO result. The scripted
-and PPO evaluation counts differ, and their intervals overlap. **PPO beating
-scripted beyond seed noise remains an open gate.** A separate sparse-PPO run of
-32,768 timesteps measured 0.0000 on four held-out episodes (609.4 s training),
-so unaided exploration is not presented as a learnability demonstration.
+only observations and actions. It is not a from-scratch PPO result. **PPO beating
+scripted beyond seed noise remains an open gate.** An earlier 32,768-timestep
+residual run on seeds 101 and 102 scored 0.007500 [0, 0.022500] on only the
+first four held-out episodes in 863.3 s of training, so it is not used for the
+matched comparison. A separate dense-shaped, non-residual PPO run of 32,768
+timesteps measured 0.0000 on four held-out episodes (609.4 s training), so
+unaided exploration is not presented as a learnability demonstration.
 
 The honest privileged scores were
 `[0.335, 0.318, 0.166, 0.091, 0.005, 0.201, 0.300, 0.178]`.
@@ -102,8 +106,8 @@ pytest -q tests/
 python tools/calib_v08.py --seeds 7 --per 8 --episodes 8 \
   --skip-privileged --out /tmp/v08-calib.json
 python tools/compound_solver.py --profile v08 --honest --seed 7 --per 8 --episodes 8
-python tools/train_ppo_v08.py --timesteps 32768 --train-seeds 101,102 --per 8 \
-  --eval-episodes 4 --eval-per 8 --dense --residual --zero-residual \
+python tools/train_ppo_v08.py --timesteps 262144 --train-seeds 101,102,103 --per 8 \
+  --eval-episodes 8 --eval-per 8 --dense --residual --zero-residual \
   --residual-log-std -2.0 --out /tmp/v08-residual
 ```
 
@@ -123,9 +127,8 @@ taskset -c 0,1 python tools/local_run.py --policy baselines/baseline.onnx \
 
 ### Open risks
 
-- The RL ladder is not yet demonstrated beyond seed noise. Residual PPO has a
-  small nonzero result, but its held-out advantage is not statistically
-  separated from scripted, and its evaluation sample is only four episodes.
+- The RL ladder is not demonstrated beyond seed noise. The matched residual-PPO
+  mean is below scripted on eight held-out episodes, with overlapping intervals.
 - The policy/red-team tables use eight-episode slices, not the complete 64-episode
   policy ladder or additional held-out seeds. The wall gate itself was measured
   on a real 64-episode run and repeated.
@@ -136,6 +139,13 @@ taskset -c 0,1 python tools/local_run.py --policy baselines/baseline.onnx \
   remain unmeasured. Do not interpret the low scripted baseline as a proof of
   frontier-lab hardness.
 
-## v0.7.5 (historical)
+### Test verification
+
+The full local suite on implementation commit
+`357727675e0a2b9c69af3a7d154b24996065cc0a` completed with **178 passed,
+5 skipped** in **2077.94 s**. The subsequent calibration-only edit does not
+change simulation, policy, or test code.
+
+
 
 See git history. The v0.8.0 profile and scores are not comparable with v0.7.x.
