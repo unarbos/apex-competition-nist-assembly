@@ -325,18 +325,42 @@ def test_reset_and_passive_pose_do_not_complete_or_partially_credit():
 
 
 def test_partial_requires_prerequisites_and_never_uses_legacy_progress():
-    from nist_sim.compound_v08 import step_credit_v08
+    from nist_sim.compound_v08 import (
+        ALIGN_CREDIT_V08,
+        INSERT_CREDIT_V08,
+        LIFT_CREDIT_V08,
+        PARTIAL_CAP_V08,
+        STABLE_CREDIT_V08,
+        TRANSPORT_CREDIT_V08,
+        step_credit_v08,
+    )
 
     assert step_credit_v08(False, False, None, 100, 1.0) == 0.0
-    assert step_credit_v08(False, False, None, 100, {"lift": True}) == 0.06
-    assert step_credit_v08(False, False, None, 100, {"lift": True, "align": True, "stable": True}) == 0.18
-    assert step_credit_v08(False, False, None, 100, {"transport": True, "transport_fraction": 1.0}) == 0.06
-    assert step_credit_v08(False, False, None, 100, {"insert": True, "insert_fraction": 1.0}) == 0.06
-    assert step_credit_v08(False, False, None, 100, {"lift": True, "transport_fraction": 1.0, "align": True, "stable": True, "insert_fraction": 1.0}) == 0.30
-    assert step_credit_v08(False, False, None, 100, {"lift_fraction": 0.5}) == 0.03
-    assert step_credit_v08(False, False, None, 100, {"lift": True, "lift_fraction": 0.5}) == 0.06
-    assert step_credit_v08(False, False, None, 100, {"lift_fraction": 100.0}) == 0.06
-    assert step_credit_v08(False, False, None, 100, {"lift_fraction": 1.0, "align": True, "stable": True}) == 0.18
+    assert step_credit_v08(False, False, None, 100, {"lift": True}) == LIFT_CREDIT_V08
+    assert step_credit_v08(
+        False, False, None, 100, {"lift": True, "align": True, "stable": True}
+    ) == LIFT_CREDIT_V08 + ALIGN_CREDIT_V08 + STABLE_CREDIT_V08
+    assert step_credit_v08(False, False, None, 100, {"transport": True, "transport_fraction": 1.0}) == TRANSPORT_CREDIT_V08
+    assert step_credit_v08(False, False, None, 100, {"insert": True, "insert_fraction": 1.0}) == INSERT_CREDIT_V08
+    assert step_credit_v08(
+        False,
+        False,
+        None,
+        100,
+        {
+            "lift": True,
+            "transport_fraction": 1.0,
+            "align": True,
+            "stable": True,
+            "insert_fraction": 1.0,
+        },
+    ) == PARTIAL_CAP_V08
+    assert step_credit_v08(False, False, None, 100, {"lift_fraction": 0.5}) == 0.5 * LIFT_CREDIT_V08
+    assert step_credit_v08(False, False, None, 100, {"lift": True, "lift_fraction": 0.5}) == LIFT_CREDIT_V08
+    assert step_credit_v08(False, False, None, 100, {"lift_fraction": 100.0}) == LIFT_CREDIT_V08
+    assert step_credit_v08(
+        False, False, None, 100, {"lift_fraction": 1.0, "align": True, "stable": True}
+    ) == LIFT_CREDIT_V08 + ALIGN_CREDIT_V08 + STABLE_CREDIT_V08
     assert step_credit_v08(True, False, 10, 100, None) == 0.03
 
 
@@ -382,7 +406,7 @@ def test_dense_lift_requires_held_part_and_settled_reference(conds):
 
 
 def test_dense_lift_is_bounded_and_prerequisite_gated(conds):
-    from nist_sim.compound_v08 import step_results_v08
+    from nist_sim.compound_v08 import LIFT_CREDIT_V08, PARTIAL_CAP_V08, step_results_v08
 
     ep = AssemblyIVEpisode(conds[0], np.random.default_rng(4))
     ep._action_earned_v08 = True
@@ -396,11 +420,19 @@ def test_dense_lift_is_bounded_and_prerequisite_gated(conds):
     ep._finalize_stability()
     row = step_results_v08(ep)[k]
     assert row["lift_fraction"] == 0.5
-    assert row["credit"] == 0.03
-    assert compound_score_v08(ep)["score"] <= 0.30 / len(ep.cs.steps)
+    assert row["credit"] == 0.5 * LIFT_CREDIT_V08
+    assert compound_score_v08(ep)["score"] <= PARTIAL_CAP_V08 / len(ep.cs.steps)
 
 
 def test_bounded_physical_milestones(conds):
+    from nist_sim.compound_v08 import (
+        ALIGN_CREDIT_V08,
+        LIFT_CREDIT_V08,
+        PARTIAL_CAP_V08,
+        STABLE_CREDIT_V08,
+        step_results_v08,
+    )
+
     ep = AssemblyIVEpisode(conds[0], np.random.default_rng(4))
     ep._action_earned_v08 = True
     k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert" and not s.prereq)
@@ -408,12 +440,11 @@ def test_bounded_physical_milestones(conds):
     ep.done = True
     ep._finalize_stability()
     result = compound_score_v08(ep)
-    assert 0.0 < result["score"] <= 0.30 / len(ep.cs.steps)
-    from nist_sim.compound_v08 import step_results_v08
+    assert 0.0 < result["score"] <= PARTIAL_CAP_V08 / len(ep.cs.steps)
     row = step_results_v08(ep)[k]
     assert row["partial"] == {"lift": True, "transport": False, "align": True, "stable": True, "insert": False}
     assert row["lift_fraction"] == 0.0
-    assert row["credit"] == 0.18
+    assert row["credit"] == LIFT_CREDIT_V08 + ALIGN_CREDIT_V08 + STABLE_CREDIT_V08
     assert row["transport_fraction"] == 0.0
     assert row["insert_fraction"] == 0.0
 

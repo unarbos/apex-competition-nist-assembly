@@ -91,12 +91,16 @@ MAX_HORIZON_V08 = 920
 # Bounded, action-earned milestones on an unfinished step. Full completion still
 # requires the end-state and perturbation checks below. These are fractions of a step,
 # not additional reward on top of a completed step.
-LIFT_CREDIT_V08 = 0.06
+# Lift is weighted higher than the later continuous transport/insert terms so a
+# verified grasp provides a clear learnable signal without restoring free credit.
+LIFT_CREDIT_V08 = 0.12
 TRANSPORT_CREDIT_V08 = 0.06
 ALIGN_CREDIT_V08 = 0.06
 STABLE_CREDIT_V08 = 0.06
 INSERT_CREDIT_V08 = 0.06
-PARTIAL_CAP_V08 = 0.30
+PARTIAL_CAP_V08 = (
+    LIFT_CREDIT_V08 + TRANSPORT_CREDIT_V08 + ALIGN_CREDIT_V08 + STABLE_CREDIT_V08 + INSERT_CREDIT_V08
+)
 PARTIAL_WEIGHTS_V08 = {
     "lift": LIFT_CREDIT_V08,
     "transport": TRANSPORT_CREDIT_V08,

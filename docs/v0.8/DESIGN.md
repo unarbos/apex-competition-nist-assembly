@@ -42,20 +42,20 @@ For each blueprint step:
 2. If verified and completed in dependency order:  
    `credit = (0.80 + 0.20 · time_term) · (0.70 + 0.30 · precision)`.
 3. If verified but out of order: `credit = 0.03`.
-4. If unfinished, unblocked and prerequisites are done, at most `0.30` from five bounded,
-   action-earned physical evidence buckets: `0.06` each for sustained grasp/lift,
-   held transport toward the real hole, held insertion, near-target alignment, and
-   stable release through the final perturbation-settle window. Transport requires
-   earned lift and closed contacting jaws; its best-so-far fraction measures actual
-   part motion toward the target, not wrist proximity. Insertion additionally
-   requires transport, an upright held part, and depth inside the actual hole
-   region. Their continuous fractions are bounded by `0.60`. Within the lift bucket,
-   a best-so-far fraction of at most `0.012` recognizes a closed, contacting grasp
-   that raises the part 0.5–8 mm above its settled height. Oscillation cannot
-   accumulate credit, and released/falling parts, wrist motion, contact alone,
-   absolute spawn height, passive poses and settling frames earn none. Legacy scalar
-   progress is not a scoring input. These buckets are alternatives to, not additions
-   to, done credit.
+4. If unfinished, unblocked and prerequisites are done, at most `0.36` from five bounded,
+   action-earned physical evidence buckets: `0.12` for sustained grasp/lift, and `0.06`
+   each for held transport toward the real hole, held insertion, near-target
+   alignment, and stable release through the final perturbation-settle window.
+   Transport requires earned lift and closed contacting jaws; its best-so-far
+   fraction measures actual part motion toward the target, not wrist proximity.
+   Insertion additionally requires transport, an upright held part, and depth
+   inside the actual hole region. Their continuous fractions are bounded by
+   `0.60`. Within the lift bucket, a best-so-far fraction of at most `0.024`
+   recognizes a closed, contacting grasp that raises the part 0.5–8 mm above its
+   settled height. Oscillation cannot accumulate credit, and released/falling
+   parts, wrist motion, contact alone, absolute spawn height, passive poses and
+   settling frames earn none. Legacy scalar progress is not a scoring input.
+   These buckets are alternatives to, not additions to, done credit.
 5. Episode score = mean over steps. Round score = mean over episodes.
 
 A perfect 1.0 requires every step done early, in order, with perfect precision and
@@ -68,11 +68,11 @@ the images bake:
 
 | Gate | Target |
 |---|---|
-| Honest privileged (actions only; true state; no qpos snaps) | ≤ ~0.35, clearly > 0 |
-| Strong obs-only scripted | ≤ ~0.03 |
+| Honest privileged (actions only; true state; no qpos snaps) | ~0.2–0.35 on the 8-ep slice; far below 1.0 |
+| Strong obs-only scripted | ~0.01–0.05 |
 | Revealed v0.7.x leader ONNX | ≤ ~0.02 or cleanly rejected (width ≠ 320) |
-| Zero / random | ~0 |
-| Short PPO/SAC baseline | preferably > scripted (report even if not) |
+| Zero / random | exactly ~0 (within 1e-4) |
+| Short residual / CEM learner | beat scripted beyond seed noise (report CIs) |
 | Determinism | bit-identical repeats |
 | Wall | < 600 s / 64 episodes / 2 CPU |
 | Red-team (≥5 hacks) | each near 0 |
