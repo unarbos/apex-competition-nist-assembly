@@ -17,10 +17,17 @@ anti-aligned key windows, procedural blueprints, dynamics randomization, and a
 - Completed steps require a physical latch during an action transition and an
   end-state that survives the perturbation settle. Finalization does not invent
   completion from a passive pose.
-- An unfinished, unblocked step can earn **0.06** for a real grasp/lift, **0.06**
-  for holding that part near its target pose, and **0.06** for retaining the pose
-  after release through the settle: at most **0.18 of that step**, not additional
-  credit on top of completion. Legacy scalar progress is not a scoring input.
+- An unfinished, unblocked step can earn at most **0.30 of that step**, not
+  additional credit on top of completion: **0.06** for a real grasp/lift,
+  **0.06** for held transport toward the real hole, **0.06** for held insertion,
+  **0.06** for holding near the target pose, and **0.06** for retaining the pose
+  after release through the settle. Transport and insertion have continuous
+  best-so-far fractions bounded by **0.60**. Transport requires earned lift,
+  closed contacting jaws, and actual part motion toward its target. Insertion
+  additionally requires transport, an upright held part, and depth inside the
+  actual hole region. Wrist proximity, released/falling parts, oscillation, and
+  passive near-hole poses cannot earn these terms. Legacy scalar progress is not
+  a scoring input.
 - Within the lift bucket, a best-so-far fraction contributes at most **0.012**
   before the binary lift fires. It requires a closed, contacting grasp and a
   measured rise of **0.5–8 mm above the part's settled reset height**. The
@@ -30,13 +37,55 @@ anti-aligned key windows, procedural blueprints, dynamics randomization, and a
 - Blueprint step entries use an unambiguous integer peg id plus separate blocked
   and done flags. The observation remains 320 floats.
 
-### Measured gate table
+### Current transport/insertion measurements
 
-Measurements were made on **2026-11-17 UTC**, using the final follow-up working
-tree. In-process policy runs used seed **7**, `per=8`, and the episode counts
-shown below. Confidence intervals are episode-bootstrap 95% intervals, 10,000
-resamples with seed 20261117. Small samples are not evidence of generalization
-to unseen seeds. All table values are measured; none is a projection.
+The current code adds the verified transport/insertion terms described above.
+The observation-only controller is evaluated through
+`tools/obs_boundary_v08.py`, which permits only observation/action/terminal
+operations and rejects other episode reads. The standalone strong script and the
+zero-residual wrapper are covered by full-episode, exact-action-sequence
+equivalence tests. Privileged demonstrations, if used, are restricted to
+training seeds and are never available at evaluation.
+
+The following results use referee seeds **7, 19, 31**, eight episodes per seed
+(`per=8`), and the current transport/insertion scoring. Confidence intervals
+are episode-bootstrap 95% intervals with 10,000 resamples and seed 20261117.
+`round std` is the sample standard deviation of the three per-referee-seed
+means, not the per-episode standard deviation.
+
+| Policy / check | Episodes | Mean [95% CI] | Round std | Status |
+|---|---:|---:|---:|---|
+| Zero | 8 (seed 7) | **0.000000 [0, 0]** | not measured | Pass; exactly zero |
+| Uniform random | 8 (seed 7) | **0.000000 [0, 0]** | not measured | Pass; exactly zero |
+| Strong observation-only script | 24 | **0.008439 [0.004525, 0.012991]** | **0.001968** | Valid observation-only matched baseline |
+| Learned BC + residual PPO | — | training in progress | — | **Gate open; no result yet** |
+| Honest privileged | 24 | **0.168414 [0.123025, 0.217372]** | **0.024460** | Above script; below requested 0.2–0.35 range |
+
+The learned-policy gate is not established until a completed learned model
+beats the strong script on these held-out seeds with nonoverlapping confidence
+intervals. The final comparison also uses a paired episode bootstrap of the
+learned-minus-script score differences. The privileged result is measured under
+the same current scorer, but remains a true-state calibration reference rather
+than an observation-only policy.
+
+The current red-team run at seed 7 measured **0.000000** for the new open-hand
+transport/wrist-spoof and repeated close/release-near-hole attacks. The complete
+attack table below includes those results. The current complete-suite and
+built-image 64-episode wall results are recorded in the final gate section once
+available; the older in-process timing is not a substitute for the built image.
+The wall harness itself has **2 passing local tests** using the real ONNX player
+and a Docker stub: complete-result parsing and timeout/process cleanup. These
+are orchestration tests, not built-image wall measurements.
+
+### Historical dense-lift gate table
+
+Measurements below were made on **2026-11-17 UTC** using the earlier 0.18-cap
+implementation. They do not include the later transport/insertion evidence and
+must not be compared as if they used the current scorer. In-process policy runs
+used seed **7**, `per=8`, and the episode counts shown below. Confidence
+intervals are episode-bootstrap 95% intervals, 10,000 resamples with seed
+20261117. Small samples are not evidence of generalization to unseen seeds. All
+table values are measured; none is a projection.
 
 | Gate | Episodes | Measured mean [95% CI] | Status |
 |---|---:|---:|---|
@@ -110,6 +159,8 @@ All scores below are measured means over eight episodes unless noted.
 | Early termination | 0.000000 | 8 player faults |
 | Solver blowup | 0.000000 | 7 unstable, 1 time limit |
 | Cue hill-climb sweep | **0.000090** [0, 0.000269] | 8 time limits |
+| Open-hand transport/wrist spoof | 0.000000 | 8 time limits |
+| Repeated close/release near hole | 0.000000 | 8 time limits |
 | Natural-seat key freebie | **0 / 20 keys** | no natural-seat key completed |
 | Single-kind cap | analytic cap **0.443478** across 8 blueprints | analytic completed-step bound, not a physical rollout |
 
@@ -169,10 +220,19 @@ taskset -c 0,1 python tools/local_run.py --policy baselines/baseline.onnx \
 
 ### Test verification
 
-The full local suite on the denser physical-credit implementation completed with
-**181 passed, 5 skipped** in **1402.60 s**. The four added tests cover dense-lift
-contact/reference gating, prerequisite gating and caps, and evolutionary
-zero-residual/seed separation. The pre-existing `pytest.mark.slow` warning remains.
+The current transport/insertion focused suite completed with **22 passed in
+229.74 s**. It covers physical predecessor gates and evidence bounds,
+oscillation/released-part rejection, full-episode fail-closed observation
+access, and exact strong-script/zero-residual action equivalence. The complete
+repository suite on the same current code completed with **185 passed, 5
+skipped, 1 warning in 3348.35 s**. The warning is the pre-existing unregistered
+`pytest.mark.slow` mark.
+
+The historical full local suite on the earlier dense-lift implementation
+completed with **181 passed, 5 skipped** in **1402.60 s**. The four added tests
+cover dense-lift contact/reference gating, prerequisite gating and caps, and
+evolutionary zero-residual/seed separation. The pre-existing `pytest.mark.slow`
+warning remains.
 
 
 

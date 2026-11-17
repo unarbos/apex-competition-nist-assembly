@@ -42,16 +42,19 @@ For each blueprint step:
 2. If verified and completed in dependency order:  
    `credit = (0.80 + 0.20 · time_term) · (0.70 + 0.30 · precision)`.
 3. If verified but out of order: `credit = 0.03`.
-4. If unfinished, unblocked and prerequisites are done, at most `0.18` from three bounded,
-   action-earned physical milestones: `0.06` for a sustained closed-jaw grasp
-   that lifts the part, `0.06` for holding that previously lifted part within
-   tolerance of its target pose, and `0.06` for retaining that pose after release
-   through the final perturbation-settle window. Within the lift bucket, a best-so-far
-   fraction of at most `0.012` recognizes a closed, contacting grasp that raises the
-   part 0.5–8 mm above its settled height; the completed lift still earns the full
-   `0.06`. Oscillation cannot accumulate credit, and wrist motion, contact alone,
+4. If unfinished, unblocked and prerequisites are done, at most `0.30` from five bounded,
+   action-earned physical evidence buckets: `0.06` each for sustained grasp/lift,
+   held transport toward the real hole, held insertion, near-target alignment, and
+   stable release through the final perturbation-settle window. Transport requires
+   earned lift and closed contacting jaws; its best-so-far fraction measures actual
+   part motion toward the target, not wrist proximity. Insertion additionally
+   requires transport, an upright held part, and depth inside the actual hole
+   region. Their continuous fractions are bounded by `0.60`. Within the lift bucket,
+   a best-so-far fraction of at most `0.012` recognizes a closed, contacting grasp
+   that raises the part 0.5–8 mm above its settled height. Oscillation cannot
+   accumulate credit, and released/falling parts, wrist motion, contact alone,
    absolute spawn height, passive poses and settling frames earn none. Legacy scalar
-   progress is not a scoring input. These milestones are alternatives to, not additions
+   progress is not a scoring input. These buckets are alternatives to, not additions
    to, done credit.
 5. Episode score = mean over steps. Round score = mean over episodes.
 

@@ -51,11 +51,13 @@ families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
   (mass / friction / gain / latency) require online system ID and planning.
 - **Scoring:** equal weight per step. Completed credit requires a physically verified end
   state that survives a perturbation settle, scaled by precision. Unfinished steps can earn
-  0.06 each for a real grasp/lift, holding that part near its target, and stable release
-  through the settle (maximum 0.18 of the step). The lift component includes bounded
-  best-so-far credit for a closed, contacting grasp that raises the part 0.5–8 mm above
-  its settled height; contact or wrist motion alone earns nothing. Reset-only states and passive end poses
-  earn zero; no grasped or near-hole starts are used in v0.8. Ceiling 1.0 is effectively unreachable.
+  at most 0.30: 0.06 each for real grasp/lift, held transport toward the hole, held insertion,
+  near-target alignment, and stable release through the settle. Transport and insertion use
+  bounded best-so-far physical evidence and require their predecessors, a closed contacting
+  grasp, and real part motion. The lift component includes bounded credit for raising the part
+  0.5–8 mm above its settled height. Wrist proximity, released/falling parts, oscillation,
+  contact alone, reset-only states, and passive end poses earn nothing; no grasped or near-hole
+  starts are used in v0.8. Ceiling 1.0 is effectively unreachable.
 - **Keys:** absolute yaw hidden; no closeness / detent / pulse. Windows are anti-aligned from
   slot symmetries (no natural-seat freebie). Leave/reenter arming is mandatory (no D-flat
   auto-arm).

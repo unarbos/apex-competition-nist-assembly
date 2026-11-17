@@ -92,14 +92,25 @@ MAX_HORIZON_V08 = 920
 # requires the end-state and perturbation checks below. These are fractions of a step,
 # not additional reward on top of a completed step.
 LIFT_CREDIT_V08 = 0.06
+TRANSPORT_CREDIT_V08 = 0.06
 ALIGN_CREDIT_V08 = 0.06
 STABLE_CREDIT_V08 = 0.06
-PARTIAL_CAP_V08 = LIFT_CREDIT_V08 + ALIGN_CREDIT_V08 + STABLE_CREDIT_V08
-PARTIAL_WEIGHTS_V08 = {"lift": LIFT_CREDIT_V08, "align": ALIGN_CREDIT_V08, "stable": STABLE_CREDIT_V08}
+INSERT_CREDIT_V08 = 0.06
+PARTIAL_CAP_V08 = 0.30
+PARTIAL_WEIGHTS_V08 = {
+    "lift": LIFT_CREDIT_V08,
+    "transport": TRANSPORT_CREDIT_V08,
+    "align": ALIGN_CREDIT_V08,
+    "stable": STABLE_CREDIT_V08,
+    "insert": INSERT_CREDIT_V08,
+}
 LIFT_CLEARANCE_V08 = 0.008  # part bottom above its support plane, in metres
 GRASP_MIN_FRAMES_V08 = 2  # reject a single-frame contact transient
 DENSE_LIFT_START_V08 = 0.0005  # 0.5 mm: above contact/settle noise, below the lift milestone
 DENSE_LIFT_GAIN_V08 = 0.20  # continuous sub-lift credit, within LIFT_CREDIT_V08
+TRANSPORT_START_V08 = 0.025  # m; movement below this is not called transport
+TRANSPORT_GAIN_V08 = 0.60  # best-so-far held-part translation toward its real hole
+INSERT_GAIN_V08 = 0.60  # held insertion fraction within the actual hole radius
 POSE_TOL_SCALE_V08 = 2.0  # near-target alignment is deliberately not a seat
 STABLE_MIN_FRAMES_V08 = 8  # final 8 of 12 perturbation-settle frames
 # Out-of-order completed steps earn almost nothing (dependency order matters).
@@ -594,10 +605,14 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
         self._stability_ok = [True] * len(cond.compound.steps)
         self._precision = [1.0] * len(cond.compound.steps)
         self._finalized = False
-        self._milestones_v08 = [dict(lift=False, align=False, stable=False) for _ in cond.compound.steps]
+        self._milestones_v08 = [
+            dict(lift=False, transport=False, align=False, stable=False, insert=False)
+            for _ in cond.compound.steps
+        ]
         self._grasp_run_v08 = {}
         self._part_support_v08 = {}
         self._part_reference_v08 = {}
+        self._part_initial_distance_v08 = {}
         self._refresh_part_support_v08()
         # Only post-action states may earn progress; the reset state is never a baseline.
         self._action_earned_v08 = False
@@ -642,9 +657,13 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             ev = self._part_evidence_v08(s)
             if ev is None or k in self._part_reference_v08:
                 continue
-            _, p, _, ext, _ = ev
+            _, p, _, ext, peg_i = ev
             self._part_reference_v08[k] = float(p[2])
             self._part_support_v08[k] = float(p[2] - ext / 2.0)
+            hx, hy = self.slot_xy[peg_i]
+            self._part_initial_distance_v08[k] = max(
+                TRANSPORT_START_V08, float(np.hypot(p[0] - hx, p[1] - hy))
+            )
 
     def _update_milestones_v08(self, *, settling: bool = False) -> None:
         """Record verified partial lift plus grasp/lift, alignment and stability.
@@ -706,6 +725,45 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 target_z = BLOCK_H + PEG_LEN / 2.0
                 ztol = 0.010
             near_pose = dxy <= tol and abs(float(p[2]) - target_z) <= ztol and self._upright(q)
+            # Transport requires a previously earned physical lift and a held
+            # part moving toward its true hole, not wrist proximity or a passive
+            # near-hole spawn. Best-so-far prevents oscillation farming.
+            if ms["lift"] and touching and closed and not settling:
+                initial_d = self._part_initial_distance_v08.get(k, TRANSPORT_START_V08)
+                moved_toward = initial_d - dxy
+                transport = TRANSPORT_GAIN_V08 * np.clip(
+                    moved_toward / max(initial_d - TRANSPORT_START_V08, 1e-6), 0.0, 1.0
+                )
+                ms["transport_fraction"] = max(
+                    float(ms.get("transport_fraction", 0.0)), float(transport)
+                )
+                if transport > 0.0:
+                    ms["transport"] = True
+            # A previously transported part retains that evidence after release;
+            # insertion itself still requires a held, upright descending part.
+            # Insert evidence additionally requires transport and an upright held
+            # part descending into its actual hole region, represented by the
+            # measured depth fraction below. A part falling below the board or
+            # merely released near the hole earns no insert credit.
+            if ms.get("transport", False) and touching and closed and not settling and self._upright(q):
+                hole_r = max(0.001, float(self.r_hole[peg_i]))
+                xy_fraction = float(np.clip(1.0 - dxy / hole_r, 0.0, 1.0))
+                if s.kind in ("collar", "stack"):
+                    z_fraction = float(np.clip(
+                        1.0 - abs(float(p[2]) - target_z) / 0.010, 0.0, 1.0
+                    ))
+                else:
+                    target_bottom = BLOCK_H if s.kind == "rework" else 0.0
+                    z_fraction = float(np.clip(
+                        (target_z + 0.010 - float(p[2])) / 0.010, 0.0, 1.0
+                    ))
+                insertion = INSERT_GAIN_V08 * xy_fraction * z_fraction
+                if dxy <= hole_r:
+                    ms["insert_fraction"] = max(
+                        float(ms.get("insert_fraction", 0.0)), float(insertion)
+                    )
+                    if insertion > 0.0:
+                        ms["insert"] = True
             # Target alignment while held follows a real lift; no reset-time or
             # vibration-only path can earn it.
             if ms["lift"] and touching and closed and near_pose and not settling:
@@ -1044,10 +1102,12 @@ def step_credit_v08(
         lift = LIFT_CREDIT_V08 if progress.get("lift", False) else LIFT_CREDIT_V08 * float(
             np.clip(progress.get("lift_fraction", 0.0), 0.0, 1.0)
         )
+        transport = TRANSPORT_CREDIT_V08 * float(np.clip(progress.get("transport_fraction", 0.0), 0.0, 1.0))
+        insert = INSERT_CREDIT_V08 * float(np.clip(progress.get("insert_fraction", 0.0), 0.0, 1.0))
         other = sum(
             PARTIAL_WEIGHTS_V08[name] for name in ("align", "stable") if progress.get(name, False)
         )
-        return float(min(PARTIAL_CAP_V08, lift + other))
+        return float(min(PARTIAL_CAP_V08, lift + transport + insert + other))
     # Legacy numeric progress is not a valid v0.8 evidence source.
     return 0.0
 
@@ -1092,6 +1152,8 @@ def step_results_v08(ep: AssemblyIVEpisode | CompoundEpisode) -> list[dict]:
                     for name in PARTIAL_WEIGHTS_V08
                 },
                 "lift_fraction": round(float(np.clip(evidence.get("lift_fraction", 0.0), 0.0, 1.0)), 5),
+                "transport_fraction": round(float(np.clip(evidence.get("transport_fraction", 0.0), 0.0, 1.0)), 5),
+                "insert_fraction": round(float(np.clip(evidence.get("insert_fraction", 0.0), 0.0, 1.0)), 5),
             }
         )
     return rows

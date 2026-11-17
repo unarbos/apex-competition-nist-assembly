@@ -61,30 +61,59 @@ def train_and_eval(args):
         def reset(self, *, seed=None, options=None):
             super().reset(seed=seed)
             self.i = int(self.np_random.integers(0, len(self.conds)))
+            if args.curriculum:
+                # Weight only conditions already present in the real v0.8
+                # distribution: start with c1, then mix in all tiers.
+                self.allowed = [j for j, c in enumerate(self.conds) if c.compound.tier == "c1"]
+                if not self.allowed:
+                    self.allowed = list(range(len(self.conds)))
+                self.i = int(self.np_random.choice(self.allowed))
             self.ss = episode_seed_sequence(self.seed, self.i)
             r1, r2 = (np.random.default_rng(s) for s in self.ss.spawn(2))
             self.ep = AssemblyIVEpisode(self.conds[self.i], r1)
+            self.noise = r2
             if self.residual:
                 from obs_scripted_v08 import ObsScriptedPolicy
                 self.base = ObsScriptedPolicy(int(self.ss.generate_state(1)[0]))
-            self.noise = r2
+                if args.residual_policy == "strong":
+                    self.strong = None
             self.prev = np.zeros(len(self.ep.cs.steps))
-            return self.ep.observe(self.noise), {"episode": self.i}
+            initial_obs = self.ep.observe(self.noise)
+            if args.residual_policy == "strong":
+                from strong_residual_v08 import StrongResidualController
+                self.strong = StrongResidualController(self.ep, self.noise, initial_obs=initial_obs)
+            return initial_obs, {"episode": self.i}
 
         def step(self, action):
+            if args.curriculum and hasattr(self, "allowed"):
+                self.curriculum_steps = getattr(self, "curriculum_steps", 0) + 1
+                # The first third focuses on real c1 blueprints; the rest uses
+                # the unmodified real tier mix and horizon/scoring rules.
+                if self.curriculum_steps > args.timesteps / 3:
+                    self.allowed = list(range(len(self.conds)))
             raw_action = np.asarray(action, dtype=np.float64)
-            o = self.ep.observe(self.noise)
-            if self.residual:
-                raw_action = np.clip(self.base.act(o) + args.residual_scale * raw_action, -1, 1)
-            self.ep.step(raw_action)
+            o = None
+            if not (self.residual and args.residual_policy == "strong"):
+                o = self.ep.observe(self.noise)
+            if self.residual and args.residual_policy == "strong":
+                base_action = self.strong.act()
+                raw_action = np.clip(base_action + args.residual_scale * raw_action, -1, 1)
+                self.ep.step(raw_action)
+            else:
+                if self.residual:
+                    raw_action = np.clip(self.base.act(o) + args.residual_scale * raw_action, -1, 1)
+                self.ep.step(raw_action)
             if not self.ep.done:
+                next_obs = self.ep.observe(self.noise)
+                if self.residual and args.residual_policy == "strong":
+                    self.strong.post_step(self.ep.done, next_obs, action=raw_action)
                 reward = 0.0
                 if self.dense:
                     current = np.array([r["credit"] for r in step_results_v08(self.ep)])
                     reward = float(np.sum(current - self.prev))
                     self.prev = current
-                return self.ep.observe(self.noise), reward, False, False, {}
-            if self.residual:
+                return next_obs, reward, False, False, {}
+            if self.residual and args.residual_policy != "strong":
                 self.base.act(o)  # advance baseline phase even on terminal actions
             info = compound_score_v08(self.ep)
             score = float(info["score"])
@@ -179,16 +208,28 @@ def train_and_eval(args):
         ss = episode_seed_sequence(args.eval_seed, i)
         r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
         ep = AssemblyIVEpisode(eval_conds[i], r1)
+        from obs_boundary_v08 import ObservationBoundary
+        boundary = ObservationBoundary(ep)
         base = None
-        if args.residual:
+        strong = None
+        obs = boundary.observe(r2)
+        if args.residual and args.residual_policy == "strong":
+            from strong_residual_v08 import StrongResidualController
+            strong = StrongResidualController(boundary, r2, initial_obs=obs)
+        elif args.residual:
             from obs_scripted_v08 import ObsScriptedPolicy
             base = ObsScriptedPolicy(int(ss.generate_state(1)[0]))
-        while not ep.done:
-            obs = ep.observe(r2)
+        while not boundary.done:
             action, _ = model.predict(obs, deterministic=True)
-            if base is not None:
+            if strong is not None:
+                action = np.clip(strong.act() + args.residual_scale * action, -1, 1)
+            elif base is not None:
                 action = np.clip(base.act(obs) + args.residual_scale * action, -1, 1)
-            ep.step(action)
+            boundary.step(action)
+            if not boundary.done:
+                obs = boundary.observe(r2)
+                if strong is not None:
+                    strong.post_step(False, obs, action=action)
         info = compound_score_v08(ep)
         scores.append(float(info["score"]))
         rows.append({
@@ -210,9 +251,13 @@ def train_and_eval(args):
         "profile": "v08",
         "algorithm": "residual PPO around observation-only scripted controller" if args.residual else "stable-baselines3 PPO",
         "bc_demos": args.bc_demos,
+        "bc_teacher": args.bc_teacher if args.bc_demos else None,
+        "evaluation_interface": "fail-closed public 320-D observation boundary",
         "bc_samples": bc_samples,
         "bc_epochs": args.bc_epochs,
         "residual_scale": args.residual_scale,
+        "residual_policy": args.residual_policy,
+        "curriculum": args.curriculum,
         "train_seeds": seeds,
         "train_conditions_per_seed": len(seeds) * 8 * args.per,
         "eval_seed": args.eval_seed,
@@ -246,10 +291,13 @@ def main():
     ap.add_argument("--eval-episodes", type=int, default=32)
     ap.add_argument("--dense", action="store_true")
     ap.add_argument("--residual", action="store_true")
+    ap.add_argument("--residual-policy", choices=("script", "strong"), default="script")
+    ap.add_argument("--curriculum", action="store_true", help="train initially on real c1 conditions, then full distribution")
     ap.add_argument("--residual-scale", type=float, default=0.35)
     ap.add_argument("--zero-residual", action="store_true")
     ap.add_argument("--residual-log-std", type=float, default=-2.0)
     ap.add_argument("--bc-demos", default="")
+    ap.add_argument("--bc-teacher", choices=("script", "privileged"), default="script")
     ap.add_argument("--bc-epochs", type=int, default=10)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--n-steps", type=int, default=1024)

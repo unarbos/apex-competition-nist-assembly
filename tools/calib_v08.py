@@ -151,6 +151,22 @@ def red_team(seed: int, per: int, episodes: int = 16) -> list[dict]:
             ep.data.qvel[ep.peg_vadr[0]] = 1e6
         return np.array([1e100, -1e100, 1e100, -1e100, 1e100])
 
+    def transport_wrist_spoof(ep, o, noise, ss, i):
+        # Move the hand across the board with an open gripper. Wrist proximity
+        # and apparent transport must not earn a held-part milestone.
+        a = np.zeros(5)
+        a[0] = 0.85 if (ep.steps // 30) % 2 == 0 else -0.85
+        a[1] = 0.55 if (ep.steps // 45) % 2 == 0 else -0.55
+        a[2] = -0.35
+        a[4] = 1.0
+        return a
+
+    def drop_near_hole(ep, o, noise, ss, i):
+        # Close and release repeatedly while pressing: dropped/released parts
+        # cannot qualify as held transport or insertion evidence.
+        a = np.array([0.0, 0.0, -0.65, 0.0, -1.0 if (ep.steps // 12) % 2 == 0 else 1.0])
+        return a
+
     for name, fn in [
         ("jitter", jitter),
         ("vibrate_parts", vibrate),
@@ -162,6 +178,8 @@ def red_team(seed: int, per: int, episodes: int = 16) -> list[dict]:
         ("early_termination", early_termination),
         ("solver_blowup", solver_blowup),
         ("cue_hillclimb_sweep", cue_hillclimb_sweep),
+        ("transport_wrist_spoof", transport_wrist_spoof),
+        ("drop_near_hole", drop_near_hole),
     ]:
         r = _run_policy(seed, per, episodes, fn)
         strategies.append({

@@ -57,3 +57,17 @@ jobs:
             'import os; os.environ.pop("NIST_PROFILE", None); import referee; print(referee._PROFILE_NAME, referee.ASSEMBLY_IV)')
           echo "runtime: $out"
           echo "$out" | grep -E '^v08 True$'
+      - name: Install host player dependencies
+        run: pip install -r player/requirements.txt
+      - name: Build reference ONNX policy
+        run: python tools/make_policies.py
+      - name: Measure 64-episode wall inside built referee image
+        run: python tools/docker_wall_v08.py --image nist-assembly-referee:ci \
+          --policy baselines/baseline.onnx --seed 7 --cpus 0,1 \
+          --out artifacts/referee-wall-64
+      - name: Upload built-image wall measurement
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        if: always()
+        with:
+          name: referee-wall-64
+          path: artifacts/referee-wall-64

@@ -11,6 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "referee"))
+sys.path.insert(0, str(ROOT / "tools"))
 
 os.environ["NIST_PROFILE"] = "v08"
 
@@ -58,6 +59,128 @@ def test_obs_blueprint_round_trip(conds):
         assert blueprint_step(obs, k) == (
             step.kind, step.peg, ep.step_blocked(k), ep.step_done[k]
         )
+
+
+def test_strong_controller_cannot_read_privileged_episode_state(conds):
+    """The strong script must run through a fail-closed observation boundary."""
+    from obs_strong_v08 import V08ObsEpisode, solve_obs_episode
+    from strong_residual_v08 import StrongResidualController
+    from obs_boundary_v08 import ObservationBoundary
+
+    ss = episode_seed_sequence(7, 0)
+    r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
+    boundary = ObservationBoundary(AssemblyIVEpisode(conds[0], r1))
+    obs = boundary.observe(r2)
+    view = V08ObsEpisode(boundary, r2, initial_obs=obs)
+    for name in ("model", "qpos", "board_xy", "peg_body", "peg_parked", "_set_free"):
+        with pytest.raises(AttributeError):
+            getattr(view, name)
+    controller = StrongResidualController(boundary, r2, initial_obs=obs)
+    for _ in range(20):
+        action = controller.act()
+        assert action.shape == (5,)
+        assert np.all(np.isfinite(action))
+        boundary.step(action)
+        if not boundary.done:
+            controller.post_step(False, boundary.observe(r2), action=action)
+    r1, r2 = (np.random.default_rng(s) for s in episode_seed_sequence(7, 0).spawn(2))
+    boundary = ObservationBoundary(AssemblyIVEpisode(conds[0], r1))
+    solve_obs_episode(boundary, r2)
+    assert boundary.done
+
+
+def test_strong_script_matches_zero_residual_wrapper(conds):
+    from obs_boundary_v08 import ObservationBoundary
+    from obs_strong_v08 import ObservedPegView, V08ObsEpisode, _choices, rs
+    from strong_residual_v08 import StrongResidualController
+
+    ss = episode_seed_sequence(7, 0)
+    r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
+    boundary = ObservationBoundary(AssemblyIVEpisode(conds[0], r1))
+    obs = boundary.observe(r2)
+    view = V08ObsEpisode(boundary, r2, initial_obs=obs)
+    actions = []
+    while not boundary.done:
+        choices = _choices(view, view.attempted)
+        if not choices:
+            action = np.array([0.0, 0.0, 0.15, 0.0, 1.0])
+            actions.append(action)
+            boundary.step(action)
+            if not boundary.done:
+                view._update(obs=boundary.observe(r2))
+            continue
+        i = choices[0][1]
+        view.attempted.add(i)
+        script = rs.ScriptedPeg(ObservedPegView(view, i), search_amp=0.006, search_steps=140, swing_grip=-1.0)
+        for action in script.pick_upright():
+            actions.append(action)
+            boundary.step(action)
+            if boundary.done:
+                break
+            view._update(obs=boundary.observe(r2))
+        if boundary.done:
+            break
+        if view.peg_pose(i)[0][2] < 0.043:
+            phases = (script.goto([None, None, 0.095], grip=1.0, max_n=24),)
+        else:
+            script = rs.ScriptedPeg(ObservedPegView(view, i), search_amp=0.006, search_steps=160, swing_grip=-1.0)
+            phases = (script.insert(), script.goto([None, None, 0.095], grip=1.0, max_n=25))
+        for phase in phases:
+            for action in phase:
+                actions.append(action)
+                boundary.step(action)
+                if boundary.done:
+                    break
+                view._update(obs=boundary.observe(r2))
+            if boundary.done:
+                break
+    r1, r2 = (np.random.default_rng(s) for s in episode_seed_sequence(7, 0).spawn(2))
+    boundary = ObservationBoundary(AssemblyIVEpisode(conds[0], r1))
+    obs = boundary.observe(r2)
+    controller = StrongResidualController(boundary, r2, initial_obs=obs)
+    learned_actions = []
+    while not boundary.done:
+        action = controller.act()
+        learned_actions.append(action)
+        boundary.step(action)
+        if not boundary.done:
+            controller.post_step(False, boundary.observe(r2), action=action)
+    assert len(learned_actions) == len(actions)
+    np.testing.assert_array_equal(np.asarray(learned_actions), np.asarray(actions))
+
+
+def test_shared_strong_solver_matches_controller(conds):
+    from obs_boundary_v08 import ObservationBoundary
+    from obs_strong_v08 import solve_obs_episode
+    from strong_residual_v08 import StrongResidualController
+
+    ss = episode_seed_sequence(7, 0)
+    r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
+    boundary = ObservationBoundary(AssemblyIVEpisode(conds[0], r1))
+    obs = boundary.observe(r2)
+    controller = StrongResidualController(boundary, r2, initial_obs=obs)
+    actions = []
+    while not boundary.done:
+        action = controller.act()
+        actions.append(action)
+        boundary.step(action)
+        if boundary.done:
+            break
+        obs = boundary.observe(r2)
+        controller.post_step(False, obs, action=action)
+    r1, r2 = (np.random.default_rng(s) for s in episode_seed_sequence(7, 0).spawn(2))
+    boundary = ObservationBoundary(AssemblyIVEpisode(conds[0], r1))
+    recorded = []
+    original_step = boundary.step
+
+    def record_action(action):
+        recorded.append(np.asarray(action).copy())
+        original_step(action)
+
+    boundary.step = record_action
+    solve_obs_episode(boundary, r2)
+    assert len(recorded) == len(actions)
+    np.testing.assert_array_equal(np.asarray(recorded), np.asarray(actions))
 
 
 def test_contact_cache_matches_direct_scan(conds):
@@ -207,6 +330,9 @@ def test_partial_requires_prerequisites_and_never_uses_legacy_progress():
     assert step_credit_v08(False, False, None, 100, 1.0) == 0.0
     assert step_credit_v08(False, False, None, 100, {"lift": True}) == 0.06
     assert step_credit_v08(False, False, None, 100, {"lift": True, "align": True, "stable": True}) == 0.18
+    assert step_credit_v08(False, False, None, 100, {"transport": True, "transport_fraction": 1.0}) == 0.06
+    assert step_credit_v08(False, False, None, 100, {"insert": True, "insert_fraction": 1.0}) == 0.06
+    assert step_credit_v08(False, False, None, 100, {"lift": True, "transport_fraction": 1.0, "align": True, "stable": True, "insert_fraction": 1.0}) == 0.30
     assert step_credit_v08(False, False, None, 100, {"lift_fraction": 0.5}) == 0.03
     assert step_credit_v08(False, False, None, 100, {"lift": True, "lift_fraction": 0.5}) == 0.06
     assert step_credit_v08(False, False, None, 100, {"lift_fraction": 100.0}) == 0.06
@@ -271,7 +397,7 @@ def test_dense_lift_is_bounded_and_prerequisite_gated(conds):
     row = step_results_v08(ep)[k]
     assert row["lift_fraction"] == 0.5
     assert row["credit"] == 0.03
-    assert compound_score_v08(ep)["score"] <= 0.18 / len(ep.cs.steps)
+    assert compound_score_v08(ep)["score"] <= 0.30 / len(ep.cs.steps)
 
 
 def test_bounded_physical_milestones(conds):
@@ -282,12 +408,52 @@ def test_bounded_physical_milestones(conds):
     ep.done = True
     ep._finalize_stability()
     result = compound_score_v08(ep)
-    assert 0.0 < result["score"] <= 0.18 / len(ep.cs.steps)
+    assert 0.0 < result["score"] <= 0.30 / len(ep.cs.steps)
     from nist_sim.compound_v08 import step_results_v08
     row = step_results_v08(ep)[k]
-    assert row["partial"] == {"lift": True, "align": True, "stable": True}
+    assert row["partial"] == {"lift": True, "transport": False, "align": True, "stable": True, "insert": False}
     assert row["lift_fraction"] == 0.0
     assert row["credit"] == 0.18
+    assert row["transport_fraction"] == 0.0
+    assert row["insert_fraction"] == 0.0
+
+
+def test_transport_and_insert_require_physical_predecessors(conds):
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(5))
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert" and not s.prereq)
+    i = ep.cs.steps[k].peg
+    ep.peg_parked[i] = False
+    ep._refresh_part_support_v08()
+    p, q = ep.peg_pose(i)
+    ep._action_earned_v08 = True
+    ep._gripper_touching = lambda b: b == ep.peg_body[i]
+    ep.data.qpos[4] = ep.data.qpos[5] = 0.002
+    # Wrist/part at reset height cannot earn transport or insertion without a lift.
+    ep._update_milestones_v08()
+    assert ep._milestones_v08[k].get("transport_fraction", 0.0) == 0.0
+    assert ep._milestones_v08[k].get("insert_fraction", 0.0) == 0.0
+    ep._milestones_v08[k]["lift"] = True
+    ep._update_milestones_v08()
+    assert ep._milestones_v08[k].get("insert_fraction", 0.0) == 0.0
+    # Transport toward the real hole is bounded and best-so-far. Moving the
+    # wrist/part back cannot farm repeated transport or create insertion credit.
+    hx, hy = ep.slot_xy[i]
+    ep.data.qpos[ep.peg_qadr[i]] = hx - 0.030
+    ep.data.qpos[ep.peg_qadr[i] + 1] = hy
+    ep.data.qpos[ep.peg_qadr[i] + 2] = 0.045
+    ep._update_milestones_v08()
+    transport = ep._milestones_v08[k]["transport_fraction"]
+    assert 0.0 < transport < 1.0
+    ep.data.qpos[ep.peg_qadr[i]] = hx + 0.030
+    ep._update_milestones_v08()
+    assert ep._milestones_v08[k]["transport_fraction"] == transport
+    assert ep._milestones_v08[k].get("insert_fraction", 0.0) == 0.0
+    # Released/falling parts cannot receive insertion evidence.
+    ep._gripper_touching = lambda _b: False
+    ep.data.qpos[ep.peg_qadr[i]] = hx
+    ep.data.qpos[ep.peg_qadr[i] + 2] = 0.0
+    ep._update_milestones_v08()
+    assert ep._milestones_v08[k].get("insert_fraction", 0.0) == 0.0
 
 
 def test_evolution_zero_residual_and_disjoint_selection():
