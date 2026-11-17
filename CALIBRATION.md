@@ -58,7 +58,7 @@ means, not the per-episode standard deviation.
 | Zero | 8 (seed 7) | **0.000000 [0, 0]** | not measured | Pass; exactly zero |
 | Uniform random | 8 (seed 7) | **0.000000 [0, 0]** | not measured | Pass; exactly zero |
 | Strong observation-only script | 24 | **0.008439 [0.004525, 0.012991]** | **0.001968** | Valid observation-only matched baseline |
-| Learned BC + residual PPO | — | training in progress | — | **Gate open; no result yet** |
+| Learned BC + residual PPO | — | no completed evaluation | — | **Gate open; training stopped at limit, no final model** |
 | Honest privileged | 24 | **0.168414 [0.123025, 0.217372]** | **0.024460** | Above script; below requested 0.2–0.35 range |
 
 The learned-policy gate is not established until a completed learned model
@@ -67,6 +67,17 @@ intervals. The final comparison also uses a paired episode bootstrap of the
 learned-minus-script score differences. The privileged result is measured under
 the same current scorer, but remains a true-state calibration reference rather
 than an observation-only policy.
+
+The matched BC + residual PPO experiment used 29,440 public observation/action
+pairs from 32 privileged-teacher episodes on training seeds 101–104, a
+c1→full-distribution curriculum, and the verified observation-only residual
+controller. It reached **851,968 timesteps** before its two-hour execution limit
+and was stopped before saving a final model or running held-out evaluation. Its
+last logged training-round mean reward was **0.00674**, below the script mean;
+that is a training metric, not a held-out score. **No learned-policy score or
+separation claim is made from this incomplete run.** The training command and
+observation-boundary implementation remain reproducible, but a completed model
+is still required for the learned-policy gate.
 
 The current red-team run at seed 7 measured **0.000000** for the new open-hand
 transport/wrist-spoof and repeated close/release-near-hole attacks. The complete
