@@ -57,8 +57,8 @@ jobs:
             'import os; os.environ.pop("NIST_PROFILE", None); import referee; print(referee._PROFILE_NAME, referee.ASSEMBLY_IV)')
           echo "runtime: $out"
           echo "$out" | grep -E '^v08 True$'
-      - name: Install host player dependencies
-        run: pip install -r player/requirements.txt
+      - name: Install host player and policy-build dependencies
+        run: pip install -r referee/requirements.txt -r player/requirements.txt
       - name: Build reference ONNX policy
         run: python tools/make_policies.py
       - name: Measure 64-episode wall inside built referee image
