@@ -62,8 +62,12 @@ jobs:
       - name: Build reference ONNX policy
         run: python tools/make_policies.py
       - name: Measure 64-episode wall inside built referee image
-        run: python tools/docker_wall_v08.py --image nist-assembly-referee:ci \
-          --policy baselines/baseline.onnx --seed 7 --cpus 0,1 \
+        run: >-
+          python tools/docker_wall_v08.py
+          --image nist-assembly-referee:ci
+          --policy baselines/baseline.onnx
+          --seed 7
+          --cpus 0,1
           --out artifacts/referee-wall-64
       - name: Upload built-image wall measurement
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
