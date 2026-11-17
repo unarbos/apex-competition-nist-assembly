@@ -37,6 +37,22 @@ from nist_sim.conditions import episode_seed_sequence  # noqa: E402
 from nist_sim.env import ACT_DIM  # noqa: E402
 
 
+def load_bc_demos(path):
+    """Read public observations and already-normalized residual action targets."""
+    with np.load(path) as data:
+        X = np.asarray(data["X"], dtype=np.float32)
+        Y = np.asarray(data["Y"], dtype=np.float32)
+    if X.ndim != 2 or X.shape[1] != OBS_DIM_V08:
+        raise ValueError(f"invalid BC observation shape: {X.shape}")
+    if Y.shape != (len(X), ACT_DIM):
+        raise ValueError(f"invalid BC residual shape: {Y.shape}")
+    if not np.all(np.isfinite(X)) or not np.all(np.isfinite(Y)):
+        raise ValueError("non-finite BC demonstration")
+    if np.max(np.abs(Y), initial=0.0) > 1.0 + 1e-6:
+        raise ValueError("BC targets must be clipped normalized residuals")
+    return X, Y
+
+
 def train_and_eval(args):
     import gymnasium as gym
     import torch
@@ -175,13 +191,12 @@ def train_and_eval(args):
         with torch.no_grad():
             model.policy.log_std.fill_(args.residual_log_std)
     if args.bc_demos:
-        data = np.load(args.bc_demos)
-        X = torch.as_tensor(data["X"], dtype=torch.float32)
-        Y = torch.as_tensor(data["Y"], dtype=torch.float32)
-        if args.residual:
-            # Demonstration actions are residual corrections to the public
-            # scripted baseline, not privileged actions at evaluation.
-            Y = Y / args.residual_scale
+        X_np, Y_np = load_bc_demos(args.bc_demos)
+        X = torch.as_tensor(X_np, dtype=torch.float32)
+        Y = torch.as_tensor(Y_np, dtype=torch.float32)
+        # Both collectors store action residuals already normalized by
+        # ``scale``. Evaluation multiplies by that same scale exactly once.
+        # Dividing again makes the BC initialization 1/scale times too strong.
         opt = torch.optim.Adam(model.policy.parameters(), lr=1e-3)
         for epoch in range(args.bc_epochs):
             for start in range(0, len(X), args.batch_size):
@@ -249,7 +264,12 @@ def train_and_eval(args):
     boot = np.mean(rng.choice(arr, (args.bootstrap, len(arr)), replace=True), axis=1) if len(arr) else np.zeros(1)
     result = {
         "profile": "v08",
-        "algorithm": "residual PPO around observation-only scripted controller" if args.residual else "stable-baselines3 PPO",
+        "algorithm": (
+            "BC residual around observation-only scripted controller"
+            if args.bc_only else
+            "residual PPO around observation-only scripted controller"
+            if args.residual else "stable-baselines3 PPO"
+        ),
         "bc_demos": args.bc_demos,
         "bc_teacher": args.bc_teacher if args.bc_demos else None,
         "evaluation_interface": "fail-closed public 320-D observation boundary",
@@ -286,7 +306,7 @@ def main():
     ap.add_argument("--timesteps", type=int, default=250000)
     ap.add_argument("--train-seeds", default="1,2,3")
     ap.add_argument("--per", type=int, default=2)
-    ap.add_argument("--eval-seed", type=int, default=7)
+    ap.add_argument("--eval-seed", type=int, default=None)
     ap.add_argument("--eval-per", type=int, default=8)
     ap.add_argument("--eval-episodes", type=int, default=32)
     ap.add_argument("--dense", action="store_true")
@@ -299,6 +319,9 @@ def main():
     ap.add_argument("--bc-demos", default="")
     ap.add_argument("--bc-teacher", choices=("script", "privileged"), default="script")
     ap.add_argument("--bc-epochs", type=int, default=10)
+    ap.add_argument("--bc-only", action="store_true", help="save/evaluate BC without PPO fine-tuning")
+    ap.add_argument("--bc-eval-seed", type=int, default=None,
+                    help="separate BC development evaluation; matched ladder stays disjoint")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--n-steps", type=int, default=1024)
     ap.add_argument("--batch-size", type=int, default=256)
@@ -307,6 +330,17 @@ def main():
     ap.add_argument("--bootstrap", type=int, default=10000)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    if args.eval_seed is None and args.bc_eval_seed is None:
+        ap.error("explicit --eval-seed or --bc-eval-seed is required")
+    if args.bc_eval_seed is not None:
+        if args.eval_seed is not None:
+            ap.error("use either --bc-eval-seed or --eval-seed, not both")
+        args.eval_seed = args.bc_eval_seed
+    if args.bc_only:
+        if args.timesteps != 0:
+            ap.error("--bc-only requires --timesteps 0")
+        if not args.bc_demos:
+            ap.error("--bc-only requires --bc-demos")
     train_and_eval(args)
 
 

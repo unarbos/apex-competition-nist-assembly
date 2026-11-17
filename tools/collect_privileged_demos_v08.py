@@ -17,10 +17,21 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+INSERT_SEARCH_STEPS_V08 = 160
+
+
+def matched_insert_teacher(ep, peg_i):
+    """Construct the honest training-only teacher with script-matched search."""
+    from compound_solver import PegView, ScriptedPeg
+
+    return ScriptedPeg(
+        PegView(ep, peg_i), search_amp=0.006,
+        search_steps=INSERT_SEARCH_STEPS_V08, swing_grip=-1.0,
+    )
 
 
 def collect(job):
-    seed, per, i, scale = job
+    seed, per, i, scale, teacher_mode = job
     os.environ["NIST_PROFILE"] = "v08"
     sys.path[:0] = [str(ROOT / "referee"), str(ROOT / "tools")]
     from nist_sim.compound_v08 import AssemblyIVEpisode, compound_score_v08, sample_compound_v08
@@ -38,11 +49,27 @@ def collect(job):
     controller = StrongResidualController(boundary, r2, initial_obs=obs)
     X, Y = [], []
     physical_step = ep.step
+    teacher = None
 
     def record_step(action):
-        nonlocal obs
+        nonlocal obs, teacher
         if ep.done:
             return
+        if teacher_mode == "insert":
+            # Stay on the observation-only script until its observation-derived
+            # lift check succeeds. Only then start an honest true-state teacher
+            # insertion in the same physical state. No teacher state or target
+            # is saved, and no teleport or latch helper is invoked.
+            if teacher is None and controller.phase != "insert":
+                action = controller.act()
+            else:
+                if teacher is None:
+                    teacher = iter(matched_insert_teacher(ep, controller.i).insert())
+                try:
+                    action = next(teacher)
+                except StopIteration:
+                    teacher = None
+                    action = controller.act()
         teacher_action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         base_action = controller.act()
         X.append(obs.astype(np.float32))
@@ -65,10 +92,11 @@ def main():
     ap.add_argument("--episodes", type=int, default=8, help="episodes per training seed")
     ap.add_argument("--scale", type=float, default=0.35)
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--teacher-mode", choices=("trajectory", "insert"), default="trajectory")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     seeds = [int(s) for s in args.train_seeds.split(",")]
-    jobs = [(seed, args.per, i, args.scale) for seed in seeds for i in range(args.episodes)]
+    jobs = [(seed, args.per, i, args.scale, args.teacher_mode) for seed in seeds for i in range(args.episodes)]
     t0 = time.monotonic()
     with mp.get_context("fork").Pool(args.workers) as pool:
         rows = pool.map(collect, jobs)
@@ -81,6 +109,7 @@ def main():
         "teacher_mean": float(np.mean([r[2] for r in rows])),
         "teacher_scores": [r[2] for r in rows],
         "train_seeds": seeds,
+        "teacher_mode": args.teacher_mode,
         "wall_s": time.monotonic() - t0,
     })
 

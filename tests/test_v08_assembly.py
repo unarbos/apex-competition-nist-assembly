@@ -183,6 +183,36 @@ def test_shared_strong_solver_matches_controller(conds):
     np.testing.assert_array_equal(np.asarray(recorded), np.asarray(actions))
 
 
+def test_bc_targets_are_normalized_exactly_once(tmp_path):
+    """Collectors save (teacher - script) / scale; training must not divide again."""
+    from nist_sim.env import ACT_DIM
+    from train_ppo_v08 import load_bc_demos
+
+    X = np.zeros((2, OBS_DIM_V08), np.float32)
+    Y = np.full((2, ACT_DIM), 0.35, np.float32)
+    path = tmp_path / "public_demos.npz"
+    np.savez(path, X=X, Y=Y)
+    loaded_X, loaded_Y = load_bc_demos(path)
+    np.testing.assert_array_equal(loaded_X, X)
+    np.testing.assert_array_equal(loaded_Y, Y)
+    bad_path = tmp_path / "bad_demos.npz"
+    np.savez(bad_path, X=X, Y=Y + 1.0)
+    with pytest.raises(ValueError, match="normalized residuals"):
+        load_bc_demos(bad_path)
+
+
+def test_insert_teacher_matches_observation_script_search(conds):
+    from collect_privileged_demos_v08 import INSERT_SEARCH_STEPS_V08, matched_insert_teacher
+    from compound_solver import PegView
+
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
+    teacher = matched_insert_teacher(ep, 0)
+    assert isinstance(teacher.e, PegView)
+    assert teacher.search_steps == INSERT_SEARCH_STEPS_V08 == 160
+    assert teacher.search_amp == 0.006
+    assert teacher.swing_grip == -1.0
+
+
 def test_contact_cache_matches_direct_scan(conds):
     ep = AssemblyIVEpisode(conds[0], np.random.default_rng(10))
     for _ in range(4):
