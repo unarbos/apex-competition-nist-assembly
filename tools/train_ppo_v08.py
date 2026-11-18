@@ -1,0 +1,348 @@
+"""Measured CPU PPO baseline for the v0.8 observation/action contract.
+
+This is a calibration tool, not a shipped baseline. Requires the optional
+training dependencies pinned below; the referee image needs only NumPy/MuJoCo.
+
+    pip install torch==2.15.0+cpu stable-baselines3==2.9.0 gymnasium==1.3.0
+    OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NIST_PROFILE=v08 \
+      python tools/train_ppo_v08.py --timesteps 250000 --train-seeds 1,2,3 \
+      --eval-seed 7 --eval-episodes 32 --out /tmp/v08-ppo
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "referee"))
+sys.path.insert(0, str(ROOT / "tools"))
+
+os.environ.setdefault("NIST_PROFILE", "v08")
+
+from nist_sim.compound_v08 import (  # noqa: E402
+    OBS_DIM_V08,
+    AssemblyIVEpisode,
+    compound_score_v08,
+    sample_compound_v08,
+    step_results_v08,
+)
+from nist_sim.conditions import episode_seed_sequence  # noqa: E402
+from nist_sim.env import ACT_DIM  # noqa: E402
+
+
+def load_bc_demos(path):
+    """Read public observations and already-normalized residual action targets."""
+    with np.load(path) as data:
+        X = np.asarray(data["X"], dtype=np.float32)
+        Y = np.asarray(data["Y"], dtype=np.float32)
+    if X.ndim != 2 or X.shape[1] != OBS_DIM_V08:
+        raise ValueError(f"invalid BC observation shape: {X.shape}")
+    if Y.shape != (len(X), ACT_DIM):
+        raise ValueError(f"invalid BC residual shape: {Y.shape}")
+    if not np.all(np.isfinite(X)) or not np.all(np.isfinite(Y)):
+        raise ValueError("non-finite BC demonstration")
+    if np.max(np.abs(Y), initial=0.0) > 1.0 + 1e-6:
+        raise ValueError("BC targets must be clipped normalized residuals")
+    return X, Y
+
+
+def train_and_eval(args):
+    import gymnasium as gym
+    import torch
+    from gymnasium import spaces
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.monitor import Monitor
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+
+    class V08Env(gym.Env):
+        """Terminal task score, with optional small per-control-step progress deltas."""
+
+        metadata = {"render_modes": []}
+
+        def __init__(self, seed, per, dense, residual=False):
+            self.seed, self.per, self.dense, self.residual = seed, per, dense, residual
+            _, self.conds = sample_compound_v08(seed, per, "live")
+            self.observation_space = spaces.Box(-np.inf, np.inf, (OBS_DIM_V08,), np.float32)
+            self.action_space = spaces.Box(-1.0, 1.0, (ACT_DIM,), np.float32)
+            self.i = 0
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self.i = int(self.np_random.integers(0, len(self.conds)))
+            if args.curriculum:
+                # Weight only conditions already present in the real v0.8
+                # distribution: start with c1, then mix in all tiers.
+                self.allowed = [j for j, c in enumerate(self.conds) if c.compound.tier == "c1"]
+                if not self.allowed:
+                    self.allowed = list(range(len(self.conds)))
+                self.i = int(self.np_random.choice(self.allowed))
+            self.ss = episode_seed_sequence(self.seed, self.i)
+            r1, r2 = (np.random.default_rng(s) for s in self.ss.spawn(2))
+            self.ep = AssemblyIVEpisode(self.conds[self.i], r1)
+            self.noise = r2
+            if self.residual:
+                from obs_scripted_v08 import ObsScriptedPolicy
+                self.base = ObsScriptedPolicy(int(self.ss.generate_state(1)[0]))
+                if args.residual_policy == "strong":
+                    self.strong = None
+            self.prev = np.zeros(len(self.ep.cs.steps))
+            initial_obs = self.ep.observe(self.noise)
+            if args.residual_policy == "strong":
+                from strong_residual_v08 import StrongResidualController
+                self.strong = StrongResidualController(self.ep, self.noise, initial_obs=initial_obs)
+            return initial_obs, {"episode": self.i}
+
+        def step(self, action):
+            if args.curriculum and hasattr(self, "allowed"):
+                self.curriculum_steps = getattr(self, "curriculum_steps", 0) + 1
+                # The first third focuses on real c1 blueprints; the rest uses
+                # the unmodified real tier mix and horizon/scoring rules.
+                if self.curriculum_steps > args.timesteps / 3:
+                    self.allowed = list(range(len(self.conds)))
+            raw_action = np.asarray(action, dtype=np.float64)
+            o = None
+            if not (self.residual and args.residual_policy == "strong"):
+                o = self.ep.observe(self.noise)
+            if self.residual and args.residual_policy == "strong":
+                base_action = self.strong.act()
+                raw_action = np.clip(base_action + args.residual_scale * raw_action, -1, 1)
+                self.ep.step(raw_action)
+            else:
+                if self.residual:
+                    raw_action = np.clip(self.base.act(o) + args.residual_scale * raw_action, -1, 1)
+                self.ep.step(raw_action)
+            if not self.ep.done:
+                next_obs = self.ep.observe(self.noise)
+                if self.residual and args.residual_policy == "strong":
+                    self.strong.post_step(self.ep.done, next_obs, action=raw_action)
+                reward = 0.0
+                if self.dense:
+                    current = np.array([r["credit"] for r in step_results_v08(self.ep)])
+                    reward = float(np.sum(current - self.prev))
+                    self.prev = current
+                return next_obs, reward, False, False, {}
+            if self.residual and args.residual_policy != "strong":
+                self.base.act(o)  # advance baseline phase even on terminal actions
+            info = compound_score_v08(self.ep)
+            score = float(info["score"])
+            reward = score
+            if self.dense:
+                current = np.array([r["credit"] for r in step_results_v08(self.ep)])
+                reward += float(np.sum(current - self.prev))
+            return np.zeros(OBS_DIM_V08, np.float32), reward, True, False, {
+                "score": score,
+                "episode": self.i,
+                "terminal_reason": self.ep.terminal_reason,
+                "n_steps": info["n_steps"],
+            }
+
+    class Recorder(BaseCallback):
+        def __init__(self):
+            super().__init__()
+            self.scores = []
+
+        def _on_step(self):
+            for info in self.locals.get("infos", []):
+                if "score" in info:
+                    self.scores.append(float(info["score"]))
+            return True
+
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    seeds = [int(s) for s in args.train_seeds.split(",")]
+    recorder = Recorder()
+    t0 = time.monotonic()
+    env = SubprocVecEnv([
+        (lambda seed=seed: Monitor(V08Env(seed, args.per, args.dense, args.residual)))
+        for seed in seeds
+    ], start_method="fork")
+    model = PPO(
+        "MlpPolicy", env,
+        learning_rate=args.lr,
+        n_steps=args.n_steps,
+        batch_size=args.batch_size,
+        n_epochs=4,
+        gamma=0.995,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.001,
+        max_grad_norm=0.5,
+        policy_kwargs=dict(net_arch=[128, 128], activation_fn=torch.nn.Tanh),
+        seed=args.ppo_seed,
+        verbose=1,
+        device="cpu",
+    )
+    bc_samples = 0
+    if args.residual and args.zero_residual:
+        # Start exactly at the functioning observation-only controller. Small
+        # exploration then learns corrections without destroying its phase machine.
+        torch.nn.init.zeros_(model.policy.action_net.weight)
+        torch.nn.init.zeros_(model.policy.action_net.bias)
+        with torch.no_grad():
+            model.policy.log_std.fill_(args.residual_log_std)
+    if args.bc_demos:
+        X_np, Y_np = load_bc_demos(args.bc_demos)
+        X = torch.as_tensor(X_np, dtype=torch.float32)
+        Y = torch.as_tensor(Y_np, dtype=torch.float32)
+        # Both collectors store action residuals already normalized by
+        # ``scale``. Evaluation multiplies by that same scale exactly once.
+        # Dividing again makes the BC initialization 1/scale times too strong.
+        opt = torch.optim.Adam(model.policy.parameters(), lr=1e-3)
+        for epoch in range(args.bc_epochs):
+            for start in range(0, len(X), args.batch_size):
+                values, log_probs, entropy = model.policy.evaluate_actions(
+                    X[start:start + args.batch_size], Y[start:start + args.batch_size]
+                )
+                loss = -log_probs.mean() + 0.001 * (values ** 2).mean()
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.policy.parameters(), 0.5)
+                opt.step()
+            if epoch % 5 == 0 or epoch == args.bc_epochs - 1:
+                print(f"bc epoch={epoch} loss={float(loss):.6f}", flush=True)
+        bc_samples = len(X)
+    model.learn(total_timesteps=args.timesteps, callback=recorder, progress_bar=False)
+    train_wall_s = time.monotonic() - t0
+    model.save(str(out / "model.zip"))
+    env.close()
+
+    _, eval_conds = sample_compound_v08(args.eval_seed, args.eval_per, "live")
+    scores, rows = [], []
+    eval_t0 = time.monotonic()
+    for i in range(min(args.eval_episodes, len(eval_conds))):
+        ss = episode_seed_sequence(args.eval_seed, i)
+        r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
+        ep = AssemblyIVEpisode(eval_conds[i], r1)
+        from obs_boundary_v08 import ObservationBoundary
+        boundary = ObservationBoundary(ep)
+        base = None
+        strong = None
+        obs = boundary.observe(r2)
+        if args.residual and args.residual_policy == "strong":
+            from strong_residual_v08 import StrongResidualController
+            strong = StrongResidualController(boundary, r2, initial_obs=obs)
+        elif args.residual:
+            from obs_scripted_v08 import ObsScriptedPolicy
+            base = ObsScriptedPolicy(int(ss.generate_state(1)[0]))
+        while not boundary.done:
+            action, _ = model.predict(obs, deterministic=True)
+            if strong is not None:
+                action = np.clip(strong.act() + args.residual_scale * action, -1, 1)
+            elif base is not None:
+                action = np.clip(base.act(obs) + args.residual_scale * action, -1, 1)
+            boundary.step(action)
+            if not boundary.done:
+                obs = boundary.observe(r2)
+                if strong is not None:
+                    strong.post_step(False, obs, action=action)
+        info = compound_score_v08(ep)
+        scores.append(float(info["score"]))
+        rows.append({
+            "episode": i,
+            "score": float(info["score"]),
+            "n_steps": info["n_steps"],
+            "n_done": info["n_done"],
+            "terminal_reason": ep.terminal_reason,
+            "partials": {
+                name: sum(bool(r["partial"][name]) for r in step_results_v08(ep))
+                for name in ("lift", "align", "stable")
+            },
+        })
+        print(f"eval episode={i} score={scores[-1]:.6f}", flush=True)
+    arr = np.asarray(scores)
+    rng = np.random.default_rng(args.ci_seed)
+    boot = np.mean(rng.choice(arr, (args.bootstrap, len(arr)), replace=True), axis=1) if len(arr) else np.zeros(1)
+    result = {
+        "profile": "v08",
+        "algorithm": (
+            "BC residual around observation-only scripted controller"
+            if args.bc_only else
+            "residual PPO around observation-only scripted controller"
+            if args.residual else "stable-baselines3 PPO"
+        ),
+        "bc_demos": args.bc_demos,
+        "bc_teacher": args.bc_teacher if args.bc_demos else None,
+        "evaluation_interface": "fail-closed public 320-D observation boundary",
+        "bc_samples": bc_samples,
+        "bc_epochs": args.bc_epochs,
+        "residual_scale": args.residual_scale,
+        "residual_policy": args.residual_policy,
+        "curriculum": args.curriculum,
+        "train_seeds": seeds,
+        "train_conditions_per_seed": len(seeds) * 8 * args.per,
+        "eval_seed": args.eval_seed,
+        "eval_episodes": len(scores),
+        "timesteps": args.timesteps,
+        "dense": args.dense,
+        "mean": float(np.mean(arr)) if len(arr) else 0.0,
+        "ci95": [float(x) for x in np.quantile(boot, [0.025, 0.975])],
+        "ci_method": f"episode bootstrap, {args.bootstrap} resamples, seed {args.ci_seed}",
+        "train_wall_s": train_wall_s,
+        "eval_wall_s": time.monotonic() - eval_t0,
+        "train_last20_mean": float(np.mean(recorder.scores[-20:])) if recorder.scores else None,
+        "training_episodes": len(recorder.scores),
+        "scores": scores,
+        "episodes": rows,
+        "versions": {"torch": torch.__version__},
+        "args": vars(args),
+    }
+    (out / "result.json").write_text(json.dumps(result, indent=2))
+    print(json.dumps({k: v for k, v in result.items() if k not in ("scores", "episodes")}, indent=2))
+    return result
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--timesteps", type=int, default=250000)
+    ap.add_argument("--train-seeds", default="1,2,3")
+    ap.add_argument("--per", type=int, default=2)
+    ap.add_argument("--eval-seed", type=int, default=None)
+    ap.add_argument("--eval-per", type=int, default=8)
+    ap.add_argument("--eval-episodes", type=int, default=32)
+    ap.add_argument("--dense", action="store_true")
+    ap.add_argument("--residual", action="store_true")
+    ap.add_argument("--residual-policy", choices=("script", "strong"), default="script")
+    ap.add_argument("--curriculum", action="store_true", help="train initially on real c1 conditions, then full distribution")
+    ap.add_argument("--residual-scale", type=float, default=0.35)
+    ap.add_argument("--zero-residual", action="store_true")
+    ap.add_argument("--residual-log-std", type=float, default=-2.0)
+    ap.add_argument("--bc-demos", default="")
+    ap.add_argument("--bc-teacher", choices=("script", "privileged"), default="script")
+    ap.add_argument("--bc-epochs", type=int, default=10)
+    ap.add_argument("--bc-only", action="store_true", help="save/evaluate BC without PPO fine-tuning")
+    ap.add_argument("--bc-eval-seed", type=int, default=None,
+                    help="separate BC development evaluation; matched ladder stays disjoint")
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--n-steps", type=int, default=1024)
+    ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--ppo-seed", type=int, default=0)
+    ap.add_argument("--ci-seed", type=int, default=20261117)
+    ap.add_argument("--bootstrap", type=int, default=10000)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+    if args.eval_seed is None and args.bc_eval_seed is None:
+        ap.error("explicit --eval-seed or --bc-eval-seed is required")
+    if args.bc_eval_seed is not None:
+        if args.eval_seed is not None:
+            ap.error("use either --bc-eval-seed or --eval-seed, not both")
+        args.eval_seed = args.bc_eval_seed
+    if args.bc_only:
+        if args.timesteps != 0:
+            ap.error("--bc-only requires --timesteps 0")
+        if not args.bc_demos:
+            ap.error("--bc-only requires --bc-demos")
+    train_and_eval(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -41,6 +41,11 @@ from nist_sim.compound_v07 import (  # noqa: E402
     compound_score_v07,
     sample_compound_v07,
 )
+from nist_sim.compound_v08 import (  # noqa: E402
+    AssemblyIVEpisode,
+    compound_score_v08,
+    sample_compound_v08,
+)
 from nist_sim.conditions import slot_world_xy  # noqa: E402
 from nist_sim.env import (  # noqa: E402
     BLOCK_H,
@@ -59,6 +64,10 @@ BUDGET_V06 = {"insert": 300, "collar": 260, "twist": 260}
 BUDGET_V07 = {
     "insert": 240, "collar": 200, "twist": 160, "rework": 380,
     "screw": 360, "stack": 320, "key": 320,
+}
+BUDGET_V08 = {
+    "insert": 200, "collar": 160, "twist": 140, "rework": 320,
+    "screw": 300, "stack": 280, "key": 300,
 }
 
 
@@ -89,11 +98,13 @@ def _nudge_seat_peg(ep: CompoundEpisode, i: int, *, min_prog: float = 0.08) -> b
 
     Proves the normal seat predicate can fire; miners never get true-state teleports.
     """
-    # Find insert/rework step progress for this peg as engagement evidence.
+    # Find insert/rework engagement evidence. v0.8 deliberately leaves the
+    # legacy scalar progress array at zero; its physical milestones replace it.
     engaged = False
     for sk, ss in enumerate(ep.cs.steps):
         if ss.kind in ("insert", "rework") and ss.peg == i:
-            if float(ep.step_progress[sk]) >= min_prog or ep._gripper_touching(ep.peg_body[i]):
+            evidence = getattr(ep, "_milestones_v08", [{} for _ in ep.cs.steps])[sk]
+            if float(ep.step_progress[sk]) >= min_prog or evidence.get("lift", False) or ep._gripper_touching(ep.peg_body[i]):
                 engaged = True
             break
     if not engaged:
@@ -138,6 +149,7 @@ def _aim_key_hand(ep: CompoundEpisode, yaw: float) -> None:
     on the next ``step`` (qpos-only writes are overwritten by the controller).
     """
     y = float(np.clip(yaw, -YAW_LIMIT + 0.05, YAW_LIMIT - 0.05))
+    ep._touching_bodies_cache = None
     ep.data.qpos[3] = y
     if hasattr(ep, "target") and len(ep.target) > 3:
         ep.target[3] = y
@@ -181,6 +193,7 @@ def _finish_key_actions(ep: CompoundEpisode, k: int) -> None:
 
     def _park_clear(dx: float = 0.032, dz: float = 0.088) -> None:
         """Open-grip park clear of the peg; sync hand target so the servo holds pose."""
+        ep._touching_bodies_cache = None
         ep.data.qpos[0] = hx + dx
         ep.data.qpos[1] = hy + dx
         ep.data.qpos[2] = dz
@@ -801,17 +814,25 @@ def solve_compound(
     ``oracle=False``: honest privileged reference — true-state actions only; completion
     must go through the normal seat/hold predicates.
     """
-    is_v07 = isinstance(ep, AssemblyIIIEpisode) or any(
-        s.kind in ("rework", "screw", "stack", "key") for s in ep.cs.steps
+    is_v08 = isinstance(ep, AssemblyIVEpisode)
+    is_v07 = (not is_v08) and (
+        isinstance(ep, AssemblyIIIEpisode)
+        or any(s.kind in ("rework", "screw", "stack", "key") for s in ep.cs.steps)
     )
-    budget = budget or (BUDGET_V07 if is_v07 else BUDGET_V06)
+    if budget is None:
+        budget = BUDGET_V08 if is_v08 else (BUDGET_V07 if is_v07 else BUDGET_V06)
     attempts = [0] * len(ep.cs.steps)
-    score_fn = compound_score_v07 if is_v07 else compound_score
+    if is_v08:
+        score_fn = compound_score_v08
+    elif is_v07:
+        score_fn = compound_score_v07
+    else:
+        score_fn = compound_score
 
     # Leave a tail of the horizon for the honest finisher (pose nudges + hold waits).
     # Keep this small so late stacks still get a full place-and-release slice.
     # Leave a short tail for ungripped key/stack holds after the last place.
-    finish_reserve = 30 if (is_v07 and not oracle) else 0
+    finish_reserve = 40 if ((is_v07 or is_v08) and not oracle) else 0
 
     def usable_remaining() -> int:
         return max(0, ep.c.max_steps - ep.steps - finish_reserve)
@@ -1119,7 +1140,7 @@ def solve_compound(
 
     # Finisher pass: burn remaining horizon on unfinished screws/keys/stacks whose pegs are seated.
     # Ignore the main-loop finish_reserve so a late stack still gets a full place slice.
-    if is_v07 and not ep.done:
+    if (is_v07 or is_v08) and not ep.done:
         for k, s in enumerate(ep.cs.steps):
             if ep.done or ep.step_done[k]:
                 continue
@@ -1165,7 +1186,7 @@ def solve_compound(
             elif s.kind == "insert" and not oracle:
                 _nudge_seat_peg(ep, s.peg, min_prog=0.0)
     # Final oracle pass (legacy): near-miss inserts then gates — sets step_done directly.
-    if oracle and is_v07:
+    if oracle and (is_v07 or is_v08):
         for k, s in enumerate(ep.cs.steps):
             if s.kind == "insert":
                 _privileged_insert_assist(ep, k)
@@ -1180,7 +1201,7 @@ def solve_compound(
                 _privileged_stack_snap(ep, k)
     # Honest finisher: pose nudges for seat/stack/screw; keys are action-only
     # (never set step_done / collar_run / _key_hold / _peg_probe_frames / key teleports).
-    if (not oracle) and is_v07 and not ep.done:
+    if (not oracle) and (is_v07 or is_v08) and not ep.done:
         # Pass 0: near-done keys/stacks (hold already ticking / latch armed) — idle them out.
         for k, s in enumerate(ep.cs.steps):
             if ep.done or ep.step_done[k]:
@@ -1287,7 +1308,11 @@ def main() -> int:
     ap.add_argument("--per", type=int, default=2)
     ap.add_argument("--episodes", type=int, default=8)
     ap.add_argument("--start", type=int, default=0)
-    ap.add_argument("--profile", default=os.environ.get("NIST_PROFILE", "v06"), choices=["v06", "v07"])
+    ap.add_argument(
+        "--profile",
+        default=os.environ.get("NIST_PROFILE", "v08"),
+        choices=["v06", "v07", "v08"],
+    )
     ap.add_argument(
         "--honest",
         action="store_true",
@@ -1295,8 +1320,12 @@ def main() -> int:
     )
     a = ap.parse_args()
     os.environ["NIST_PROFILE"] = a.profile
-    sample = sample_compound_v07 if a.profile == "v07" else sample_compound
-    make_ep = AssemblyIIIEpisode if a.profile == "v07" else CompoundEpisode
+    if a.profile == "v08":
+        sample, make_ep = sample_compound_v08, AssemblyIVEpisode
+    elif a.profile == "v07":
+        sample, make_ep = sample_compound_v07, AssemblyIIIEpisode
+    else:
+        sample, make_ep = sample_compound, CompoundEpisode
     _, conds = sample(a.seed, a.per)
     scores = []
     for i in range(a.start, min(len(conds), a.start + a.episodes)):

@@ -137,10 +137,13 @@ def test_mass_event_refreshes_derived_constants():
     q, v = ep.data.qpos.copy(), ep.data.qvel.copy()
     pegs = list(ep.peg_body)
     iw_before = m.body_invweight0[pegs, 0].copy()
+    mass_before = m.body_mass[pegs].copy()
     ep._fire_event(dict(kind="mass", scale=2.0))
     # Free-floating pegs are their own subtree: subtree mass must track the new body mass.
     np.testing.assert_allclose(m.body_subtreemass[pegs], m.body_mass[pegs])
-    np.testing.assert_allclose(m.body_invweight0[pegs, 0], iw_before / 2.0, rtol=1e-6)
+    # Account for the mass safety clamp rather than assuming scale=2 is reachable.
+    actual_ratio = m.body_mass[pegs] / mass_before
+    np.testing.assert_allclose(m.body_invweight0[pegs, 0], iw_before / actual_ratio, rtol=1e-6)
     # Same derived fields as a fresh mj_setConst on a copy (i.e. nothing left stale).
     ref = copy.deepcopy(m)
     mujoco.mj_setConst(ref, mujoco.MjData(ref))

@@ -6,3 +6,4 @@ test_policies/*.onnx
 baselines/*.onnx
 referee/nist_sim/reserved.json
 .venv/
+MUJOCO_LOG.TXT

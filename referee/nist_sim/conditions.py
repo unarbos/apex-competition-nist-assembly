@@ -275,8 +275,18 @@ def active_ranges() -> dict[str, tuple[float, float]]:
 
     out = {k: tuple(v) for k, v in RANGES.items()}
     p = _profile.get()
-    if p.name in ("v06", "v07"):
+    if p.name in ("v06", "v07", "v08"):
         out["clearance"] = tuple(p.clearance)
+        if p.name == "v08":
+            # Wider dynamics axes on the public training draw; referee held-out stretches further
+            # via reserved LHS + per-episode DYN_* stretch in compound_v08.
+            out["friction"] = (0.25, 1.6)
+            out["peg_mass"] = (0.004, 0.065)
+            out["gain_scale"] = (0.45, 1.6)
+            out["act_delay"] = (0.0, 1.2)
+            out["pose_bias_xy"] = (0.005, 0.012)
+            out["peg_bias_delta"] = (0.0060, 0.0130)
+            out["bias_drift"] = (0.000015, 0.000080)
     return out
 
 

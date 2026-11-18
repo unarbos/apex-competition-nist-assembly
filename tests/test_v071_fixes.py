@@ -35,13 +35,14 @@ def _ep(seed: int, i: int, per: int = 8) -> AssemblyIIIEpisode:
     return AssemblyIIIEpisode(conds[i], r1)
 
 
-def test_dockerfile_bakes_v07_not_v06():
-    """Image ENV must be v07; setdefault alone loses to a baked v06."""
+def test_dockerfile_bakes_declared_profile():
+    """The live image must bake v08, independent of a test's selected profile."""
     text = (ROOT / "referee" / "Dockerfile").read_text()
     m = re.search(r"ENV\s+[^\n]*NIST_PROFILE=(\w+)", text)
     assert m is not None, "Dockerfile must set NIST_PROFILE"
-    assert m.group(1) == "v07"
-    assert "NIST_PROFILE=v06" not in text
+    assert m.group(1) == "v08"
+    for older in ("v05", "v06", "v07"):
+        assert f"NIST_PROFILE={older}" not in text
 
 
 def test_referee_logs_nist_profile_in_metadata_contract():

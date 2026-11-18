@@ -1,4 +1,4 @@
-# Competition Onboarding Manifest: `nist_lite_assembly` v0.7.5 (Assembly III)
+# Competition Onboarding Manifest: `nist_lite_assembly` v0.8.0 (Assembly IV)
 
 ## 1. Goal statement & alignment plan
 **What success looks like:** a single learned policy that completes random compound
