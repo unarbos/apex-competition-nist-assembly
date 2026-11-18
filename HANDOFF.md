@@ -17,10 +17,10 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 ## 2. Deliverables
 | Item | Where | Done |
 |---|---|---|
-| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.7.5` | ☑ |
-| `spec.yaml` version `0.7.5`; digests pinned from release v0.7.5 | `spec.yaml` | ☑ |
-| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:80fad6b865c9af2a5731c7d2c3e516a9e465ff9551da053e4e3f740c10ecf324` | ☑ |
-| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:a55568d56eea8e69af0bfaa9c458a414f587aba231793783cb1842a99625c5b9` | ☑ |
+| Competition repo (public) + release tag | `https://github.com/unarbos/apex-competition-nist-assembly` @ `v0.8.0` | ☑ |
+| `spec.yaml` version `0.8.0`; digests pinned from release v0.8.0 | `spec.yaml` | ☑ |
+| Player image | `ghcr.io/unarbos/apex-competition-nist-assembly-player@sha256:c205fbd69f886a2dc0af22b07d42d2713e4d6668e9b7ce919dfa07bd4ed80f1e` | ☑ |
+| Referee image (**private package**) | `ghcr.io/unarbos/apex-competition-nist-assembly-referee@sha256:5f50c9ff8ecae58aa13b0de90debdc0b38cb308321d628585ccb842919a69ffa` | ☑ |
 | Held-out `reserved.json` from build secret | referee Dockerfile `reserve.py` | ☑ mechanism |
 | Reference baseline ONNX | `baselines/baseline.onnx` | ☑ |
 | Junk test-set policies | `test_policies/` | ☑ |
@@ -28,7 +28,7 @@ than v0.6 (c4 near-impossible) without blowing the eval budget.
 | Miner README + AlphaNIST section | `README.md` | ☑ |
 
 Pins unchanged: python:3.12-slim@sha256:a6e34c…, numpy 2.5.4, mujoco 3.16.0, onnx 1.23.2,
-onnxruntime 1.31.0. Image digests from release run 43596917775 (tag `v0.7.5`).
+onnxruntime 1.31.0. Image digests from release run 44351786802 (tag `v0.8.0`).
 
 ## 3. Ops parameters
 | Parameter | Proposal | Reason |
