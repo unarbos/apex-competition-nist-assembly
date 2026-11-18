@@ -88,9 +88,11 @@ Against the simpler script, its paired improvement was **+0.004224
 [0.002338, 0.006142]**; against the strong controller, **+0.004731
 [0.002671, 0.006758]**. Both pooled comparisons are nonoverlapping and both
 paired intervals exclude zero. The CEM round standard deviation is smaller than
-both policy gaps. **The learned-over-strongest-script gate passes on these
+both policy gaps. **The learned-over-strongest-script comparison passes on these
 rounds.** CEM is a local learned FSM parameterization, not a from-scratch PPO
-result.
+result. A requirement specifically for a learned PPO/SAC policy remains open;
+this CEM result must not be presented as satisfying that algorithm-specific
+requirement.
 
 The honest privileged reference scored **0.145420 [0.130896, 0.160576]** over
 the same 192 episodes, with round means **0.135470, 0.147758, 0.153033** and
@@ -140,8 +142,9 @@ fault. Their `result.json` and `history/episodes.jsonl` were byte-identical.
 Earlier runs at `87466bf` and `d05b6e6` measured **158.787 s**, **230.220 s**,
 and **228.450 s**. All are under 600 seconds; wall time varies with CI load.
 At `bea4f7d` and `1af7d01`, both GitHub pytest runs and both referee-image
-runs passed. Current-head checks are tracked on the PR; prior wall results are
-not represented as fresh validation of later commits.
+runs passed. At `72cb1cd`, both GitHub pytest runs and both referee-image runs
+passed. Prior wall results are not represented as fresh validation of later
+commits.
 
 ### Red team (final code, seed 7, 8 episodes per attack)
 
@@ -220,10 +223,10 @@ python tools/docker_wall_v08.py --image nist-assembly-referee:ci \
 ### Open risks
 
 - The CEM result is a local gradient around the public FSM, not from-scratch
-  deep RL. The independent 192-episode-per-policy comparison against the strong
-  script has nonoverlapping pooled intervals and a paired interval excluding
-  zero. The earlier small 24-episode comparison did not establish separation and
-  is not used as the final result.
+  deep RL or PPO/SAC. The independent 192-episode-per-policy comparison against
+  both scripts has nonoverlapping pooled intervals and paired intervals excluding
+  zero. A PPO/SAC-specific learned-policy requirement remains open; the CEM
+  comparison does not substitute for it.
 - The completed 131,072-step PPO model is below the strong script under the
   earlier scorer and does not establish learned improvement.
 - Honest privileged on the full three-round, 192-episode evaluation measures
