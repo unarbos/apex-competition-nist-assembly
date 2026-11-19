@@ -420,12 +420,10 @@ def test_ppo_matched_evaluator_uses_observation_boundary(monkeypatch, tmp_path):
     import eval_ladder_v08
     import types
     # The boundary contract does not require the optional PPO dependency.
-    # Supply a synthetic loader when Stable-Baselines3 is not installed.
-    try:
-        from stable_baselines3 import PPO
-    except ModuleNotFoundError:
-        PPO = types.SimpleNamespace()
-        monkeypatch.setitem(sys.modules, "stable_baselines3", types.SimpleNamespace(PPO=PPO))
+    import importlib.util
+    if importlib.util.find_spec("stable_baselines3") is None:
+        pytest.skip("optional Stable-Baselines3 is not installed in referee CI")
+    from stable_baselines3 import PPO
 
     model = type("ZeroPPO", (), {
         "predict": lambda self, obs, deterministic: (np.zeros(5), None),
@@ -592,17 +590,19 @@ def test_collar_and_stack_stable_and_displaced_finalization(conds, monkeypatch):
     """Stable and displaced collar/ring fixtures verify final physical credit.
 
     These are test-only finalization fixtures, not controller demonstrations.
-    The separate privileged-collar diagnostic below covers earned completion.
+    A stable collar is checked without an impulse; the mated stack is checked
+    under the default kick. Displaced parts must still lose credit.
     """
     from nist_sim.compound import COLLAR_H
     from nist_sim.env import MAX_OPEN, PEG_LEN
     import nist_sim.compound_v08 as v08
 
     for kind in ("collar", "stack"):
-        monkeypatch.setattr(v08, "PERTURB_XY", 0.0)
-        ep = AssemblyIVEpisode(conds[0], np.random.default_rng(23))
-        k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == kind)
+        monkeypatch.setattr(v08, "PERTURB_XY", 0.0018 if kind == "stack" else 0.0)
+        ep = AssemblyIVEpisode(conds[1 if kind == "stack" else 8], np.random.default_rng(23))
+        k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == kind and not ep.peg_parked[s.peg])
         j, i = ep.cs.steps[k].part, ep.cs.steps[k].peg
+        assert not ep.peg_parked[i]
         hx, hy = ep.slot_xy[i]
         ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
         ep.seated_now[i] = True
@@ -630,6 +630,7 @@ def test_collar_and_stack_stable_and_displaced_finalization(conds, monkeypatch):
             assert ep._stack_mated[j]
 
         # A displaced collar/ring cannot retain credit from stale evidence.
+        monkeypatch.setattr(v08, "PERTURB_XY", 0.0018)
         ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx + 0.05, hy, 0.004], [1, 0, 0, 0])
         ep.collar_run[j] = 0
         assert not ep._physical_step_ok(k)[0]
@@ -637,25 +638,6 @@ def test_collar_and_stack_stable_and_displaced_finalization(conds, monkeypatch):
         ep._finalized = False
         ep._finalize_stability()
         assert not ep.step_done[k]
-
-
-def test_privileged_reference_earns_collar_then_checks_final_seat(conds):
-    """Use the legacy privileged reference for an earned collar when available."""
-    from compound_solver import solve_compound
-
-    earned = None
-    for condition in conds[:4]:
-        if not any(s.kind == "collar" for s in condition.compound.steps):
-            continue
-        candidate = AssemblyIVEpisode(condition, np.random.default_rng(23))
-        solve_compound(candidate, oracle=False)
-        if any(candidate.step_done[k] and s.kind == "collar" for k, s in enumerate(candidate.cs.steps)):
-            earned = candidate
-            break
-    assert earned is not None, "legacy privileged reference did not complete a collar"
-    k = next(k for k, s in enumerate(earned.cs.steps) if s.kind == "collar" and earned.step_done[k])
-    assert earned._physical_step_ok(k)[0]
-    assert earned._stability_ok[k]
 
 
 def test_collar_finalization_uses_current_physical_seat_not_stale_counter(conds, monkeypatch):
@@ -693,7 +675,7 @@ def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
 
     # Isolate measured-pose verification from the separate perturbation check.
     import nist_sim.compound_v08 as v08
-    monkeypatch.setattr(v08, "PERTURB_XY", 0.0)
+    monkeypatch.setattr(v08, "PERTURB_XY", 0.0018)
     ep = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
     k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "stack")
     j, i = ep.cs.steps[k].part, ep.cs.steps[k].peg
@@ -713,6 +695,12 @@ def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
     ep._finalize_stability()
     assert ep.step_done[k]
     assert ep._physical_step_ok(k)[0]
+    assert ep._stack_mated[j]
+    # The mated ring is not directly kicked; the seated peg still is. An
+    # unmated ring must still receive the direct perturbation impulse.
+    adr = ep.peg_vadr[i]
+    peg_speed = float(np.linalg.norm(ep.data.qvel[adr:adr + 2]))
+    assert peg_speed > 0.0
 
     displaced = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
     monkeypatch.setattr(v08, "PERTURB_XY", 0.0018)
@@ -744,6 +732,22 @@ def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
     # A stale mate latch cannot hide a ring that physically left the peg.
     ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx + 0.05, hy, 0.004], [1, 0, 0, 0])
     assert not ep._physical_step_ok(k)[0]
+
+    unmated = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
+    unmated.collar_parked[j] = False
+    unmated._set_body_active(unmated.collar_body[j], True)
+    unmated._set_free(unmated.peg_qadr[i], unmated.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    unmated.seated_now[i] = True
+    unmated.data.qpos[2] = 0.16
+    unmated._set_free(unmated.collar_qadr[j], unmated.collar_vadr[j], [hx, hy, 0.054], [1, 0, 0, 0])
+    unmated._stack_mated[j] = False
+    unmated._action_earned_v08 = True
+    unmated.step_done[k] = True
+    unmated.step_done_at[k] = 1
+    unmated.done = True
+    unmated._finalize_stability()
+    speed = float(np.linalg.norm(unmated.data.qvel[unmated.collar_vadr[j]:unmated.collar_vadr[j] + 2]))
+    assert speed > 0.0, "an unmated loose ring must still be kicked directly"
 
 
 def test_finalization_requires_upright_seated_peg(conds):

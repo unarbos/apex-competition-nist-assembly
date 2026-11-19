@@ -50,6 +50,10 @@ For each blueprint step:
    action-earned physical evidence buckets: `0.12` for sustained grasp/lift, and `0.06`
    each for held transport toward the real hole, held insertion, near-target
    alignment, and stable release through the final perturbation-settle window.
+   An earned mated interference-fit stack ring is exempt from the direct collar
+   impulse; its peg is still perturbed and the measured ring pose is verified
+   after settling. Finalization never re-pins the ring. Unmated loose rings
+   still receive the direct impulse.
    Transport requires earned lift and closed contacting jaws; its best-so-far
    fraction measures actual part motion toward the target, not wrist proximity.
    Insertion additionally requires transport, an upright held part, and depth

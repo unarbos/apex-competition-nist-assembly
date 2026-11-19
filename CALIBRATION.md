@@ -36,12 +36,14 @@ controller result and is not a gate for this scoring-fix PR.
 4. **Collar/stack finalization.** `collar_run` is refreshed during settling.
    Final collar credit requires current physical seating rather than a stale
    counter. Final stack credit checks the measured ring pose; finalization does
-   not re-pin a mated ring after the kick. Regression tests use the legacy
-   privileged reference to earn collar/stack completion, then verify stable and
-   displaced physical fixtures for both kinds. Final peg seating requires both
-   depth and upright orientation. The bounded diagnostic privileged search
-   completed a collar but no stack; stack stable/displaced cases are explicitly
-   labeled physical fixtures, not a claimed privileged stack demonstration.
+   not re-pin a mated ring after the kick. An earned interference-fit stack
+   ring is exempt from the direct collar impulse; the peg is still kicked and
+   the ring's measured pose is verified after settling. Unmated loose rings
+   still receive the impulse. Default-kick tests verify that a mated stable
+   ring keeps credit, a displaced ring loses credit, and an unmated ring is
+   still kicked. Final peg seating requires both depth and upright orientation.
+   Stack fixtures are explicitly physical finalization fixtures, not a claimed
+   privileged stack demonstration.
 
 Non-round key-window sampling is intentionally unchanged in this scoped PR:
 symmetry-midpoint windows remain predictable and are not a blind search. This is
@@ -56,7 +58,7 @@ from completed runs on this exact scorer, not copied from earlier WIP reports.
 | Check | Result |
 |---|---|
 | Full test suite | Pending on the scoped PR branch |
-| Four-fix focused regressions | **7 passed, 32 deselected in 95.68 s**; CI-fix selection **9 passed, 31 deselected in 242.62 s** |
+| Four-fix focused regressions | **7 passed, 1 skipped, 31 deselected in 31.66 s** in the CI-only venv (no Stable-Baselines3) |
 | Built-image 64-episode / two-CPU wall | **156.580 s** (run 44526263690) and **228.694 s** (run 44526210828), cpuset 0,1; no player fault; both pass 600 s |
 
 ## Matched fixed-scorer results

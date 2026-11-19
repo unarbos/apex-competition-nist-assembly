@@ -1026,6 +1026,12 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             if self.collar_parked[j]:
                 continue
             ang = float(self.rng.uniform(0, 2 * math.pi))
+            if self.cs.collars[j].is_stack and self._stack_mated[j]:
+                # An earned interference-fit mate is not a loose collar. Do
+                # not kick the ring off its scored pose before measuring it.
+                # The peg still receives its impulse, and the final ring pose
+                # is verified below without re-pinning the mate.
+                continue
             vx = 0.7 * PERTURB_XY * math.cos(ang) / max(PHYSICS_PROXY_DT(), 1e-3)
             vy = 0.7 * PERTURB_XY * math.sin(ang) / max(PHYSICS_PROXY_DT(), 1e-3)
             adr = self.collar_vadr[j]
