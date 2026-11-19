@@ -54,6 +54,7 @@ from nist_sim.compound_v08 import (
     OBS_DIM_V08,
     AssemblyIVEpisode,
     compound_score_v08,
+    compound_record_events_v08,
     compound_record_task_v08,
     sample_compound_v08,
     step_results_v08,
@@ -213,7 +214,7 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                     row["n_steps"] = cinfo["n_steps"]
                     row["credit_by_kind"] = cinfo["per_kind"]
                     row["step_results"] = step_results_v08(e) if ASSEMBLY_IV else step_results(e)
-                    row["events"] = record_events(e)
+                    row["events"] = compound_record_events_v08(e.events_fired) if ASSEMBLY_IV else record_events(e)
                     row["events_fired"] = cinfo["events"]
                     row["parts_lost"] = int(e.parts_lost)
                     row["nist_profile"] = _PROFILE_NAME

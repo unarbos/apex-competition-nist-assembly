@@ -899,6 +899,21 @@ def test_no_closeness_or_detent_in_obs(conds):
     assert float(o[b + 5]) in (0.0, 1.0, 2.0)  # collar flag or empty — not tol*10 (~0.4)
 
 
+def test_record_task_and_event_sanitizers_hide_key_windows(conds):
+    from nist_sim.compound_v08 import compound_record_events_v08, compound_record_task_v08
+
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(123))
+    task = compound_record_task_v08(ep.cs)
+    assert all("key_yaw" not in row and "key_tol" not in row for row in task["steps"])
+    events = compound_record_events_v08([
+        {"kind": "retarget", "step": 17, "key_step": 1, "old_yaw": 0.8, "new_yaw": -0.4},
+        {"kind": "gain", "step": 22, "scale": 1.7, "friction": 1.3},
+    ])
+    assert "old_yaw" not in events[0] and "new_yaw" not in events[0]
+    assert events[0]["kind"] == "retarget" and events[0]["step"] == 17
+    assert events[1] == {"kind": "gain", "step": 22, "scale": 1.7}
+
+
 def test_observation_has_no_seed_key_window_or_private_numeric_leak(conds, tmp_path, monkeypatch):
     from nist_sim import conditions
     from nist_sim.reserve import reserved_from_secret

@@ -1245,6 +1245,20 @@ def step_results_v08(ep: AssemblyIVEpisode | CompoundEpisode) -> list[dict]:
     return rows
 
 
+def compound_record_events_v08(events: list[dict]) -> list[dict]:
+    """Serialize public event kinds/times without hidden key-window payloads."""
+    private = {
+        "key_yaw", "key_tol", "old_yaw", "new_yaw",
+        "pose_bias_xy", "pose_bias_yaw", "peg_bias_delta", "slot_bias", "peg_bias",
+        "friction", "peg_mass", "gain_scale", "obs_noise", "obs_noise_rad",
+        "dropout_prob", "bias_drift", "backlash", "search_pitch", "salt", "seed",
+    }
+    return [
+        {k: v for k, v in event.items() if k not in private}
+        for event in events
+    ]
+
+
 def compound_record_task_v08(cs: CompoundSpec) -> dict:
     """Public Assembly IV graph; never serialize hidden key windows.
 
