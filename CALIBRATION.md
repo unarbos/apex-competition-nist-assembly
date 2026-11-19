@@ -58,9 +58,10 @@ SHA-256 `4b1b96662b08c7903da4468f5ace815716d167f13360e57a244c0a9071ad79ec`.
 
 | Check | Result |
 |---|---|
-| Full test suite, final scoring-fix head `2e8a4b3` | **202 passed, 7 skipped, 4 warnings in 848.26 s** (CI run 44537159324) and **202 passed, 7 skipped, 4 warnings in 1161.30 s** (CI run 44537171527); Stable-Baselines3 is absent |
+| Full test suite, final evidence head `3d2051e` | **202 passed, 7 skipped, 4 warnings in 1046.93 s** (CI run 44546949827) and **202 passed, 7 skipped, 4 warnings in 1276.50 s** (CI run 44546959280); Stable-Baselines3 is absent |
+| Full test suite, scoring-fix head `2e8a4b3` | **202 passed, 7 skipped, 4 warnings in 848.26 s** (CI run 44537159324) and **202 passed, 7 skipped, 4 warnings in 1161.30 s** (CI run 44537171527); Stable-Baselines3 is absent |
 | Four-fix focused regressions | **7 passed, 1 skipped, 31 deselected in 31.66 s** in the CI-only venv (no Stable-Baselines3) |
-| Built-image 64-episode / two-CPU wall, final scoring-fix head | **293.619 s** (CI run 44537159324) and **223.005 s** (CI run 44537171527), cpuset 0,1; no player fault; both pass 600 s |
+| Built-image 64-episode / two-CPU wall, final evidence head `3d2051e` | **128.391 s** (CI run 44546959280) and **317.048 s** (CI run 44546949827), cpuset 0,1; no player fault; both pass 600 s |
 
 Per-round wall time is not aggregated across resumable measurement chunks. The
 built-image CI runs above are the wall-time evidence; they are separate from the
