@@ -68,9 +68,11 @@ SHA-256 `fbe94f221465134f598bbd1b63144d421991333544af04e45c9fe75d8ae73473`.
 
 | Check | Result |
 |---|---|
-| Full test suite, evidence head `4eed6ad` | **208 passed, 7 skipped, 4 warnings in 917.68 s** (CI run 44574980029) and **208 passed, 7 skipped, 4 warnings in 1189.74 s** (CI run 44574994762); Stable-Baselines3 is absent |
+| Full test suite, evidence head `6939708` | **208 passed, 7 skipped, 4 warnings in 841.41 s** (CI run 44581816589) and **208 passed, 7 skipped, 4 warnings in 915.45 s** (CI run 44581828716); Stable-Baselines3 is absent |
+| Full test suite, scorer head `4eed6ad` | **208 passed, 7 skipped, 4 warnings in 917.68 s** (CI run 44574980029) and **208 passed, 7 skipped, 4 warnings in 1189.74 s** (CI run 44574994762); Stable-Baselines3 is absent |
 | Final-source focused regressions | **74 passed, 1 skipped in 616.70 s**; additional event-privacy and serialized-envelope checks **4 passed, 54 deselected in 28.89 s** |
-| Built-image 64-episode / two-CPU wall, evidence head `4eed6ad` | **232.121 s** (CI run 44574994762) and **232.520 s** (CI run 44574980029), cpuset 0,1; no player fault; both pass 600 s |
+| Built-image 64-episode / two-CPU wall, evidence head `6939708` | **128.524 s** (CI run 44581816589) and **318.906 s** (CI run 44581828716), cpuset 0,1; no player fault; both pass 600 s |
+| Built-image 64-episode / two-CPU wall, scorer head `4eed6ad` | **232.121 s** (CI run 44574994762) and **232.520 s** (CI run 44574980029), cpuset 0,1; no player fault; both pass 600 s |
 
 Per-round wall time is not aggregated across resumable measurement chunks. The
 built-image CI runs above are the wall-time evidence; they are separate from the
