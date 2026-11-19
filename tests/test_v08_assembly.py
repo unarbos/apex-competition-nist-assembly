@@ -418,7 +418,14 @@ def test_ppo_matched_evaluator_uses_observation_boundary(monkeypatch, tmp_path):
             raise AssertionError(f"privileged PPO read: {name}")
 
     import eval_ladder_v08
-    from stable_baselines3 import PPO
+    import types
+    # The boundary contract does not require the optional PPO dependency.
+    # Supply a synthetic loader when Stable-Baselines3 is not installed.
+    try:
+        from stable_baselines3 import PPO
+    except ModuleNotFoundError:
+        PPO = types.SimpleNamespace()
+        monkeypatch.setitem(sys.modules, "stable_baselines3", types.SimpleNamespace(PPO=PPO))
 
     model = type("ZeroPPO", (), {
         "predict": lambda self, obs, deterministic: (np.zeros(5), None),
@@ -581,43 +588,20 @@ def test_dependent_step_partials_do_not_reuse_insert_peg_motion(conds):
         assert _partial_credit_v08(dependent_ep, k) == 0.0
 
 
-def test_privileged_reference_collar_and_stack_stable_and_displaced(conds, monkeypatch):
-    """Physical finalization fixtures use the existing privileged reference.
+def test_collar_and_stack_stable_and_displaced_finalization(conds, monkeypatch):
+    """Stable and displaced collar/ring fixtures verify final physical credit.
 
-    The reference's earned completion is checked at finalization; a fixture-only
-    displacement then verifies that a collar/ring cannot retain credit from a
-    stale counter or mate latch. This is not an action-only controller result.
+    These are test-only finalization fixtures, not controller demonstrations.
+    The separate privileged-collar diagnostic below covers earned completion.
     """
-    from compound_solver import solve_compound
     from nist_sim.compound import COLLAR_H
     from nist_sim.env import MAX_OPEN, PEG_LEN
     import nist_sim.compound_v08 as v08
 
     for kind in ("collar", "stack"):
-        earned = None
-        for condition in conds[:4]:
-            if not any(s.kind == kind for s in condition.compound.steps):
-                continue
-            candidate = AssemblyIVEpisode(condition, np.random.default_rng(23))
-            solve_compound(candidate, oracle=False)
-            if any(candidate.step_done[k] and s.kind == kind for k, s in enumerate(candidate.cs.steps)):
-                earned = candidate
-                break
-        if kind == "stack":
-            # No earned stack was found in the bounded privileged diagnostic.
-            # Exercise a physical finalization fixture without claiming one.
-            earned = AssemblyIVEpisode(conds[0], np.random.default_rng(23))
-            k = next(k for k, s in enumerate(earned.cs.steps) if s.kind == "stack")
-        else:
-            assert earned is not None, f"legacy privileged reference did not complete a {kind}"
-            k = next(k for k, s in enumerate(earned.cs.steps) if s.kind == kind and earned.step_done[k])
-            assert earned._physical_step_ok(k)[0]
-            assert earned._stability_ok[k]
-
-        # Test-only fixture: hold the same physical kind stationary with zero
-        # perturbation to check a stable seat and refreshed collar_run.
         monkeypatch.setattr(v08, "PERTURB_XY", 0.0)
-        ep = AssemblyIVEpisode(earned.c, np.random.default_rng(23))
+        ep = AssemblyIVEpisode(conds[0], np.random.default_rng(23))
+        k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == kind)
         j, i = ep.cs.steps[k].part, ep.cs.steps[k].peg
         hx, hy = ep.slot_xy[i]
         ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
@@ -645,8 +629,7 @@ def test_privileged_reference_collar_and_stack_stable_and_displaced(conds, monke
         else:
             assert ep._stack_mated[j]
 
-        # Displacement invalidates the same kind's physical seat immediately;
-        # no stale counter or _stack_mated flag can preserve credit.
+        # A displaced collar/ring cannot retain credit from stale evidence.
         ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx + 0.05, hy, 0.004], [1, 0, 0, 0])
         ep.collar_run[j] = 0
         assert not ep._physical_step_ok(k)[0]
@@ -654,6 +637,25 @@ def test_privileged_reference_collar_and_stack_stable_and_displaced(conds, monke
         ep._finalized = False
         ep._finalize_stability()
         assert not ep.step_done[k]
+
+
+def test_privileged_reference_earns_collar_then_checks_final_seat(conds):
+    """Use the legacy privileged reference for an earned collar when available."""
+    from compound_solver import solve_compound
+
+    earned = None
+    for condition in conds[:4]:
+        if not any(s.kind == "collar" for s in condition.compound.steps):
+            continue
+        candidate = AssemblyIVEpisode(condition, np.random.default_rng(23))
+        solve_compound(candidate, oracle=False)
+        if any(candidate.step_done[k] and s.kind == "collar" for k, s in enumerate(candidate.cs.steps)):
+            earned = candidate
+            break
+    assert earned is not None, "legacy privileged reference did not complete a collar"
+    k = next(k for k, s in enumerate(earned.cs.steps) if s.kind == "collar" and earned.step_done[k])
+    assert earned._physical_step_ok(k)[0]
+    assert earned._stability_ok[k]
 
 
 def test_collar_finalization_uses_current_physical_seat_not_stale_counter(conds, monkeypatch):

@@ -56,8 +56,8 @@ from completed runs on this exact scorer, not copied from earlier WIP reports.
 | Check | Result |
 |---|---|
 | Full test suite | Pending on the scoped PR branch |
-| Four-fix focused regressions | **7 passed, 32 deselected in 95.68 s** |
-| Built-image 64-episode / two-CPU wall | CI `referee-image` job on the PR; no local container claim |
+| Four-fix focused regressions | **7 passed, 32 deselected in 95.68 s**; CI-fix selection **9 passed, 31 deselected in 242.62 s** |
+| Built-image 64-episode / two-CPU wall | **156.580 s** (run 44526263690) and **228.694 s** (run 44526210828), cpuset 0,1; no player fault; both pass 600 s |
 
 ## Matched fixed-scorer results
 
