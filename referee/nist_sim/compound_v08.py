@@ -1245,6 +1245,20 @@ def step_results_v08(ep: AssemblyIVEpisode | CompoundEpisode) -> list[dict]:
     return rows
 
 
+def compound_record_task_v08(cs: CompoundSpec) -> dict:
+    """Public Assembly IV graph; never serialize hidden key windows.
+
+    The inherited record builder predates the no-answer-cue contract and writes
+    key_yaw/key_tol for older profiles. Assembly IV must not publish them after
+    the round either: the history is player-visible, not a private replay cache.
+    """
+    task = cs.record_task()
+    for step in task["steps"]:
+        step.pop("key_yaw", None)
+        step.pop("key_tol", None)
+    return task
+
+
 def compound_score_v08(ep: AssemblyIVEpisode | AssemblyIIIEpisode | CompoundEpisode) -> dict:
     """Equal-weight end-state score with precision × stability.
 

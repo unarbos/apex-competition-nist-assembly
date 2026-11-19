@@ -127,9 +127,18 @@ def test_result_metadata_matches_platform_envelope(tmp_path):
         "key_yaw", "key_tol", "seed_sequence", "build_salt", "reserved", "salt",
         "pose_bias", "slot_bias", "peg_bias", "friction", "peg_mass", "gain_scale",
         "obs_noise", "dropout_prob", "bias_drift", "backlash", "search_pitch",
-        "offset_xy", "yaw_err", "height", "hidden_range",
+        "yaw_err", "hidden_range",
     )
-    assert all(token not in blob for token in forbidden)
+    # The round-condition ranges are public training-draw axes, not reserved
+    # endpoints. Public board/clutter heights and offsets are allowed as well.
+    allowed_round_ranges = md["details"]["round_condition_ranges"]
+    assert allowed_round_ranges == records[0]["round_condition_ranges"]
+    public_round_blob = json.dumps(allowed_round_ranges)
+    assert all(token not in public_round_blob for token in ("reserved", "salt", "hidden_range"))
+    private_blob = json.dumps({"metadata_without_public_ranges": {
+        k: v for k, v in md["details"].items() if k != "round_condition_ranges"
+    }, "records": [row for row in records[1:] if True]})
+    assert all(token not in private_blob for token in forbidden)
     unit_ids = {u["id"] for u in md["units"]}
     assert all(u["type"] in UNIT_TYPES for u in md["units"])
     assert all(m.get("format", "number") in FORMATS for m in md["summary"] + md["metrics"])

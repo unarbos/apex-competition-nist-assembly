@@ -98,6 +98,10 @@ the images bake:
 - Blueprint encoding occupies the last 32 floats (tier, step kinds, peg ids, blocked/done,
   graph size). See `compound_v08.py` module docstring.
 - Records remain `nist_lite_record/4` with `nist_profile: v08` and per-step precision/stability.
+  Assembly IV history omits `key_yaw` and `key_tol` from task steps: history is
+  player-visible after a round, not a private replay cache. The older profiles'
+  record behavior is unchanged. Public training-draw ranges remain distinct
+  from reserved endpoints and per-episode hidden dynamics.
 
 ## Non-goals for this PR
 

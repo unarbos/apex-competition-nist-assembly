@@ -54,6 +54,7 @@ from nist_sim.compound_v08 import (
     OBS_DIM_V08,
     AssemblyIVEpisode,
     compound_score_v08,
+    compound_record_task_v08,
     sample_compound_v08,
     step_results_v08,
 )
@@ -205,7 +206,7 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                     pub = dict(row["conditions"])
                     pub["collars"] = conds[i].compound.record_collars()
                     row["conditions"] = pub
-                    row["task"] = conds[i].compound.record_task()
+                    row["task"] = compound_record_task_v08(conds[i].compound) if ASSEMBLY_IV else conds[i].compound.record_task()
                     row["tier"] = conds[i].compound.tier
                     row["steps_done"] = cinfo["n_done"]
                     row["steps_in_order"] = cinfo["n_in_order"]
