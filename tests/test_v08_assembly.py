@@ -676,8 +676,8 @@ def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
     # Isolate measured-pose verification from the separate perturbation check.
     import nist_sim.compound_v08 as v08
     monkeypatch.setattr(v08, "PERTURB_XY", 0.0018)
-    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
-    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "stack")
+    ep = AssemblyIVEpisode(conds[1], np.random.default_rng(17))
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "stack" and not ep.peg_parked[s.peg])
     j, i = ep.cs.steps[k].part, ep.cs.steps[k].peg
     assert not ep.peg_parked[i]
     ep.collar_parked[j] = False
