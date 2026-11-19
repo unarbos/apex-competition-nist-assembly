@@ -110,13 +110,17 @@ PARTIAL_WEIGHTS_V08 = {
 }
 LIFT_CLEARANCE_V08 = 0.008  # part bottom above its support plane, in metres
 GRASP_MIN_FRAMES_V08 = 2  # reject a single-frame contact transient
-DENSE_LIFT_START_V08 = 0.0005  # 0.5 mm: above contact/settle noise, below the lift milestone
+# Sub-lift evidence must be a sustained grasp-and-raise, not contact jitter.
+# 4 mm clears the observed ~0.8 mm soft-contact excursions while remaining below
+# the 8 mm full-lift milestone. Eight frames at 25 Hz require a 0.32 s hold.
+DENSE_LIFT_START_V08 = 0.004
 DENSE_LIFT_GAIN_V08 = 0.20  # continuous sub-lift credit, within LIFT_CREDIT_V08
 TRANSPORT_START_V08 = 0.025  # m; movement below this is not called transport
 TRANSPORT_GAIN_V08 = 0.60  # best-so-far held-part translation toward its real hole
 INSERT_GAIN_V08 = 0.60  # held insertion fraction within the actual hole radius
 POSE_TOL_SCALE_V08 = 2.0  # near-target alignment is deliberately not a seat
 STABLE_MIN_FRAMES_V08 = 8  # final 8 of 12 perturbation-settle frames
+DENSE_LIFT_HOLD_FRAMES_V08 = STABLE_MIN_FRAMES_V08
 # Out-of-order completed steps earn almost nothing (dependency order matters).
 OOO_CREDIT_V08 = 0.03
 # End-state done credit floor/ceiling before precision × stability.
@@ -614,6 +618,7 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             for _ in cond.compound.steps
         ]
         self._grasp_run_v08 = {}
+        self._dense_lift_run_v08 = {}
         self._part_support_v08 = {}
         self._part_reference_v08 = {}
         self._part_initial_distance_v08 = {}
@@ -683,6 +688,22 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 TRANSPORT_START_V08, float(np.hypot(p[0] - hx, p[1] - hy))
             )
 
+    def _bilateral_grasp_v08(self, body: int) -> bool:
+        """Both finger bodies, not palm or unilateral contact, must touch the part."""
+        fingers = {
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in ("fl", "fr")
+        }
+        contacted = set()
+        for con in self.data.contact[: self.data.ncon]:
+            b1 = int(self.model.geom_bodyid[con.geom1])
+            b2 = int(self.model.geom_bodyid[con.geom2])
+            if b1 == body and b2 in fingers:
+                contacted.add(b2)
+            elif b2 == body and b1 in fingers:
+                contacted.add(b1)
+        return contacted == fingers
+
     def _update_milestones_v08(self, *, settling: bool = False) -> None:
         """Record verified partial lift plus grasp/lift, alignment and stability.
 
@@ -723,9 +744,19 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             if self._grasp_run_v08[k] >= GRASP_MIN_FRAMES_V08:
                 ms["lift"] = True
             # A held part can make incremental, verified progress before the
-            # binary lift fires. Best-so-far cannot be farmed by oscillation.
-            if touching and closed and not settling:
-                relative_lift = float(p[2]) - reference_z
+            # binary lift fires. Only a sustained two-finger grasp-and-raise
+            # counts; palm pushes, one-finger contact and contact jitter do not.
+            # Best-so-far cannot be farmed by oscillation after evidence is earned.
+            relative_lift = float(p[2]) - reference_z
+            dense_grasp = (
+                touching and closed and self._bilateral_grasp_v08(body)
+                and relative_lift >= DENSE_LIFT_START_V08 and not settling
+            )
+            if dense_grasp:
+                self._dense_lift_run_v08[k] = self._dense_lift_run_v08.get(k, 0) + 1
+            else:
+                self._dense_lift_run_v08[k] = 0
+            if self._dense_lift_run_v08[k] >= DENSE_LIFT_HOLD_FRAMES_V08:
                 dense = DENSE_LIFT_GAIN_V08 * np.clip(
                     (relative_lift - DENSE_LIFT_START_V08)
                     / max(LIFT_CLEARANCE_V08 - DENSE_LIFT_START_V08, 1e-6),

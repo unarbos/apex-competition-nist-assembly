@@ -94,6 +94,24 @@ FORMATS = {"number", "percent", "duration_s", "score", "count", "text"}
 UNIT_TYPES = {"match", "game", "task", "subset", "instance", "completion", "other"}
 
 
+def test_validate_actions_rejects_nonfinite_bad_shape_and_non_numeric():
+    from referee import _validate_actions
+
+    assert _validate_actions([[0.0] * 5], 1)[0].shape == (5,)
+    for raw in (
+        [[float("nan")] * 5],
+        [[float("inf"), 0.0, 0.0, 0.0, 0.0]],
+        [[-float("inf"), 0.0, 0.0, 0.0, 0.0]],
+        [[True, 0.0, 0.0, 0.0, 0.0]],
+        [["0", 0.0, 0.0, 0.0, 0.0]],
+        [[0.0] * 4],
+    ):
+        assert _validate_actions(raw, 1) == [None]
+    assert _validate_actions([], 1) is None
+    assert _validate_actions([0.0] * 5, 1) is None
+    assert _validate_actions([[1e100, -1e100, 1e100, -1e100, 1e100]], 1)[0].tolist() == [1e100, -1e100, 1e100, -1e100, 1e100]
+
+
 def test_result_metadata_matches_platform_envelope(tmp_path):
     result = run("baselines/baseline.onnx", tmp_path)
     md = result["metadata"]
@@ -104,6 +122,14 @@ def test_result_metadata_matches_platform_envelope(tmp_path):
     records = [json.loads(x) for x in (tmp_path / "history/episodes.jsonl").read_text().splitlines()]
     assert records[0]["assembly"] == "IV"
     assert all(row["nist_profile"] == "v08" for row in records[1:])
+    blob = json.dumps({"metadata": md, "records": records})
+    forbidden = (
+        "key_yaw", "key_tol", "seed_sequence", "build_salt", "reserved", "salt",
+        "pose_bias", "slot_bias", "peg_bias", "friction", "peg_mass", "gain_scale",
+        "obs_noise", "dropout_prob", "bias_drift", "backlash", "search_pitch",
+        "offset_xy", "yaw_err", "height", "hidden_range",
+    )
+    assert all(token not in blob for token in forbidden)
     unit_ids = {u["id"] for u in md["units"]}
     assert all(u["type"] in UNIT_TYPES for u in md["units"])
     assert all(m.get("format", "number") in FORMATS for m in md["summary"] + md["metrics"])

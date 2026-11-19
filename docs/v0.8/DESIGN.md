@@ -59,10 +59,16 @@ For each blueprint step:
    Insertion additionally requires transport, an upright held part, and depth
    inside the actual hole region. Their continuous fractions are bounded by
    `0.60`. Within the lift bucket, a best-so-far fraction of at most `0.024`
-   recognizes a closed, contacting grasp that raises the part 0.5–8 mm above its
-   settled height. Oscillation cannot accumulate credit, and released/falling
-   parts, wrist motion, contact alone, absolute spawn height, passive poses and
-   settling frames earn none. Legacy scalar progress is not a scoring input.
+   recognizes a real grasp that raises the part 4–8 mm above its settled height
+   for eight consecutive control frames (0.32 s at 25 Hz). Both finger bodies
+   must contact the part while the jaws are closed. This rejects the observed
+   ~0.8 mm soft-contact excursions that previously produced fractional lift:
+   palm pushes, unilateral contact, sub-mm jitter, and brief spikes are not a
+   grasp-and-raise. The threshold remains below the 8 mm full-lift milestone.
+   Oscillation cannot accumulate credit after valid evidence is earned, and
+   released/falling parts, wrist motion, contact alone, absolute spawn height,
+   passive poses and settling frames earn none. Legacy scalar progress is not a
+   scoring input.
    These buckets are alternatives to, not additions to, done credit. Unfinished
    key, twist, and screw steps earn no generic insertion partial credit.
 5. Episode score = mean over steps. Round score = mean over episodes.

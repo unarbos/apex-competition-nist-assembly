@@ -56,8 +56,10 @@ families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
   release through the settle. Unfinished
   key, twist, and screw steps earn no generic insertion partial credit. Transport and
   insertion use bounded best-so-far physical evidence and require their predecessors, a closed
-  contacting grasp, and real part motion. The lift component includes bounded credit for raising
-  the part 0.5–8 mm above its settled height. Wrist proximity, released/falling parts,
+  contacting grasp, and real part motion. The lift component includes bounded credit for a
+  bilateral finger grasp that raises the part 4–8 mm above its settled height for eight
+  consecutive control frames. Sub-mm contact jitter, palm pushes, unilateral contact, and brief
+  spikes earn none. Wrist proximity, released/falling parts,
   oscillation, contact alone, reset-only states, and passive end poses earn nothing; no grasped
   or near-hole starts are used in v0.8. Ceiling 1.0 is effectively unreachable.
 - **Keys:** absolute yaw hidden; no closeness / detent / pulse. Windows are anti-aligned from
