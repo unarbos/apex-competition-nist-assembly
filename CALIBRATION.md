@@ -11,7 +11,8 @@ and image digest pins are unchanged. `spec.yaml` declares **0.8.1**.
 Controller and PPO/SAC tuning are deferred to a later PR. The measured privileged
 reference below is the existing **legacy assisted privileged solver**: it reads
 true state and may use simulator-state assists. It is not an action-only
-controller result and is not a gate for this scoring-fix PR.
+controller result and is not a gate for this scoring-fix PR. Across the 192
+matched episodes it completes 3 stack steps, 11 collars, and 27 keys.
 
 ## Four fixes
 
@@ -52,14 +53,18 @@ an open design choice, not a new randomization change.
 ## Validation
 
 Test and evaluation artifacts remain outside the repository under
-`/home/bb/nist-v080-artifacts/`. Full-suite and matched results will be inserted
-from completed runs on this exact scorer, not copied from earlier WIP reports.
+`/home/bb/nist-v080-artifacts/`. The matched reports use simulator-source bundle
+SHA-256 `4b1b96662b08c7903da4468f5ace815716d167f13360e57a244c0a9071ad79ec`.
 
 | Check | Result |
 |---|---|
-| Full test suite | Pending on the scoped PR branch |
+| Full test suite, final scoring-fix head `2e8a4b3` | **202 passed, 7 skipped, 4 warnings in 848.26 s** (CI run 44537159324) and **202 passed, 7 skipped, 4 warnings in 1161.30 s** (CI run 44537171527); Stable-Baselines3 is absent |
 | Four-fix focused regressions | **7 passed, 1 skipped, 31 deselected in 31.66 s** in the CI-only venv (no Stable-Baselines3) |
-| Built-image 64-episode / two-CPU wall | **156.580 s** (run 44526263690) and **228.694 s** (run 44526210828), cpuset 0,1; no player fault; both pass 600 s |
+| Built-image 64-episode / two-CPU wall, final scoring-fix head | **293.619 s** (CI run 44537159324) and **223.005 s** (CI run 44537171527), cpuset 0,1; no player fault; both pass 600 s |
+
+Per-round wall time is not aggregated across resumable measurement chunks. The
+built-image CI runs above are the wall-time evidence; they are separate from the
+in-process policy comparison below.
 
 ## Matched fixed-scorer results
 
@@ -70,18 +75,30 @@ where applicable, and contiguous episode indices.
 
 | Policy | Seed 7 | Seed 19 | Seed 31 | Pooled mean [95% CI] | Round sample std |
 |---|---:|---:|---:|---:|---:|
-| Zero | Pending | Pending | Pending | Pending | Pending |
-| Uniform random | Pending | Pending | Pending | Pending | Pending |
-| Best observation-only script | Pending | Pending | Pending | Pending | Pending |
-| CEM, selected theta `[-0.002, 0.028, 0.105]` | Pending | Pending | Pending | Pending | Pending |
-| Legacy assisted privileged reference | Pending | Pending | Pending | Pending | Pending |
+| Zero | 0.000000000000 | 0.000000000000 | 0.000000000000 | 0.000000000000 [0.000000000000, 0.000000000000] | 0.000000000000 |
+| Uniform random | 0.000000000000 | 0.000000000000 | 0.000001140097 | 0.000000380032 [0.000000000000, 0.000001140097] | 0.000000658236 |
+| Best observation-only script (`script`) | 0.011770318832 | 0.009212072863 | 0.005786258549 | 0.008922883415 [0.007189550607, 0.010763208236] | 0.003002493509 |
+| CEM, selected theta `[-0.002, 0.028, 0.105]` | 0.013930091274 | 0.015594990778 | 0.009920159394 | 0.013148413815 [0.011304683038, 0.015014859784] | 0.002917052030 |
+| Legacy assisted privileged reference | 0.132743658480 | 0.142243356531 | 0.152491145668 | 0.142492720227 [0.127751994114, 0.157873185200] | 0.009876104964 |
 
-The required zero and uniform-random scores must be **exactly zero**. Any
-nonzero random result will be investigated rather than silently accepted.
+Zero is exactly zero in all 192 episodes. **The strict uniform-random exact-zero gate is not met:** seed 31, episode 11 scores 0.000072966237. The exact evaluator call reproduces it. The only nonzero evidence is `lift_fraction=0.007296623697` on an unfinished rework step: the closed gripper contacts the peg while it rises about 0.772 mm over two frames, above the existing 0.5 mm fractional-lift threshold. This is under the current lift rule, not dependent-step or completion credit. The score is retained rather than hidden by rounding or a scoring change made to improve the table.
+
+CEM minus the best observation-only script is **0.004225530401 [0.002339346329, 0.006145725924]** (paired episode bootstrap; interval excludes zero). The alternative `strong_script` pools to **0.008413835474 [0.006707563416, 0.010208918610]**. Ordinary-minus-strong is 0.000509047941 [-0.001760417831, 0.002759936812], which includes zero.
 
 ## Determinism
 
-Independent matched repeats will compare complete report bytes. Pending.
+All five reported policies were independently rerun on all three seeds: **960 repeat episodes**.
+Every per-seed canonical report and every complete three-seed report is **byte-identical**
+to its original, including scores, terminal reasons, completed kinds, and milestone fields.
+Timing is null in both reports; wall time is measured separately by the built-image CI jobs.
+
+| Policy | Complete repeated report SHA-256 |
+|---|---|
+| `zero` | `be415cab635680a6ce34d1b857858f3b92aca437f6cbe64c6265056ff6a655e8` |
+| `random` | `61ab6f272e7dfbd888c7cbca939f336cc5f415b7ed0e3c08ef4dc31aba759a0f` |
+| `script` | `e90a224263624efd1545cf75a32a18f576c9eef7f7aa8d278914eddf4543efa9` |
+| `cem` | `5915c6f5f20f7cb661713b5908403cb970c4082490a872e0f0e1263895adaf4c` |
+| `privileged` | `cb7b13bfb30b4917aad57252eb6162ed8d922fe351b8a3fe36b7360355e4dddf` |
 
 ## Historical results
 
