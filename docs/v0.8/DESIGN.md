@@ -27,6 +27,9 @@ hill-climbable per-step cues, (2) no key windows on natural seat / slot symmetri
   on an active key — it does not encode window geometry.
 - **Anti-aligned key windows.** Index yaw is sampled away from slot symmetries and wrist-zero
   (closes the v0.7.5 freebie class where natural insert yaw completed keys).
+  Completion records the key's own index precision; finalization verifies that its peg
+  remains seated and does not require the wrist to remain in that key's window.
+  An unfinished key, twist, or screw earns no generic insert-part partial credit.
 - **No D-flat auto-arm.** Leave/reenter arming is mandatory for every key family.
 - **Dynamics stretch.** Per-episode mass / friction / gain / latency stretches force
   in-episode system identification. Mid-episode physics events remain.
@@ -42,7 +45,8 @@ For each blueprint step:
 2. If verified and completed in dependency order:  
    `credit = (0.80 + 0.20 · time_term) · (0.70 + 0.30 · precision)`.
 3. If verified but out of order: `credit = 0.03`.
-4. If unfinished, unblocked and prerequisites are done, at most `0.36` from five bounded,
+4. If an insert, rework, collar, or stack step is unfinished, unblocked and its
+   prerequisites are done, at most `0.36` from five bounded,
    action-earned physical evidence buckets: `0.12` for sustained grasp/lift, and `0.06`
    each for held transport toward the real hole, held insertion, near-target
    alignment, and stable release through the final perturbation-settle window.
@@ -55,7 +59,8 @@ For each blueprint step:
    settled height. Oscillation cannot accumulate credit, and released/falling
    parts, wrist motion, contact alone, absolute spawn height, passive poses and
    settling frames earn none. Legacy scalar progress is not a scoring input.
-   These buckets are alternatives to, not additions to, done credit.
+   These buckets are alternatives to, not additions to, done credit. Unfinished
+   key, twist, and screw steps earn no generic insertion partial credit.
 5. Episode score = mean over steps. Round score = mean over episodes.
 
 A perfect 1.0 requires every step done early, in order, with perfect precision and
@@ -88,3 +93,7 @@ the images bake:
 
 - Do not tag, release, push images, or change digest pins to new builds.
 - Do not merge; owner bot reviews and handles Macrocosmos rollout.
+- Privileged-controller and PPO/SAC tuning are deferred to a later PR. The
+  release gate for this scoring-fix PR is the four Macrocosmos issue-45 fixes.
+- Non-round key-window randomization is unchanged; the predictable symmetry
+  midpoint behavior remains a documented open design choice, not a blind search.

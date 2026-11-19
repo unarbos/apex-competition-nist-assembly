@@ -5,13 +5,13 @@ on a full NIST Assembly Task Board #1–style peg board in simulation. Credit is
 partial credit per peg (not binary all-or-nothing), so ranking stays open under the
 platform’s 1% takeover rule. Submit the policy as an ONNX file.
 
-> Version: **v0.8.0** ("Assembly IV", profile `v08`) — hard reset for frontier-lab miners.
+> Version: **v0.8.1** ("Assembly IV", profile `v08`) — hard reset for frontier-lab miners.
 > Long procedural blueprints (~8–28 steps), equal-weight end-state + perturbation scoring,
 > anti-aligned key windows, **no** closeness / detent / retarget cues, per-episode dynamics
 > stretch. Observation is **`[B, 320]`** (288-d Assembly III layout + 32-d blueprint encoding);
 > old 288/184 ONNX policies are rejected. Referee image bakes `NIST_PROFILE=v08`. Cost is
 > bounded by sim horizon only (≤ 920 control steps). Digests stay on the last released pins
-> until a v0.8.0 release bake. Scores are **not** comparable with v0.7.x.
+> until a v0.8.1 release bake. Scores are **not** comparable with v0.7.x.
 >
 > Every episode is a freshly generated multi-step assembly graph. Four complexity tiers
 > (c1–c4). Records `nist_lite_record/4` (include `nist_profile`). See
@@ -44,15 +44,17 @@ and there is no fixed board layout or shape list to hard-code against. Wrist
 force/torque is provided so contact-driven search can adapt. Some cross-section
 families are held out of live rounds. See [CALIBRATION.md](CALIBRATION.md).
 
-## The task (v0.8.0 Assembly IV)
+## The task (v0.8.1 Assembly IV)
 
 - **Blueprint:** random dependency graph of inserts, collars, twists, screws, stacks, keys and
   reworks (typically ~8–28 steps). Waves, mid-episode physics events, and dynamics stretch
   (mass / friction / gain / latency) require online system ID and planning.
 - **Scoring:** equal weight per step. Completed credit requires a physically verified end
-  state that survives a perturbation settle, scaled by precision. Unfinished steps can earn
-  at most 0.36: 0.12 for a real grasp/lift, plus 0.06 each for held transport toward the hole,
-  held insertion, near-target alignment, and stable release through the settle. Transport and
+  state that survives a perturbation settle, scaled by precision. Unfinished insert, rework,
+  collar, and stack steps can earn at most 0.36: 0.12 for a real grasp/lift, plus 0.06 each
+  for held transport toward the hole, held insertion, near-target alignment, and stable
+  release through the settle. Unfinished
+  key, twist, and screw steps earn no generic insertion partial credit. Transport and
   insertion use bounded best-so-far physical evidence and require their predecessors, a closed
   contacting grasp, and real part motion. The lift component includes bounded credit for raising
   the part 0.5–8 mm above its settled height. Wrist proximity, released/falling parts,

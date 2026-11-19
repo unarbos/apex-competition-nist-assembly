@@ -67,6 +67,7 @@ _PROFILE_NAME = (os.environ.get("NIST_PROFILE") or "v08").strip().lower()
 COMPOUND = _PROFILE_NAME in ("v06", "v07", "v08")
 ASSEMBLY_IV = _PROFILE_NAME == "v08"
 ASSEMBLY_III = _PROFILE_NAME == "v07"
+ASSEMBLY_LABEL = "IV" if ASSEMBLY_IV else ("III" if ASSEMBLY_III else ("II" if COMPOUND else "I"))
 if ASSEMBLY_IV:
     OBS_W = OBS_DIM_V08
     compound_score = compound_score_v08
@@ -367,8 +368,6 @@ class NistLiteReferee(Referee):
 
         metadata = {
             "schema_version": 1,
-            "nist_profile": _PROFILE_NAME,
-            "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
             "summary": summary,
             "units": [
                 {
@@ -411,7 +410,7 @@ class NistLiteReferee(Referee):
             "details": {
                 "format": RECORD_FORMAT,
                 "nist_profile": _PROFILE_NAME,
-                "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
+                "assembly": ASSEMBLY_LABEL,
                 "round_condition_ranges": round_ranges,
                 "player_calls": calls,
                 "player_fault": player_fault,
@@ -478,7 +477,7 @@ class NistLiteReferee(Referee):
                             "format": RECORD_FORMAT,
                             "kind": "round",
                             "nist_profile": _PROFILE_NAME,
-                            "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
+                            "assembly": ASSEMBLY_LABEL,
                             "round_condition_ranges": round_ranges,
                         }
                     )

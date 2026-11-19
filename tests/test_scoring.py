@@ -95,7 +95,15 @@ UNIT_TYPES = {"match", "game", "task", "subset", "instance", "completion", "othe
 
 
 def test_result_metadata_matches_platform_envelope(tmp_path):
-    md = run("baselines/baseline.onnx", tmp_path)["metadata"]
+    result = run("baselines/baseline.onnx", tmp_path)
+    md = result["metadata"]
+    assert set(md) == {"schema_version", "summary", "units", "metrics", "capabilities", "details"}
+    assert md["details"]["nist_profile"] == "v08"
+    assert md["details"]["assembly"] == "IV"
+    assert all("nist_profile" not in u for u in md["units"])
+    records = [json.loads(x) for x in (tmp_path / "history/episodes.jsonl").read_text().splitlines()]
+    assert records[0]["assembly"] == "IV"
+    assert all(row["nist_profile"] == "v08" for row in records[1:])
     unit_ids = {u["id"] for u in md["units"]}
     assert all(u["type"] in UNIT_TYPES for u in md["units"])
     assert all(m.get("format", "number") in FORMATS for m in md["summary"] + md["metrics"])

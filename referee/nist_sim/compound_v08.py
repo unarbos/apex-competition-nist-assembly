@@ -617,11 +617,25 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
         self._part_support_v08 = {}
         self._part_reference_v08 = {}
         self._part_initial_distance_v08 = {}
+        self._key_precision_v08 = [float("nan")] * len(cond.compound.steps)
         self._refresh_part_support_v08()
+        self.seated_now = [
+            bool(self.peg_parked[i] or (self._peg_in_hole(i) and self._upright(self.peg_pose(i)[1])))
+            for i in range(self.n_pegs)
+        ]
         # Only post-action states may earn progress; the reset state is never a baseline.
         self._action_earned_v08 = False
         # Patch tier cfg lookups used by parent retarget helpers.
         self._tier_cfg_override = TIER_CFG_V08
+
+    def _spawn_ok(self) -> bool:
+        """No part may start already inserted in its scored target hole."""
+        if not super()._spawn_ok():
+            return False
+        return all(
+            bool(self.peg_parked[i]) or not self._peg_in_hole(i)
+            for i in range(self.n_pegs)
+        )
 
     def _step_state(self, k: int) -> tuple[bool, float]:
         """v0.8 physical latch; scoring uses explicit, bounded evidence separately."""
@@ -684,6 +698,11 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
         for k, s in enumerate(self.cs.steps):
             ms = self._milestones_v08[k]
             ev = self._part_evidence_v08(s)
+            if s.kind in ("key", "twist", "screw"):
+                # These steps act on an already-seated peg. Re-grasping or lifting
+                # that same body is not progress on the dependent operation.
+                self._grasp_run_v08[k] = 0
+                continue
             if ev is None or self.step_done[k] or self.step_blocked(k):
                 self._grasp_run_v08[k] = 0
                 continue
@@ -863,6 +882,12 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             except Exception:
                 pass
         self._update_milestones_v08()
+        for k, s in enumerate(self.cs.steps):
+            if s.kind == "key" and self.step_done[k] and not math.isfinite(self._key_precision_v08[k]):
+                err = abs(wrap(self._key_hand_yaw() - s.key_yaw))
+                self._key_precision_v08[k] = float(np.clip(
+                    1.0 - err / max(s.key_tol, 1e-3), 0.0, 1.0
+                ))
         # No insert latch that survives pull-out for *scoring* — physical verify at finalize.
         # (Parent may still latch step_done; finalize / score re-check end state.)
         if self.done and not self._finalized:
@@ -902,8 +927,7 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             j = s.part
             if self.collar_parked[j]:
                 return False, 0.0
-            ok, _ = CompoundEpisode._step_state(self, k)
-            if not ok:
+            if not self._collar_seated_now(j):
                 return False, 0.0
             p, _ = self.collar_pose(j)
             hx, hy = self.slot_xy[self.cs.collars[j].peg]
@@ -913,7 +937,17 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             j = s.part
             if self.collar_parked[j] or not self._stack_mated[j]:
                 return False, 0.0
-            if not self._stack_seated_now(j):
+            p, q = self.collar_pose(j)
+            hx, hy = self.slot_xy[self.cs.collars[j].peg]
+            peg_p, _ = self.peg_pose(self.cs.collars[j].peg)
+            peg_top = float(peg_p[2]) + PEG_LEN / 2
+            if not (
+                (self.seated_now[self.cs.collars[j].peg] or self._peg_in_hole(self.cs.collars[j].peg))
+                and float(np.hypot(p[0] - hx, p[1] - hy)) <= 0.003
+                and abs(float(p[2]) - COLLAR_H / 2 - peg_top) <= 0.003
+                and self._stack_ring_upright(q)
+                and not self._gripper_touching(self.collar_body[j])
+            ):
                 return False, 0.0
             p, _ = self.collar_pose(j)
             hx, hy = self.slot_xy[self.cs.collars[j].peg]
@@ -932,16 +966,19 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 return False, 0.0
             if not self._key_index_armed[i]:
                 return False, 0.0
-            if not self._key_aligned(s):
-                return False, 0.0
             if self._gripper_touching(self.peg_body[i]):
                 return False, 0.0
-            # Require hold latch or prior done with continued alignment.
-            if self._key_hold[i] < KEY_HOLD and not self.step_done[k]:
+            # Wrist yaw belongs to the completion-time key-index predicate, not
+            # to the resulting physical assembly. A later key must not revoke an
+            # earlier key merely because the wrist moved to a different window.
+            if self.step_done[k]:
+                if math.isfinite(self._key_precision_v08[k]):
+                    return True, self._key_precision_v08[k]
+                return False, 0.0
+            if not self._key_aligned(s) or self._key_hold[i] < KEY_HOLD:
                 return False, 0.0
             err = abs(wrap(self._key_hand_yaw() - s.key_yaw))
-            prec = float(np.clip(1.0 - err / max(s.key_tol, 1e-3), 0.0, 1.0))
-            return True, prec
+            return True, float(np.clip(1.0 - err / max(s.key_tol, 1e-3), 0.0, 1.0))
         return bool(self.step_done[k]), 1.0 if self.step_done[k] else 0.0
 
     def _finalize_stability(self) -> None:
@@ -1014,6 +1051,12 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 if self.peg_parked[i]:
                     continue
                 self.seated_now[i] = bool(self._peg_in_hole(i) and self._upright(self.peg_pose(i)[1]))
+            for j in range(self.n_collars):
+                if not self.collar_parked[j]:
+                    # Do not re-pin a mated stack during finalization. The
+                    # perturbation must be able to displace it; final scoring
+                    # verifies the measured pose rather than restoring it.
+                    self.collar_run[j] = self.collar_run[j] + 1 if self._collar_seated_now(j) else 0
             if settle_i >= PERTURB_FRAMES - STABLE_MIN_FRAMES_V08:
                 self._update_milestones_v08(settling=True)
         self.done = saved_done
@@ -1120,6 +1163,8 @@ def _partial_credit_v08(ep: AssemblyIVEpisode | CompoundEpisode, k: int) -> floa
     if not isinstance(ep, AssemblyIVEpisode) or not ep._action_earned_v08:
         return 0.0
     if not all(ep.step_done[p] for p in ep.cs.steps[k].prereq):
+        return 0.0
+    if ep.cs.steps[k].kind in ("key", "twist", "screw"):
         return 0.0
     evidence = ep._milestones_v08[k]
     return step_credit_v08(
