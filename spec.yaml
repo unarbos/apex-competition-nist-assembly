@@ -11,10 +11,10 @@ resources:
   mem_limit: 2Gi
   gpu_count: 0
 
-# PLAYER image: digests pinned from release.yml run 44351786802 (tag v0.8.0).
+# PLAYER image: digests pinned from release.yml run 44773501066 (tag v0.8.1).
 image:
   ref: ghcr.io/unarbos/apex-competition-nist-assembly-player
-  digest: sha256:c205fbd69f886a2dc0af22b07d42d2713e4d6668e9b7ce919dfa07bd4ed80f1e
+  digest: sha256:6c44473bac4e163b16162f6e7e767659b90bae01d93c40b2ef857eae40ac0d95
 
 submission:
   artifact_type: onnx
@@ -54,9 +54,9 @@ referee:
   protocol: gym_v1
   image:
     # Private package; built with reserved.json from the NIST_HELDOUT_SEED build secret.
-    # Digest pinned from release.yml run 44351786802 (tag v0.8.0).
+    # Digest pinned from release.yml run 44773501066 (tag v0.8.1).
     ref: ghcr.io/unarbos/apex-competition-nist-assembly-referee
-    digest: sha256:5f50c9ff8ecae58aa13b0de90debdc0b38cb308321d628585ccb842919a69ffa
+    digest: sha256:701b85e1abe0a9a642ed103ae5e6afdea0b19a2351acc6331f491f81d4004e9c
   timeout_s: 1800
 
 signature:
