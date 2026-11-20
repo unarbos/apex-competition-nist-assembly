@@ -110,13 +110,17 @@ PARTIAL_WEIGHTS_V08 = {
 }
 LIFT_CLEARANCE_V08 = 0.008  # part bottom above its support plane, in metres
 GRASP_MIN_FRAMES_V08 = 2  # reject a single-frame contact transient
-DENSE_LIFT_START_V08 = 0.0005  # 0.5 mm: above contact/settle noise, below the lift milestone
+# Sub-lift evidence must be a sustained grasp-and-raise, not contact jitter.
+# 4 mm clears the observed ~0.8 mm soft-contact excursions while remaining below
+# the 8 mm full-lift milestone. Eight frames at 25 Hz require a 0.32 s hold.
+DENSE_LIFT_START_V08 = 0.004
 DENSE_LIFT_GAIN_V08 = 0.20  # continuous sub-lift credit, within LIFT_CREDIT_V08
 TRANSPORT_START_V08 = 0.025  # m; movement below this is not called transport
 TRANSPORT_GAIN_V08 = 0.60  # best-so-far held-part translation toward its real hole
 INSERT_GAIN_V08 = 0.60  # held insertion fraction within the actual hole radius
 POSE_TOL_SCALE_V08 = 2.0  # near-target alignment is deliberately not a seat
 STABLE_MIN_FRAMES_V08 = 8  # final 8 of 12 perturbation-settle frames
+DENSE_LIFT_HOLD_FRAMES_V08 = STABLE_MIN_FRAMES_V08
 # Out-of-order completed steps earn almost nothing (dependency order matters).
 OOO_CREDIT_V08 = 0.03
 # End-state done credit floor/ceiling before precision × stability.
@@ -614,14 +618,29 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             for _ in cond.compound.steps
         ]
         self._grasp_run_v08 = {}
+        self._dense_lift_run_v08 = {}
         self._part_support_v08 = {}
         self._part_reference_v08 = {}
         self._part_initial_distance_v08 = {}
+        self._key_precision_v08 = [float("nan")] * len(cond.compound.steps)
         self._refresh_part_support_v08()
+        self.seated_now = [
+            bool(self.peg_parked[i] or (self._peg_in_hole(i) and self._upright(self.peg_pose(i)[1])))
+            for i in range(self.n_pegs)
+        ]
         # Only post-action states may earn progress; the reset state is never a baseline.
         self._action_earned_v08 = False
         # Patch tier cfg lookups used by parent retarget helpers.
         self._tier_cfg_override = TIER_CFG_V08
+
+    def _spawn_ok(self) -> bool:
+        """No part may start already inserted in its scored target hole."""
+        if not super()._spawn_ok():
+            return False
+        return all(
+            bool(self.peg_parked[i]) or not self._peg_in_hole(i)
+            for i in range(self.n_pegs)
+        )
 
     def _step_state(self, k: int) -> tuple[bool, float]:
         """v0.8 physical latch; scoring uses explicit, bounded evidence separately."""
@@ -669,6 +688,22 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 TRANSPORT_START_V08, float(np.hypot(p[0] - hx, p[1] - hy))
             )
 
+    def _bilateral_grasp_v08(self, body: int) -> bool:
+        """Both finger bodies, not palm or unilateral contact, must touch the part."""
+        fingers = {
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in ("fl", "fr")
+        }
+        contacted = set()
+        for con in self.data.contact[: self.data.ncon]:
+            b1 = int(self.model.geom_bodyid[con.geom1])
+            b2 = int(self.model.geom_bodyid[con.geom2])
+            if b1 == body and b2 in fingers:
+                contacted.add(b2)
+            elif b2 == body and b1 in fingers:
+                contacted.add(b1)
+        return contacted == fingers
+
     def _update_milestones_v08(self, *, settling: bool = False) -> None:
         """Record verified partial lift plus grasp/lift, alignment and stability.
 
@@ -684,6 +719,11 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
         for k, s in enumerate(self.cs.steps):
             ms = self._milestones_v08[k]
             ev = self._part_evidence_v08(s)
+            if s.kind in ("key", "twist", "screw"):
+                # These steps act on an already-seated peg. Re-grasping or lifting
+                # that same body is not progress on the dependent operation.
+                self._grasp_run_v08[k] = 0
+                continue
             if ev is None or self.step_done[k] or self.step_blocked(k):
                 self._grasp_run_v08[k] = 0
                 continue
@@ -704,9 +744,19 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             if self._grasp_run_v08[k] >= GRASP_MIN_FRAMES_V08:
                 ms["lift"] = True
             # A held part can make incremental, verified progress before the
-            # binary lift fires. Best-so-far cannot be farmed by oscillation.
-            if touching and closed and not settling:
-                relative_lift = float(p[2]) - reference_z
+            # binary lift fires. Only a sustained two-finger grasp-and-raise
+            # counts; palm pushes, one-finger contact and contact jitter do not.
+            # Best-so-far cannot be farmed by oscillation after evidence is earned.
+            relative_lift = float(p[2]) - reference_z
+            dense_grasp = (
+                touching and closed and self._bilateral_grasp_v08(body)
+                and relative_lift >= DENSE_LIFT_START_V08 and not settling
+            )
+            if dense_grasp:
+                self._dense_lift_run_v08[k] = self._dense_lift_run_v08.get(k, 0) + 1
+            else:
+                self._dense_lift_run_v08[k] = 0
+            if self._dense_lift_run_v08[k] >= DENSE_LIFT_HOLD_FRAMES_V08:
                 dense = DENSE_LIFT_GAIN_V08 * np.clip(
                     (relative_lift - DENSE_LIFT_START_V08)
                     / max(LIFT_CLEARANCE_V08 - DENSE_LIFT_START_V08, 1e-6),
@@ -863,6 +913,12 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             except Exception:
                 pass
         self._update_milestones_v08()
+        for k, s in enumerate(self.cs.steps):
+            if s.kind == "key" and self.step_done[k] and not math.isfinite(self._key_precision_v08[k]):
+                err = abs(wrap(self._key_hand_yaw() - s.key_yaw))
+                self._key_precision_v08[k] = float(np.clip(
+                    1.0 - err / max(s.key_tol, 1e-3), 0.0, 1.0
+                ))
         # No insert latch that survives pull-out for *scoring* — physical verify at finalize.
         # (Parent may still latch step_done; finalize / score re-check end state.)
         if self.done and not self._finalized:
@@ -902,8 +958,7 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             j = s.part
             if self.collar_parked[j]:
                 return False, 0.0
-            ok, _ = CompoundEpisode._step_state(self, k)
-            if not ok:
+            if not self._collar_seated_now(j):
                 return False, 0.0
             p, _ = self.collar_pose(j)
             hx, hy = self.slot_xy[self.cs.collars[j].peg]
@@ -913,7 +968,17 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             j = s.part
             if self.collar_parked[j] or not self._stack_mated[j]:
                 return False, 0.0
-            if not self._stack_seated_now(j):
+            p, q = self.collar_pose(j)
+            hx, hy = self.slot_xy[self.cs.collars[j].peg]
+            peg_p, _ = self.peg_pose(self.cs.collars[j].peg)
+            peg_top = float(peg_p[2]) + PEG_LEN / 2
+            if not (
+                (self.seated_now[self.cs.collars[j].peg] or self._peg_in_hole(self.cs.collars[j].peg))
+                and float(np.hypot(p[0] - hx, p[1] - hy)) <= 0.003
+                and abs(float(p[2]) - COLLAR_H / 2 - peg_top) <= 0.003
+                and self._stack_ring_upright(q)
+                and not self._gripper_touching(self.collar_body[j])
+            ):
                 return False, 0.0
             p, _ = self.collar_pose(j)
             hx, hy = self.slot_xy[self.cs.collars[j].peg]
@@ -932,16 +997,19 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 return False, 0.0
             if not self._key_index_armed[i]:
                 return False, 0.0
-            if not self._key_aligned(s):
-                return False, 0.0
             if self._gripper_touching(self.peg_body[i]):
                 return False, 0.0
-            # Require hold latch or prior done with continued alignment.
-            if self._key_hold[i] < KEY_HOLD and not self.step_done[k]:
+            # Wrist yaw belongs to the completion-time key-index predicate, not
+            # to the resulting physical assembly. A later key must not revoke an
+            # earlier key merely because the wrist moved to a different window.
+            if self.step_done[k]:
+                if math.isfinite(self._key_precision_v08[k]):
+                    return True, self._key_precision_v08[k]
+                return False, 0.0
+            if not self._key_aligned(s) or self._key_hold[i] < KEY_HOLD:
                 return False, 0.0
             err = abs(wrap(self._key_hand_yaw() - s.key_yaw))
-            prec = float(np.clip(1.0 - err / max(s.key_tol, 1e-3), 0.0, 1.0))
-            return True, prec
+            return True, float(np.clip(1.0 - err / max(s.key_tol, 1e-3), 0.0, 1.0))
         return bool(self.step_done[k]), 1.0 if self.step_done[k] else 0.0
 
     def _finalize_stability(self) -> None:
@@ -989,6 +1057,12 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             if self.collar_parked[j]:
                 continue
             ang = float(self.rng.uniform(0, 2 * math.pi))
+            if self.cs.collars[j].is_stack and self._stack_mated[j]:
+                # An earned interference-fit mate is not a loose collar. Do
+                # not kick the ring off its scored pose before measuring it.
+                # The peg still receives its impulse, and the final ring pose
+                # is verified below without re-pinning the mate.
+                continue
             vx = 0.7 * PERTURB_XY * math.cos(ang) / max(PHYSICS_PROXY_DT(), 1e-3)
             vy = 0.7 * PERTURB_XY * math.sin(ang) / max(PHYSICS_PROXY_DT(), 1e-3)
             adr = self.collar_vadr[j]
@@ -1014,6 +1088,12 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 if self.peg_parked[i]:
                     continue
                 self.seated_now[i] = bool(self._peg_in_hole(i) and self._upright(self.peg_pose(i)[1]))
+            for j in range(self.n_collars):
+                if not self.collar_parked[j]:
+                    # Do not re-pin a mated stack during finalization. The
+                    # perturbation must be able to displace it; final scoring
+                    # verifies the measured pose rather than restoring it.
+                    self.collar_run[j] = self.collar_run[j] + 1 if self._collar_seated_now(j) else 0
             if settle_i >= PERTURB_FRAMES - STABLE_MIN_FRAMES_V08:
                 self._update_milestones_v08(settling=True)
         self.done = saved_done
@@ -1121,6 +1201,8 @@ def _partial_credit_v08(ep: AssemblyIVEpisode | CompoundEpisode, k: int) -> floa
         return 0.0
     if not all(ep.step_done[p] for p in ep.cs.steps[k].prereq):
         return 0.0
+    if ep.cs.steps[k].kind in ("key", "twist", "screw"):
+        return 0.0
     evidence = ep._milestones_v08[k]
     return step_credit_v08(
         False, bool(ep.step_in_order[k]), ep.step_done_at[k], ep.c.max_steps, evidence
@@ -1161,6 +1243,34 @@ def step_results_v08(ep: AssemblyIVEpisode | CompoundEpisode) -> list[dict]:
             }
         )
     return rows
+
+
+def compound_record_events_v08(events: list[dict]) -> list[dict]:
+    """Serialize public event kinds/times without hidden key-window payloads."""
+    private = {
+        "key_yaw", "key_tol", "old_yaw", "new_yaw",
+        "pose_bias_xy", "pose_bias_yaw", "peg_bias_delta", "slot_bias", "peg_bias",
+        "friction", "peg_mass", "gain_scale", "obs_noise", "obs_noise_rad",
+        "dropout_prob", "bias_drift", "backlash", "search_pitch", "salt", "seed",
+    }
+    return [
+        {k: v for k, v in event.items() if k not in private}
+        for event in events
+    ]
+
+
+def compound_record_task_v08(cs: CompoundSpec) -> dict:
+    """Public Assembly IV graph; never serialize hidden key windows.
+
+    The inherited record builder predates the no-answer-cue contract and writes
+    key_yaw/key_tol for older profiles. Assembly IV must not publish them after
+    the round either: the history is player-visible, not a private replay cache.
+    """
+    task = cs.record_task()
+    for step in task["steps"]:
+        step.pop("key_yaw", None)
+        step.pop("key_tol", None)
+    return task
 
 
 def compound_score_v08(ep: AssemblyIVEpisode | AssemblyIIIEpisode | CompoundEpisode) -> dict:

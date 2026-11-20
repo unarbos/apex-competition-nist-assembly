@@ -54,6 +54,8 @@ from nist_sim.compound_v08 import (
     OBS_DIM_V08,
     AssemblyIVEpisode,
     compound_score_v08,
+    compound_record_events_v08,
+    compound_record_task_v08,
     sample_compound_v08,
     step_results_v08,
 )
@@ -67,6 +69,7 @@ _PROFILE_NAME = (os.environ.get("NIST_PROFILE") or "v08").strip().lower()
 COMPOUND = _PROFILE_NAME in ("v06", "v07", "v08")
 ASSEMBLY_IV = _PROFILE_NAME == "v08"
 ASSEMBLY_III = _PROFILE_NAME == "v07"
+ASSEMBLY_LABEL = "IV" if ASSEMBLY_IV else ("III" if ASSEMBLY_III else ("II" if COMPOUND else "I"))
 if ASSEMBLY_IV:
     OBS_W = OBS_DIM_V08
     compound_score = compound_score_v08
@@ -204,14 +207,14 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                     pub = dict(row["conditions"])
                     pub["collars"] = conds[i].compound.record_collars()
                     row["conditions"] = pub
-                    row["task"] = conds[i].compound.record_task()
+                    row["task"] = compound_record_task_v08(conds[i].compound) if ASSEMBLY_IV else conds[i].compound.record_task()
                     row["tier"] = conds[i].compound.tier
                     row["steps_done"] = cinfo["n_done"]
                     row["steps_in_order"] = cinfo["n_in_order"]
                     row["n_steps"] = cinfo["n_steps"]
                     row["credit_by_kind"] = cinfo["per_kind"]
                     row["step_results"] = step_results_v08(e) if ASSEMBLY_IV else step_results(e)
-                    row["events"] = record_events(e)
+                    row["events"] = compound_record_events_v08(e.events_fired) if ASSEMBLY_IV else record_events(e)
                     row["events_fired"] = cinfo["events"]
                     row["parts_lost"] = int(e.parts_lost)
                     row["nist_profile"] = _PROFILE_NAME
@@ -367,8 +370,6 @@ class NistLiteReferee(Referee):
 
         metadata = {
             "schema_version": 1,
-            "nist_profile": _PROFILE_NAME,
-            "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
             "summary": summary,
             "units": [
                 {
@@ -411,7 +412,7 @@ class NistLiteReferee(Referee):
             "details": {
                 "format": RECORD_FORMAT,
                 "nist_profile": _PROFILE_NAME,
-                "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
+                "assembly": ASSEMBLY_LABEL,
                 "round_condition_ranges": round_ranges,
                 "player_calls": calls,
                 "player_fault": player_fault,
@@ -478,7 +479,7 @@ class NistLiteReferee(Referee):
                             "format": RECORD_FORMAT,
                             "kind": "round",
                             "nist_profile": _PROFILE_NAME,
-                            "assembly": "III" if ASSEMBLY_III else ("II" if COMPOUND else "I"),
+                            "assembly": ASSEMBLY_LABEL,
                             "round_condition_ranges": round_ranges,
                         }
                     )

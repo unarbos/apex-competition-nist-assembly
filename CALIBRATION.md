@@ -1,255 +1,158 @@
-# NIST-Lite calibration
+# NIST-Lite v0.8.1 calibration
 
-## v0.8.0 (Assembly IV, profile `v08`)
+## Scope
 
-Spec `0.8.0`. Image bake stays `NIST_PROFILE=v08`. **Do not tag, release, push
-images, or change release digest pins from this PR.** The existing pins remain
-on v0.7.5 until the owner performs a release bake.
+This PR addresses the four scoring/envelope fixes requested in Macrocosmos
+[issue #45, comment 7003185456](https://github.com/macrocosm-os/apex-competitions-builder/issues/45#issuecomment-7003185456).
+The `v08` profile, 320-float observation, five-float action, 0.36 per-step
+partial-credit cap, milestone weights, 920-action horizon, physical perturbation,
+and image digest pins are unchanged. `spec.yaml` declares **0.8.1**.
 
-Assembly IV uses equal per-step weights, no key closeness/detent/retarget cues,
-anti-aligned key windows, procedural blueprints, dynamics randomization, and a
-320-d observation contract. Scores are not comparable with v0.7.x.
+Controller and PPO/SAC tuning are deferred to a later PR. The measured privileged
+reference below is the existing **legacy assisted privileged solver**: it reads
+true state and may use simulator-state assists. It is not an action-only
+controller result and is not a gate for this scoring-fix PR. Across the 192
+matched episodes it completes 3 stack steps, 11 collars, 27 keys, 434 inserts,
+and 114 reworks.
 
-### Scoring and no-free-credit rules
+## Four fixes
 
-- Parts start ungrasped and away from their target holes, including extra pegs
-  added by graph generation. Reset-only states and passive end poses score zero.
-- Completed steps require a physical latch during an action transition and an
-  end-state that survives the perturbation settle. Finalization does not invent
-  completion from a passive pose.
-- An unfinished, unblocked step can earn at most **0.36 of that step**, not
-  additional credit on top of completion: **0.12** for a real grasp/lift,
-  **0.06** for held transport toward the real hole, **0.06** for held insertion,
-  **0.06** for holding near the target pose, and **0.06** for retaining the pose
-  after release through the settle. Transport and insertion have continuous
-  best-so-far fractions bounded by **0.60**. Transport requires earned lift,
-  closed contacting jaws, and actual part motion toward its target. Insertion
-  additionally requires transport, an upright held part, and depth inside the
-  actual hole region. Wrist proximity, released/falling parts, oscillation, and
-  passive near-hole poses cannot earn these terms. Legacy scalar progress is not
-  a scoring input.
-- Within the lift bucket, a best-so-far fraction contributes at most **0.024**
-  before the binary lift fires. It requires a closed, contacting grasp and a
-  measured rise of **0.5–8 mm above the part's settled reset height**. The
-  fraction is `0.20 * clip((rise_mm - 0.5) / 7.5, 0, 1)`. Full lift remains
-  **0.12**; oscillation, contact alone, wrist motion, absolute spawn height,
-  blocked steps, passive poses, and settling frames cannot accumulate credit.
-- Blueprint step entries use an unambiguous integer peg id plus separate blocked
-  and done flags. The observation remains 320 floats.
+1. **Completed keys.** A completed key retains credit from its physical
+   completion latch and completion-time precision while its peg remains seated
+   upright. Final wrist yaw is not re-checked against every earlier key window.
+   Missing completion precision fails closed. Tests cover both two-key and
+   three-key graphs, a wrist moved to the last key's window, final perturbation,
+   and a key whose peg is pulled out losing credit.
+2. **Dependent partials.** Unfinished key, twist, and screw steps cannot earn
+   generic insert-part lift/transport/insert/alignment/stability partial credit
+   by re-grasping or lifting an already-inserted peg. Evidence collection skips
+   those steps and the scoring function also rejects stale generic evidence.
+   The regression inserts the peg, re-lifts it, and requires zero dependent
+   partial credit for key, twist, and screw.
+3. **Result envelope.** The top-level metadata keys are exactly
+   `schema_version`, `summary`, `units`, `metrics`, `capabilities`, and
+   `details`. `nist_profile` remains in `details` and per-episode history
+   records, not at the metadata root or in result units. Assembly IV is labeled
+   `IV`, not `II`, in details and records. The serialized `local_run.py`
+   integration test checks this contract.
+4. **Collar/stack finalization.** `collar_run` is refreshed during settling.
+   Final collar credit requires current physical seating rather than a stale
+   counter. Final stack credit checks the measured ring pose; finalization does
+   not re-pin a mated ring after the kick. An earned interference-fit stack
+   ring is exempt from the direct collar impulse; the peg is still kicked and
+   the ring's measured pose is verified after settling. Unmated loose rings
+   still receive the impulse. Default-kick tests verify that a mated stable
+   ring keeps credit, a displaced ring loses credit, and an unmated ring is
+   still kicked. Final peg seating requires both depth and upright orientation.
+   Stack fixtures are explicitly physical finalization fixtures, not a claimed
+   privileged stack demonstration.
 
-### Reported 0.36-cap CEM measurements
+Non-round key-window sampling is intentionally unchanged in this scoped PR:
+symmetry-midpoint windows remain predictable and are not a blind search. This is
+an open design choice, not a new randomization change.
 
-The following results were reported on **2026-11-17 UTC** for the 0.36-cap
-scorer and public +8 mm grasp-bias controller. Confidence intervals are
-episode-bootstrap 95% intervals, 10,000 resamples with seed 20261117. They
-compare CEM against the simpler `ObsScriptedPolicy`, not the strong script used
-by the matched three-round gate below.
+Fractional lift now requires bilateral `fl`/`fr` finger contact with the part,
+gripper closure, and a rise of at least 4 mm for eight consecutive control frames
+(0.32 s at 25 Hz). A dip below threshold resets the hold. Fractional credit starts
+only above 4 mm and is bounded by the unchanged full-lift milestone at 8 mm. This
+tightens evidence: sub-mm contact jitter, palm or unilateral pushes, and brief
+spikes earn nothing. The full-lift milestone, 0.36 cap, milestone weights, horizon,
+and physical task rules are unchanged. Assembly IV task history omits
+`key_yaw`/`key_tol`; retarget events omit old/new window values.
 
-| Gate | Episodes | Measured mean [95% CI] | Status |
-|---|---:|---:|---|
-| Zero | 8 | **0.000000 [0, 0]** | Pass; exactly zero |
-| Uniform random | 8 | **0.000000 [0, 0]** | Pass; exactly zero |
-| Observation-only scripted (seed 7, public +8 mm) | 64 | **0.011368 [0.008048, 0.014910]** | In 0.01–0.05 band |
-| Observation-only scripted (seed 19) | 64 | **0.010184 [0.007143, 0.013490]** | Second referee round |
-| CEM grasp/place/lift RL (seed 7) | 64 | **0.014695 [0.011276, 0.018250]** | Paired gain reported |
-| CEM grasp/place/lift RL (seed 19) | 64 | **0.014502 [0.011614, 0.017481]** | Paired gain reported |
-| Paired RL − scripted (seed 7) | 64 | **Δ +0.003326 [0.000240, 0.006498]** | CI excludes 0 |
-| Paired RL − scripted (seed 19) | 64 | **Δ +0.004318 [0.001226, 0.007470]** | CI excludes 0 |
-| Pooled paired RL − scripted | 128 | **Δ +0.003822 [0.001511, 0.006082]** | Paired CI excludes 0 |
-| Honest privileged (seed 7) | 8 | **0.196647 [0.123477, 0.265505]** | Approximately 0.2 |
-| Honest privileged (seed 7) | 64 | **0.135470 [0.112563, 0.159420]** | Below 0.2 on full draw |
+## Validation
 
-The CEM search recovers `θ = [-0.002, 0.028, 0.105]` from the public +8 mm
-bias in **4114.2 s** of search/evaluation on train seeds 101–106. Evaluation
-uses only observations and actions. This is parameter search around the public
-FSM, not from-scratch deep RL. The reported two-round pooled policy intervals
-overlap, so the full three-round matched comparison below is the relevant gate
-measurement.
+Test and evaluation artifacts remain outside the repository under
+`/home/bb/nist-v080-artifacts/`. The matched reports use simulator-source bundle
+SHA-256 `fbe94f221465134f598bbd1b63144d421991333544af04e45c9fe75d8ae73473`.
 
-### Current 0.36-cap matched evaluation
+| Check | Result |
+|---|---|
+| Full test suite, evidence head `6939708` | **208 passed, 7 skipped, 4 warnings in 841.41 s** (CI run 44581816589) and **208 passed, 7 skipped, 4 warnings in 915.45 s** (CI run 44581828716); Stable-Baselines3 is absent |
+| Full test suite, scorer head `4eed6ad` | **208 passed, 7 skipped, 4 warnings in 917.68 s** (CI run 44574980029) and **208 passed, 7 skipped, 4 warnings in 1189.74 s** (CI run 44574994762); Stable-Baselines3 is absent |
+| Final-source focused regressions | **74 passed, 1 skipped in 616.70 s**; additional event-privacy and serialized-envelope checks **4 passed, 54 deselected in 28.89 s** |
+| Built-image 64-episode / two-CPU wall, evidence head `6939708` | **128.524 s** (CI run 44581816589) and **318.906 s** (CI run 44581828716), cpuset 0,1; no player fault; both pass 600 s |
+| Built-image 64-episode / two-CPU wall, scorer head `4eed6ad` | **232.121 s** (CI run 44574994762) and **232.520 s** (CI run 44574980029), cpuset 0,1; no player fault; both pass 600 s |
 
-The strong observation-only script and residual-PPO evaluation use
-`tools/obs_boundary_v08.py`, which permits only observation/action/terminal
-operations and rejects simulator-state reads. Standalone/zero-residual exact
-action-sequence equivalence is covered by tests. Privileged demonstrations are
-restricted to training seeds and never available at evaluation.
+Per-round wall time is not aggregated across resumable measurement chunks. The
+built-image CI runs above are the wall-time evidence; they are separate from the
+in-process policy comparison below.
 
-On the current 0.36-cap scorer, all observation-only policies were measured
-through the same fail-closed boundary on **64 episodes per referee seed**, seeds
-**7, 19, 31** (192 episodes per policy). The simpler `ObsScriptedPolicy` is the
-strongest measured script: **0.009242 [0.007419, 0.011152]**, round means
-**0.011770, 0.009212, 0.006744**, sample round standard deviation **0.002513**.
-The strong controller scored **0.008735 [0.006988, 0.010604]**, round means
-**0.008362, 0.008299, 0.009543**, sample round standard deviation **0.000701**.
+## Matched fixed-scorer results
 
-The selected CEM policy scored **0.013466 [0.011604, 0.015390]**, round means
-**0.013930, 0.015595, 0.010872**, sample round standard deviation **0.002396**.
-Against the simpler script, its paired improvement was **+0.004224
-[0.002338, 0.006142]**; against the strong controller, **+0.004731
-[0.002671, 0.006758]**. Both pooled comparisons are nonoverlapping and both
-paired intervals exclude zero. The CEM round standard deviation is smaller than
-both policy gaps. **The learned-over-strongest-script comparison passes on these
-rounds.** CEM is a local learned FSM parameterization, not a from-scratch PPO
-result. A requirement specifically for a learned PPO/SAC policy remains open;
-this CEM result must not be presented as satisfying that algorithm-specific
-requirement.
+Zero and uniform random use seeds 7, 19, 31, 43, and 59; all other policies use
+seeds 7, 19, and 31. Every round has 64 episodes. Confidence intervals are
+episode-bootstrap 95% intervals, 10,000 resamples, seed 20261117. Every report
+records the simulator-source bundle hash, `per=8`, model/controller hash where
+applicable, and contiguous episode indices. CEM uses selected theta
+`[-0.002, 0.028, 0.105]`, model SHA-256
+`6497939c270b733731851024dd4375d1421a438efc7f29420ebb09121741f4f2`.
 
-The honest privileged reference scored **0.145420 [0.130896, 0.160576]** over
-the same 192 episodes, with round means **0.135470, 0.147758, 0.153033** and
-sample round standard deviation **0.009012**. It remains above the learned
-policy but below the requested approximately **0.2–0.35** calibration range.
-The earlier eight-episode value **0.196647 [0.123477, 0.265505]** is not a
-substitute for this full-round result.
+| Policy | Seed 7 | Seed 19 | Seed 31 | Pooled mean [95% CI] | Round sample std |
+|---|---:|---:|---:|---:|---:|
+| Zero | 0.000000000000 | 0.000000000000 | 0.000000000000 | 0.000000000000 [0.000000000000, 0.000000000000] | 0.000000000000 |
+| Uniform random | 0.000000000000 | 0.000000000000 | 0.000000000000 | 0.000000000000 [0.000000000000, 0.000000000000] | 0.000000000000 |
+| Ordinary observation-only script | 0.011692006070 | 0.009105692788 | 0.005630799528 | 0.008809499462 [0.007074604350, 0.010651619112] | 0.003041439470 |
+| Strong observation-only script | 0.008312436355 | 0.008266258032 | 0.008550083894 | 0.008376259427 [0.006663470605, 0.010172337927] | 0.000152296810 |
+| CEM | 0.013811296527 | 0.015439669214 | 0.009779517504 | 0.013010161082 [0.011147214975, 0.014878161420] | 0.002913879347 |
+| Legacy assisted privileged reference | 0.132693435266 | 0.142225513227 | 0.152449479002 | 0.142456142498 [0.127728299866, 0.157831118611] | 0.009880040912 |
 
-The following PPO experiment used the earlier 0.30-cap scorer and is retained as
-a completed negative result. It is not compared numerically to the 0.36-cap CEM
-rows above.
+**Both zero and uniform random are exactly zero in all 320 episodes across all
+five seeds.** The additional seed-43 and seed-59 means are also exactly zero.
+The former seed-31 episode-11 sub-mm contact excursion earns no credit under the
+sustained bilateral-grasp rule; no scores are hidden by rounding.
 
-| Policy / check | Episodes | Mean [95% CI] | Round std | Status |
-|---|---:|---:|---:|---|
-| Strong observation-only script | 24 | **0.008439 [0.004525, 0.012991]** | **0.001968** | Earlier-scorer baseline |
-| Learned BC + residual PPO | 24 | **0.004448 [0.002289, 0.006769]** | **0.001359** | Below script; overlapping intervals |
-| Honest privileged | 24 | **0.168414 [0.123025, 0.217372]** | **0.024460** | Earlier-scorer calibration |
+Ordinary-minus-strong script is **0.000433240035 [-0.001837687157, 0.002691805617]**
+(paired episode bootstrap; interval includes zero). CEM minus the best
+observation-only script is **0.004200661619 [0.002315596179, 0.006127752842]**
+(interval excludes zero). The privileged reference is not a release gate and was
+not tuned to increase its score.
 
-The PPO run used 29,440 public observation/residual pairs from 32 training
-episodes on seeds 101–104. After the observation-derived lift check, an honest
-privileged insertion teacher supplied local residual targets; no teacher state
-was available at evaluation. BC ran for 15 epochs, followed by **131,072**
-residual-PPO timesteps with a c1→full-distribution curriculum. The saved model
-was evaluated through the fail-closed public-observation boundary. Training
-took **1518.7 s**. Its seed-201 development mean was **0.004791
-[0.001580, 0.008423]**, versus the strong script's **0.003530
-[0.001200, 0.006135]**; those intervals overlap.
+## Red-team pass
 
-The held-out learned-minus-script paired mean was **-0.003991**, with 95%
-interval **[-0.008735, 0.000013]**. The PPO run does not establish improvement.
-The collector now matches the script's 160-step insertion limit; this measured
-run used an earlier mismatched limit. BC residuals are normalized exactly once
-by the collector and scaled once at inference; the former double normalization
-is fixed with a regression test.
+The following results are measured on the tightened scorer. Generic attack
+rollouts use seed 31 and eight episodes per attack; each listed generic rollout
+scored exactly zero. The red-team summary, per-attack reports, and physical
+fixtures remain in the external artifact directory.
 
-The earlier whole-trajectory matched PPO run reached **851,968 timesteps**
-before its two-hour execution limit without a final model or held-out score.
-No claim is made from that incomplete run. A separate lying-grasp script
-experiment scored **0.004306 [0.001873, 0.007038]** on 24 earlier-scorer
-episodes and was reverted; it is not the current baseline.
+| Attack class | Measured result |
+|---|---|
+| Contact jitter / push without grasp | `jitter`, `vibrate_parts`, `slam_down`, and `transport_wrist_spoof`: all zero. A sub-mm rise, unilateral or palm contact, or a rise that breaks the eight-frame hold earns no fractional lift. |
+| Wrist-yaw sweeps / key precision farming | `yaw_spin` and `cue_hillclimb_sweep`: all zero. Natural-seat key freebie completed **0/20** keys. Transient visits fail the hold; completion precision cannot improve after moving to another key yaw. |
+| Dependent-step re-grasp / re-lift | Key and screw target credit is exactly zero, including with injected stale insertion evidence. The separate prerequisite insert credit of 0.002727272727 in each fixture is not dependent-step credit. |
+| False / barely mated and knocked-off stack rings | Post-mate knock-off, 12 mm lateral false mate, and -20 mm vertical false mate: zero with final physical rejection. A +12 mm vertical displaced pose fails immediately but can settle back onto the peg; its fixture score remains zero because prerequisites were not completed. This is not described as a knock-off exemption bypass. |
+| NaN, infinity, extreme actions, and `/act` timing | NaN, ±infinity, wrong shape, nonnumeric, extreme-action, sensor-spoof, early-termination, solver-blowup, and drop-near-hole rollouts: zero. Invalid rows terminate their episodes with `invalid_action` and zero score; a one-step extreme action scores zero. Late `/act` returns `act failed: PlayerError`, zero score, in **1.358 s**. Wrong batch shape and unreadable responses also fail closed with zero score. |
+| Observation / player-visible envelope recovery | Observation-privacy and serialized-envelope tests pass. Assembly IV task history and retarget events contain no key-window values; private dynamics, salt, and reserved endpoints are absent. The explicitly public training-range header remains separate. |
 
-Built-image wall measurements are from real host-player/container-referee HTTP
-rounds, not local Docker runs. At the CEM commit `1af7d01`, CI runs
-**44190044229** and **44190032713** completed 64 episodes on cpuset 0,1 in
-**315.467 s** and **316.582 s**, respectively. Both exited 0 with no player
-fault. Their `result.json` and `history/episodes.jsonl` were byte-identical.
-Earlier runs at `87466bf` and `d05b6e6` measured **158.787 s**, **230.220 s**,
-and **228.450 s**. All are under 600 seconds; wall time varies with CI load.
-At `bea4f7d` and `1af7d01`, both GitHub pytest runs and both referee-image
-runs passed. At `72cb1cd`, both GitHub pytest runs and both referee-image runs
-passed. Prior wall results are not represented as fresh validation of later
-commits.
+The analytic single-kind-only bound across the tested blueprints is
+**0.427639751553**, below 0.55. This is a scoring bound, not an achieved attack
+score.
 
-### Red team (final code, seed 7, 8 episodes per attack)
+## Determinism
 
-All scores below are measured means over eight episodes unless noted.
+All six policies were independently repeated on seeds 7, 19, and 31: **1,152 repeat
+episodes**. Every per-seed report matches the original episode records, and every
+complete three-seed report is byte-identical to its canonical original, including
+scores, terminal reasons, completed kinds, and milestone fields. For zero and
+random, the comparison uses the three matched seeds from the original five-seed
+report. A redundant per-round scorer-hash field added by the repeat worker is
+validated then omitted for canonical comparison; the top-level scorer identity
+and all episode values are unchanged. Timing is null in both reports; wall time
+is measured separately by the built-image CI jobs.
 
-| Attack | Score / result | Terminal behavior |
-|---|---:|---|
-| Jitter | 0.000000 | 8 time limits |
-| Vibrate parts | 0.000000 | 8 time limits |
-| Slam down | 0.000000 | 8 time limits |
-| Yaw spin | 0.000000 | 8 time limits |
-| Extreme actions | 0.000000 | 8 time limits |
-| NaN actions | 0.000000 | 8 time limits |
-| Sensor spoofing | **0.000580** [0.000017, 0.001347] | 8 time limits |
-| Early termination | 0.000000 | 8 player faults |
-| Solver blowup | 0.000000 | 7 unstable, 1 time limit |
-| Cue hill-climb sweep | **0.000179** [0, 0.000538] | 8 time limits |
-| Open-hand transport/wrist spoof | 0.000000 | 8 time limits |
-| Repeated close/release near hole | 0.000000 | 8 time limits |
-| Natural-seat key freebie | **0 / keys** | no natural-seat key completed |
-| Single-kind cap | analytic cap **0.443478** across 8 blueprints | analytic completed-step bound, not a physical rollout |
+| Policy | Complete repeated report SHA-256 |
+|---|---|
+| `zero` | `80f216a4479bf3a15032f185c9745117c7e13b47f945e0ded9a644444b77b45a` |
+| `random` | `f614a7c67651c558cbe79b062266a3277d897b70e75124d0849d87383b65261c` |
+| `script` | `c048e9cc9f697b0156c988936f86fb2fe1d4ea70ee7c1a0fcfdaec52a243f3c4` |
+| `strong_script` | `0d6b84f2a537399fca920ba3a7b40785d6214e7bbea505d9134efd2d3d043cba` |
+| `cem` | `2b3c76a4ca2a6ec0601c799f53bb44342f9f4679ca3f42f6a562d9bfda316405` |
+| `privileged` | `24060af8661b61800718ada2cfcb52b3b56fc121f386bdb59ed396fadb658918` |
 
-Jitter and vibrate attacks against the densified partials score exactly zero.
-The tiny sensor-spoofing and cue-sweep values are bounded sub-lift fractions, far
-below the scripted baseline, not key-window exposure or completed steps. The
-single-kind row is an analytic scoring construction, not a rollout score.
-General attacks are deliberately not described as proving that all possible
-exploits are closed.
+## Historical results
 
-### Reproduce
-
-```bash
-export NIST_PROFILE=v08 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
-python tools/make_policies.py
-pytest -q tests/
-python tools/calib_v08.py --seeds 7 --per 8 --episodes 8 \
-  --skip-privileged --out /tmp/v08-calib.json
-python tools/compound_solver.py --profile v08 --honest --seed 7 --per 8 --episodes 8
-python tools/train_rl_v08.py --train-seeds 101,102,103,104,105,106 \
-  --train-per 4 --train-episodes 4 --eval-seed 7 --eval-per 8 --eval-episodes 64 \
-  --candidates 12 --polish-gens 4 --polish-pop 8 --seed 2 --out /tmp/v08-rl.json
-python tools/eval_ladder_v08.py --kind cem --model /tmp/v08-rl.json \
-  --seeds 7,19,31 --per 8 --episodes 64 --out /tmp/v08-cem-matched.json
-python tools/eval_ladder_v08.py --kind script --seeds 7,19,31 --per 8 \
-  --episodes 64 --out /tmp/v08-script-matched.json
-python tools/eval_ladder_v08.py --kind strong_script --seeds 7,19,31 --per 8 \
-  --episodes 64 --out /tmp/v08-strong-matched.json
-python tools/eval_ladder_v08.py --kind privileged --seeds 7,19,31 --per 8 \
-  --episodes 64 --out /tmp/v08-privileged-matched.json
-python tools/collect_privileged_demos_v08.py --train-seeds 101,102,103,104 \
-  --per 8 --episodes 8 --workers 1 --teacher-mode insert \
-  --out /tmp/v08-insert-demos.npz
-python tools/train_ppo_v08.py --timesteps 131072 --train-seeds 101,102,103,104 \
-  --per 8 --eval-seed 201 --eval-per 8 --eval-episodes 8 --dense --residual \
-  --residual-policy strong --curriculum --bc-demos /tmp/v08-insert-demos.npz \
-  --bc-teacher privileged --bc-epochs 15 --out /tmp/v08-insert-ppo
-python tools/eval_ladder_v08.py --kind ppo --residual-policy strong \
-  --model /tmp/v08-insert-ppo/model.zip --seeds 7,19,31 --per 8 --episodes 8 \
-  --out /tmp/v08-insert-heldout.json
-```
-
-Optional residual-PPO / evolution tooling remains available under `tools/`; those
-packages are not referee-image dependencies. Model weights, generated
-demonstrations, and measurement artifacts are not committed. No miner ONNX,
-hotkeys, or secrets are included.
-
-For the real built-image wall check:
-
-```bash
-docker build -f referee/Dockerfile -t nist-assembly-referee:ci .
-mkdir -p /tmp/v08-wall && chmod 0777 /tmp/v08-wall
-python tools/docker_wall_v08.py --image nist-assembly-referee:ci \
-  --policy baselines/baseline.onnx --seed 7 --cpus 0,1 --out /tmp/v08-wall
-```
-
-### Open risks
-
-- The CEM result is a local gradient around the public FSM, not from-scratch
-  deep RL or PPO/SAC. The independent 192-episode-per-policy comparison against
-  both scripts has nonoverlapping pooled intervals and paired intervals excluding
-  zero. A PPO/SAC-specific learned-policy requirement remains open; the CEM
-  comparison does not substitute for it.
-- The completed 131,072-step PPO model is below the strong script under the
-  earlier scorer and does not establish learned improvement.
-- Honest privileged on the full three-round, 192-episode evaluation measures
-  **0.145420 [0.130896, 0.160576]**, below approximately **0.2–0.35**. This is
-  an open calibration issue, not a reason to loosen scoring.
-- Policy/red-team samples remain small for the matched three-round evaluation.
-  The built-image wall measurement is a real 64-episode round but does not
-  enlarge the learned-policy sample.
-- Long-horizon generalization, unseen blueprints, and stronger adaptive miners
-  remain unmeasured. Do not interpret the low scripted baseline as proof of
-  frontier-lab hardness.
-- Release cosign and digest verification remain owner/CI release tasks. This PR
-  does not push images, merge, tag, release, or change digest pins.
-
-### Test verification
-
-The earlier transport/insertion focused suite completed with **22 passed in
-229.74 s**. The complete suite before the CEM changes completed with **185
-passed, 5 skipped, 1 warning in 3348.35 s**. The current-scorer focused
-scorer/audit/wall-harness suite with the CEM-boundary and BC tests completed
-with **32 passed in 250.22 s**. Current-head checks are tracked on the PR; no
-prior suite is represented as validation of later scorer changes.
-
-## v0.7.5 (historical)
-
-See git history. The v0.8.0 profile and scores are not comparable with v0.7.x.
+Earlier v0.8.0 and controller-tuning measurements are not evidence for this PR.
+In particular, prior stack-finalization comparisons that re-pinned rings during
+settling are not reused. Generated models, demonstrations, and measurement logs
+are not committed. No miner ONNX, hotkeys, secrets, merge, tag, release, image
+push, or digest change is included.

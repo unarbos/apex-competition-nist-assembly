@@ -94,8 +94,51 @@ FORMATS = {"number", "percent", "duration_s", "score", "count", "text"}
 UNIT_TYPES = {"match", "game", "task", "subset", "instance", "completion", "other"}
 
 
+def test_validate_actions_rejects_nonfinite_bad_shape_and_non_numeric():
+    from referee import _validate_actions
+
+    assert _validate_actions([[0.0] * 5], 1)[0].shape == (5,)
+    for raw in (
+        [[float("nan")] * 5],
+        [[float("inf"), 0.0, 0.0, 0.0, 0.0]],
+        [[-float("inf"), 0.0, 0.0, 0.0, 0.0]],
+        [[True, 0.0, 0.0, 0.0, 0.0]],
+        [["0", 0.0, 0.0, 0.0, 0.0]],
+        [[0.0] * 4],
+    ):
+        assert _validate_actions(raw, 1) == [None]
+    assert _validate_actions([], 1) is None
+    assert _validate_actions([0.0] * 5, 1) is None
+    assert _validate_actions([[1e100, -1e100, 1e100, -1e100, 1e100]], 1)[0].tolist() == [1e100, -1e100, 1e100, -1e100, 1e100]
+
+
 def test_result_metadata_matches_platform_envelope(tmp_path):
-    md = run("baselines/baseline.onnx", tmp_path)["metadata"]
+    result = run("baselines/baseline.onnx", tmp_path)
+    md = result["metadata"]
+    assert set(md) == {"schema_version", "summary", "units", "metrics", "capabilities", "details"}
+    assert md["details"]["nist_profile"] == "v08"
+    assert md["details"]["assembly"] == "IV"
+    assert all("nist_profile" not in u for u in md["units"])
+    records = [json.loads(x) for x in (tmp_path / "history/episodes.jsonl").read_text().splitlines()]
+    assert records[0]["assembly"] == "IV"
+    assert all(row["nist_profile"] == "v08" for row in records[1:])
+    blob = json.dumps({"metadata": md, "records": records})
+    forbidden = (
+        "key_yaw", "key_tol", "seed_sequence", "build_salt", "reserved", "salt",
+        "pose_bias", "slot_bias", "peg_bias", "friction", "peg_mass", "gain_scale",
+        "obs_noise", "dropout_prob", "bias_drift", "backlash", "search_pitch",
+        "yaw_err", "hidden_range",
+    )
+    # The round-condition ranges are public training-draw axes, not reserved
+    # endpoints. Public board/clutter heights and offsets are allowed as well.
+    allowed_round_ranges = md["details"]["round_condition_ranges"]
+    assert allowed_round_ranges == records[0]["round_condition_ranges"]
+    public_round_blob = json.dumps(allowed_round_ranges)
+    assert all(token not in public_round_blob for token in ("reserved", "salt", "hidden_range"))
+    private_blob = json.dumps({"metadata_without_public_ranges": {
+        k: v for k, v in md["details"].items() if k != "round_condition_ranges"
+    }, "records": [row for row in records[1:] if True]})
+    assert all(token not in private_blob for token in forbidden)
     unit_ids = {u["id"] for u in md["units"]}
     assert all(u["type"] in UNIT_TYPES for u in md["units"])
     assert all(m.get("format", "number") in FORMATS for m in md["summary"] + md["metrics"])

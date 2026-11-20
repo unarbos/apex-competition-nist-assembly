@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -201,6 +202,119 @@ def test_bc_targets_are_normalized_exactly_once(tmp_path):
         load_bc_demos(bad_path)
 
 
+def test_cem_requires_explicit_selected_parameters(tmp_path, monkeypatch):
+    import eval_ladder_v08
+
+    with pytest.raises(ValueError, match="requires --model"):
+        eval_ladder_v08.run(7, 8, 1, "cem")
+    theta = tmp_path / "theta.json"
+    theta.write_text(json.dumps({"theta": [-0.002, 0.028, 0.105]}))
+    report = eval_ladder_v08.make_report("cem", [7], 1, 0, [eval_ladder_v08.summary([0.0, 0.0])], str(theta))
+    assert report["model_sha256"] is not None
+
+
+def test_matched_round_resume_refuses_different_simulator(tmp_path, monkeypatch):
+    import eval_ladder_v08
+
+    report = eval_ladder_v08.make_report("zero", [7], 1, 0, [])
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(json.dumps(report))
+    monkeypatch.setattr(sys, "argv", [
+        "eval_ladder_v08.py", "--kind", "zero", "--seeds", "7", "--episodes", "1",
+        "--out", str(tmp_path / "out.json"), "--checkpoint", str(checkpoint),
+    ])
+    report["simulator_sha256"] = "different-scorer"
+    checkpoint.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="different scorer"):
+        eval_ladder_v08.main()
+
+
+def test_matched_round_checkpoint_resumes_and_compares(tmp_path, monkeypatch):
+    import eval_ladder_v08
+
+    calls = []
+
+    def fake_round(seed, per, episodes, kind, *args):
+        calls.append(seed)
+        if seed == 19 and not getattr(fake_round, "allow_last", False):
+            raise RuntimeError("interrupted after completed round")
+        scores = {7: [0.1, 0.2], 19: [0.3, 0.4]}[seed]
+        return {
+            **eval_ladder_v08.summary(scores), "seed": seed,
+            "episodes": [{"episode": i, "score": s} for i, s in enumerate(scores)],
+        }
+
+    monkeypatch.setattr(eval_ladder_v08, "run", fake_round)
+    checkpoint = tmp_path / "checkpoint.json"
+    out = tmp_path / "report.json"
+    argv = ["eval_ladder_v08.py", "--kind", "zero", "--seeds", "7,19", "--episodes", "2", "--out", str(out), "--checkpoint", str(checkpoint)]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        eval_ladder_v08.main()
+    saved = json.loads(checkpoint.read_text())
+    assert saved["complete_rounds"] == 1
+    assert [r["seed"] for r in saved["rounds"]] == [7]
+    assert calls == [7, 19]
+
+    baseline = eval_ladder_v08.make_report("script", [7, 19], 2, 0, [
+        {**eval_ladder_v08.summary([0.0, 0.0]), "seed": seed,
+             "episodes": [{"episode": i, "score": 0.0} for i in range(2)]}
+        for seed in (7, 19)
+    ])
+    compare = tmp_path / "baseline.json"
+    compare.write_text(json.dumps(baseline))
+    fake_round.allow_last = True
+    monkeypatch.setattr(sys, "argv", argv + ["--compare", str(compare)])
+    eval_ladder_v08.main()
+    assert calls == [7, 19, 19]
+    final = json.loads(out.read_text())
+    assert final["complete_rounds"] == 2
+    assert final["matched_improvement"]["mean"] == pytest.approx(0.25)
+    assert final["matched_improvement"]["ci95"] == pytest.approx([0.15, 0.35])
+    eval_ladder_v08.main()
+    assert calls == [7, 19, 19]
+
+
+
+
+def test_matched_guards_reject_empty_chunks_layout_and_optimized_mode(tmp_path, monkeypatch):
+    import eval_ladder_v08
+
+    with pytest.raises(ValueError, match="positive episode count"):
+        eval_ladder_v08.run(7, 8, 0, "zero")
+    with pytest.raises(ValueError, match="only 0 conditions"):
+        eval_ladder_v08.run(7, 8, 1, "zero", start_episode=10000)
+
+    def fake_run(seed, per, episodes, kind, *args):
+        return {**eval_ladder_v08.summary([0.0]), "seed": seed,
+                "episodes": [{"episode": 0, "score": 0.0}]}
+    monkeypatch.setattr(eval_ladder_v08, "run", fake_run)
+    checkpoint = tmp_path / "checkpoint.json"
+    out = tmp_path / "report.json"
+    argv = ["eval_ladder_v08.py", "--kind", "zero", "--seeds", "7", "--episodes", "1", "--out", str(out), "--checkpoint", str(checkpoint)]
+    monkeypatch.setattr(sys, "argv", argv)
+    eval_ladder_v08.main()
+    monkeypatch.setattr(sys, "argv", argv + ["--per", "4"])
+    with pytest.raises(ValueError, match="conditions-per-seed"):
+        eval_ladder_v08.main()
+    baseline = json.loads(out.read_text())
+    baseline["per"] = 4
+    comparison = tmp_path / "comparison.json"
+    comparison.write_text(json.dumps(baseline))
+    monkeypatch.setattr(sys, "argv", argv + ["--compare", str(comparison)])
+    with pytest.raises(ValueError, match="same conditions per seed"):
+        eval_ladder_v08.main()
+    import subprocess
+    probe = (
+        "import sys;sys.path.insert(0,'tools');"
+        "from eval_ladder_v08 import require;"
+        "require(False,'optimized-mode guard survived')"
+    )
+    proc = subprocess.run([sys.executable, "-O", "-I", "-c", probe], cwd=ROOT, capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "optimized-mode guard survived" in proc.stderr
+
+
 def test_insert_teacher_matches_observation_script_search(conds):
     from collect_privileged_demos_v08 import INSERT_SEARCH_STEPS_V08, matched_insert_teacher
     from compound_solver import PegView
@@ -213,7 +327,50 @@ def test_insert_teacher_matches_observation_script_search(conds):
     assert teacher.swing_grip == -1.0
 
 
-def test_cem_matched_evaluator_uses_observation_boundary():
+def test_matched_random_is_uniform_and_observation_only(monkeypatch):
+    from eval_ladder_v08 import run
+
+    class GuardedBoundary:
+        def __init__(self, ep):
+            self.ep = ep
+            self.done = False
+            self.actions = []
+
+        def observe(self, rng):
+            return self.ep.observe(rng).astype(np.float64)
+
+        def step(self, action):
+            self.actions.append(np.asarray(action).copy())
+            self.ep.step(action)
+            self.done = self.ep.done
+
+        def __getattr__(self, name):
+            raise AssertionError(f"privileged random read: {name}")
+
+    import eval_ladder_v08
+    original = eval_ladder_v08.ObservationBoundary
+    boundaries = []
+    def make_boundary(ep):
+        boundary = GuardedBoundary(ep)
+        boundaries.append(boundary)
+        return boundary
+    eval_ladder_v08.ObservationBoundary = make_boundary
+    try:
+        result = run(7, 8, 1, "random", start_episode=51)
+    finally:
+        eval_ladder_v08.ObservationBoundary = original
+    assert result["n"] == 1
+    assert result["episodes"][0]["episode"] == 51
+    assert boundaries and len(boundaries[0].actions) > 1
+    actions = np.asarray(boundaries[0].actions)
+    assert np.all(actions >= -1.0) and np.all(actions <= 1.0)
+    assert not np.array_equal(actions[0], actions[1])
+    assert np.all(np.isfinite(actions))
+
+
+def test_cem_matched_evaluator_uses_observation_boundary(tmp_path):
+    theta = tmp_path / "theta.json"
+    theta.write_text(json.dumps({"theta": [-0.002, 0.028, 0.105]}))
     from eval_ladder_v08 import run
 
     class GuardedBoundary:
@@ -235,7 +392,47 @@ def test_cem_matched_evaluator_uses_observation_boundary():
     original = eval_ladder_v08.ObservationBoundary
     eval_ladder_v08.ObservationBoundary = GuardedBoundary
     try:
-        result = run(7, 8, 1, "cem")
+        result = run(7, 8, 1, "cem", str(theta))
+    finally:
+        eval_ladder_v08.ObservationBoundary = original
+    assert result["n"] == 1
+    assert result["episodes"][0]["score"] >= 0.0
+
+
+def test_ppo_matched_evaluator_uses_observation_boundary(monkeypatch, tmp_path):
+    from eval_ladder_v08 import run
+
+    class GuardedBoundary:
+        def __init__(self, ep):
+            self.ep = ep
+            self.done = False
+
+        def observe(self, rng):
+            return self.ep.observe(rng).astype(np.float64)
+
+        def step(self, action):
+            self.ep.step(action)
+            self.done = self.ep.done
+
+        def __getattr__(self, name):
+            raise AssertionError(f"privileged PPO read: {name}")
+
+    import eval_ladder_v08
+    import types
+    # The boundary contract does not require the optional PPO dependency.
+    import importlib.util
+    if importlib.util.find_spec("stable_baselines3") is None:
+        pytest.skip("optional Stable-Baselines3 is not installed in referee CI")
+    from stable_baselines3 import PPO
+
+    model = type("ZeroPPO", (), {
+        "predict": lambda self, obs, deterministic: (np.zeros(5), None),
+    })()
+    monkeypatch.setattr(PPO, "load", lambda *args, **kwargs: model)
+    original = eval_ladder_v08.ObservationBoundary
+    eval_ladder_v08.ObservationBoundary = GuardedBoundary
+    try:
+        result = run(7, 8, 1, "ppo", str(tmp_path / "synthetic-ppo.zip"))
     finally:
         eval_ladder_v08.ObservationBoundary = original
     assert result["n"] == 1
@@ -299,6 +496,387 @@ def test_key_yaw_anti_aligned(conds):
             assert dmin >= KEY_ANTI_ALIGN - 1e-6, (s.key_yaw, dmin, forbidden)
 
 
+@pytest.mark.parametrize("episode_index,n_keys", [(1, 2), (0, 3)])
+def test_all_completed_keys_survive_wrist_retarget_and_finalization(conds, episode_index, n_keys):
+    """Each completed key is evidence about its own peg, not the final wrist yaw."""
+    from nist_sim.compound_v07 import KEY_HOLD, KEY_PROBE_FRAMES
+
+    ep = AssemblyIVEpisode(conds[episode_index], np.random.default_rng(12))
+    keys = [k for k, s in enumerate(ep.cs.steps) if s.kind == "key"]
+    assert len(keys) == n_keys
+    yaws = [ep.cs.steps[k].key_yaw for k in keys]
+    assert all(abs(wrap(a - b)) > ep.cs.steps[keys[0]].key_tol for a in yaws for b in yaws if a != b)
+    ep._action_earned_v08 = True
+    for k, s in enumerate(ep.cs.steps):
+        if s.kind != "key":
+            ep.step_done[k] = True
+            ep.step_in_order[k] = True
+    for k in keys:
+        s = ep.cs.steps[k]
+        ep._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+        ep._key_index_armed[s.peg] = True
+        ep._key_hold[s.peg] = KEY_HOLD
+        ep.step_done[k] = True
+        ep.step_in_order[k] = True
+        ep.step_done_at[k] = 50 + k
+        ep._key_precision_v08[k] = 0.9
+        hx, hy = ep.slot_xy[s.peg]
+        from nist_sim.env import PEG_LEN
+        ep._set_free(ep.peg_qadr[s.peg], ep.peg_vadr[s.peg], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+        ep.seated_now[s.peg] = True
+    # The last key's window cannot retroactively invalidate the first two.
+    ep.data.qpos[3] = float(ep.cs.steps[keys[-1]].key_yaw)
+    assert all(not ep._key_aligned(ep.cs.steps[k]) for k in keys[:-1])
+    assert ep._key_aligned(ep.cs.steps[keys[-1]])
+    ep.done = True
+    ep._finalize_stability()
+    assert all(ep.step_done[k] for k in keys)
+    assert all(ep._physical_step_ok(k)[0] for k in keys)
+    assert all(ep._stability_ok[k] for k in keys)
+    # Completion evidence cannot preserve a key whose peg was pulled out.
+    removed = keys[0]
+    i = ep.cs.steps[removed].peg
+    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [0.15, 0.15, 0.05], [1, 0, 0, 0])
+    ep.seated_now[i] = False
+    ep._physical_step_ok(removed)
+    assert not ep._physical_step_ok(removed)[0]
+    ep.step_done[removed] = False
+    assert all(ep.step_done[k] for k in keys[1:])
+    for k in keys:
+        ep.step_done[k] = False
+        ep._key_hold[ep.cs.steps[k].peg] = 0
+    assert not any(ep._physical_step_ok(k)[0] for k in keys)
+
+
+def test_dependent_step_partials_do_not_reuse_insert_peg_motion(conds):
+    from nist_sim.compound_v08 import _partial_credit_v08
+
+    ep = AssemblyIVEpisode(conds[1], np.random.default_rng(5))
+    ep._action_earned_v08 = True
+    ks = [k for k, s in enumerate(ep.cs.steps) if s.kind in ("key", "twist")]
+    ks = [k for k in ks if not ep.peg_parked[ep.cs.steps[k].peg]]
+    assert ks
+    screw_ep = AssemblyIVEpisode(conds[1], np.random.default_rng(5))
+    screw_ep._action_earned_v08 = True
+    for dependent_ep, k in [(ep, k) for k in ks] + [
+        (screw_ep, next(k for k, s in enumerate(screw_ep.cs.steps) if s.kind == "screw"))
+    ]:
+        for p in dependent_ep.cs.steps[k].prereq:
+            dependent_ep.step_done[p] = True
+        i = dependent_ep.cs.steps[k].peg
+        assert not dependent_ep.peg_parked[i]
+        # Test-only physical fixture: insert the peg, then re-lift it. Generic
+        # insert evidence must not become dependent key/twist/screw progress.
+        from nist_sim.env import PEG_LEN
+        hx, hy = dependent_ep.slot_xy[i]
+        dependent_ep._set_free(dependent_ep.peg_qadr[i], dependent_ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+        dependent_ep.seated_now[i] = True
+        dependent_ep._gripper_touching = lambda b, ep=dependent_ep, i=i: b == ep.peg_body[i]
+        dependent_ep.data.qpos[4] = dependent_ep.data.qpos[5] = 0.002
+        dependent_ep.data.qpos[dependent_ep.peg_qadr[i] + 2] += 0.012
+        dependent_ep._snapshot_parts_v08()
+        dependent_ep._part_prev_z_v08[k] -= 0.001
+        dependent_ep._update_milestones_v08()
+        assert not any(dependent_ep._milestones_v08[k].values())
+        # Fail closed if an old checkpoint carries stale generic peg evidence.
+        dependent_ep._milestones_v08[k] = dict(
+            lift=True, transport=True, transport_fraction=1.0,
+            insert=True, insert_fraction=1.0, align=True, stable=True,
+        )
+        assert _partial_credit_v08(dependent_ep, k) == 0.0
+
+
+def test_collar_and_stack_stable_and_displaced_finalization(conds, monkeypatch):
+    """Stable and displaced collar/ring fixtures verify final physical credit.
+
+    These are test-only finalization fixtures, not controller demonstrations.
+    A stable collar is checked without an impulse; the mated stack is checked
+    under the default kick. Displaced parts must still lose credit.
+    """
+    from nist_sim.compound import COLLAR_H
+    from nist_sim.env import MAX_OPEN, PEG_LEN
+    import nist_sim.compound_v08 as v08
+
+    for kind in ("collar", "stack"):
+        monkeypatch.setattr(v08, "PERTURB_XY", 0.0018 if kind == "stack" else 0.0)
+        ep = AssemblyIVEpisode(conds[1 if kind == "stack" else 8], np.random.default_rng(23))
+        k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == kind and not ep.peg_parked[s.peg])
+        j, i = ep.cs.steps[k].part, ep.cs.steps[k].peg
+        assert not ep.peg_parked[i]
+        hx, hy = ep.slot_xy[i]
+        ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+        ep.seated_now[i] = True
+        ep.collar_parked[j] = False
+        ep._set_body_active(ep.collar_body[j], True)
+        if kind == "stack":
+            ep._pin_stack_on_peg(j)
+        else:
+            ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx, hy, 0.020 + COLLAR_H / 2], [1, 0, 0, 0])
+        ep.collar_run[j] = 0
+        ep._action_earned_v08 = True
+        ep.step_done[k] = True
+        ep.step_in_order[k] = True
+        ep.step_done_at[k] = 1
+        ep.done = True
+        ep.data.qpos[2] = 0.16
+        ep.grip = MAX_OPEN
+        ep._apply_ctrl()
+        ep._finalize_stability()
+        assert ep.step_done[k]
+        assert ep._physical_step_ok(k)[0]
+        if kind == "collar":
+            assert ep.collar_run[j] > 0
+        else:
+            assert ep._stack_mated[j]
+
+        # A displaced collar/ring cannot retain credit from stale evidence.
+        monkeypatch.setattr(v08, "PERTURB_XY", 0.0018)
+        ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx + 0.05, hy, 0.004], [1, 0, 0, 0])
+        ep.collar_run[j] = 0
+        assert not ep._physical_step_ok(k)[0]
+        ep.step_done[k] = True
+        ep._finalized = False
+        ep._finalize_stability()
+        assert not ep.step_done[k]
+
+
+def test_collar_finalization_uses_current_physical_seat_not_stale_counter(conds, monkeypatch):
+    from nist_sim.compound import COLLAR_H, SEATED_HOLD
+    from nist_sim.env import MAX_OPEN, PEG_LEN
+    import nist_sim.compound_v08 as v08
+    monkeypatch.setattr(v08, "PERTURB_XY", 0.0)
+
+    ep = AssemblyIVEpisode(conds[1], np.random.default_rng(17))
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "collar")
+    j, i = ep.cs.steps[k].part, ep.cs.steps[k].peg
+    hx, hy = ep.slot_xy[i]
+    ep.collar_parked[j] = False
+    ep._set_body_active(ep.collar_body[j], True)
+    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx, hy, 0.020 + COLLAR_H / 2], [1, 0, 0, 0])
+    ep.seated_now[i] = True
+    ep.data.qpos[2] = 0.16
+    ep.grip = MAX_OPEN
+    ep._apply_ctrl()
+    ep.collar_run[j] = 0  # deliberately stale, as in the old settle path
+    ep._action_earned_v08 = True
+    ep.step_done[k] = True
+    ep.step_in_order[k] = True
+    ep.step_done_at[k] = 1
+    ep.done = True
+    ep._finalize_stability()
+    assert ep.step_done[k]
+    assert ep._physical_step_ok(k)[0]
+    assert ep.collar_run[j] >= SEATED_HOLD
+
+
+def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
+    from nist_sim.env import PEG_LEN
+
+    # Isolate measured-pose verification from the separate perturbation check.
+    import nist_sim.compound_v08 as v08
+    monkeypatch.setattr(v08, "PERTURB_XY", 0.0018)
+    ep = AssemblyIVEpisode(conds[1], np.random.default_rng(17))
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "stack" and not ep.peg_parked[s.peg])
+    j, i = ep.cs.steps[k].part, ep.cs.steps[k].peg
+    assert not ep.peg_parked[i]
+    ep.collar_parked[j] = False
+    ep._set_body_active(ep.collar_body[j], True)
+    hx, hy = ep.slot_xy[i]
+    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    ep.seated_now[i] = True
+    ep.data.qpos[2] = 0.16
+    ep._pin_stack_on_peg(j)
+    ep._action_earned_v08 = True
+    ep.step_done[k] = True
+    ep.step_in_order[k] = True
+    ep.step_done_at[k] = 1
+    ep.done = True
+    ep._finalize_stability()
+    assert ep.step_done[k]
+    assert ep._physical_step_ok(k)[0]
+    assert ep._stack_mated[j]
+    # The mated ring is not directly kicked; the seated peg still is. An
+    # unmated ring must still receive the direct perturbation impulse.
+    adr = ep.peg_vadr[i]
+    peg_speed = float(np.linalg.norm(ep.data.qvel[adr:adr + 2]))
+    assert peg_speed > 0.0
+
+    displaced = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
+    monkeypatch.setattr(v08, "PERTURB_XY", 0.0018)
+    displaced.collar_parked[j] = False
+    displaced._set_body_active(displaced.collar_body[j], True)
+    displaced._set_free(displaced.peg_qadr[i], displaced.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    displaced.seated_now[i] = True
+    displaced.data.qpos[2] = 0.16
+    displaced._pin_stack_on_peg(j)
+    displaced._action_earned_v08 = True
+    displaced.step_done[k] = True
+    displaced.step_in_order[k] = True
+    displaced.step_done_at[k] = 1
+    displaced.done = True
+    pins = []
+    original_pin = displaced._pin_stack_on_peg
+    def count_pin(ring):
+        pins.append(ring)
+        return original_pin(ring)
+    displaced._pin_stack_on_peg = count_pin
+    displaced._finalize_stability()
+    assert not pins, "finalization must not restore a ring after the perturbation"
+    if displaced.step_done[k]:
+        # If this fixture's kick did not dislodge the ring, independently test
+        # a displaced state rather than claiming a forced successful rejection.
+        displaced._set_free(displaced.collar_qadr[j], displaced.collar_vadr[j], [hx + 0.05, hy, 0.004], [1, 0, 0, 0])
+    assert not displaced._physical_step_ok(k)[0]
+
+    # A stale mate latch cannot hide a ring that physically left the peg.
+    ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx + 0.05, hy, 0.004], [1, 0, 0, 0])
+    assert not ep._physical_step_ok(k)[0]
+
+    unmated = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
+    unmated.collar_parked[j] = False
+    unmated._set_body_active(unmated.collar_body[j], True)
+    unmated._set_free(unmated.peg_qadr[i], unmated.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    unmated.seated_now[i] = True
+    unmated.data.qpos[2] = 0.16
+    unmated._set_free(unmated.collar_qadr[j], unmated.collar_vadr[j], [hx, hy, 0.054], [1, 0, 0, 0])
+    unmated._stack_mated[j] = False
+    unmated._action_earned_v08 = True
+    unmated.step_done[k] = True
+    unmated.step_done_at[k] = 1
+    unmated.done = True
+    unmated._finalize_stability()
+    speed = float(np.linalg.norm(unmated.data.qvel[unmated.collar_vadr[j]:unmated.collar_vadr[j] + 2]))
+    assert speed > 0.0, "an unmated loose ring must still be kicked directly"
+
+
+def test_false_or_barely_mated_ring_cannot_dodge_final_verification(conds):
+    from nist_sim.env import MAX_OPEN, PEG_LEN
+
+    for xy_offset, z_offset in ((0.05, 0.0), (0.012, 0.0), (0.0, 0.012), (0.0, -0.020)):
+        ep = AssemblyIVEpisode(conds[1], np.random.default_rng(31))
+        k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "stack" and not ep.peg_parked[s.peg])
+        j, i = ep.cs.steps[k].part, ep.cs.steps[k].peg
+        hx, hy = ep.slot_xy[i]
+        ep.collar_parked[j] = False
+        ep._set_body_active(ep.collar_body[j], True)
+        ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+        ep.seated_now[i] = True
+        ep.data.qpos[2] = 0.16
+        ep.grip = MAX_OPEN
+        ep._apply_ctrl()
+        ep._action_earned_v08 = True
+        ep.step_done[k] = True
+        ep.step_in_order[k] = True
+        ep.done = True
+        ep._pin_stack_on_peg(j)
+        assert ep._physical_step_ok(k)[0]
+        correct, _ = ep.collar_pose(j)
+
+        # A stale or falsely asserted mate flag cannot preserve credit after a
+        # post-mate strike or a merely near-mate pose. Finalization never pins
+        # the ring back onto the peg to make this check pass.
+        ep._set_free(
+            ep.collar_qadr[j], ep.collar_vadr[j],
+            [correct[0] + xy_offset, correct[1], correct[2] + z_offset], [1, 0, 0, 0],
+        )
+        assert not ep._physical_step_ok(k)[0], (xy_offset, z_offset)
+        ep._finalized = False
+        ep._finalize_stability()
+        assert not ep.step_done[k], (xy_offset, z_offset)
+        assert compound_score_v08(ep)["score"] == 0.0
+
+
+def test_key_hold_and_completion_precision_cannot_be_farmed_by_yaw_sweeps(conds):
+    from nist_sim.compound_v07 import KEY_HOLD, KEY_PROBE_FRAMES
+    from nist_sim.compound_v08 import _partial_credit_v08
+
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(12))
+    keys = [k for k, s in enumerate(ep.cs.steps) if s.kind == "key"]
+    assert len(keys) >= 2
+    ep._action_earned_v08 = True
+    for k in keys:
+        s = ep.cs.steps[k]
+        i = s.peg
+        for p in s.prereq:
+            ep.step_done[p] = True
+        ep._peg_probe_frames[i] = KEY_PROBE_FRAMES
+        ep._key_index_armed[i] = True
+        ep._active_key = k
+        ep._key_is_active = lambda _k: True
+        ep._pressing_on_peg = lambda _i: True
+        hx, hy = ep.slot_xy[i]
+        from nist_sim.env import PEG_LEN
+        ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+        ep.seated_now[i] = True
+        ep._gripper_touching = lambda _body: False
+
+        # Brief visits below KEY_HOLD cannot complete or create precision. A
+        # later sweep cannot turn that transient into completion-latched credit.
+        for yaw in (s.key_yaw + 2 * s.key_tol, s.key_yaw, s.key_yaw + 2 * s.key_tol):
+            ep.data.qpos[3] = yaw
+            ep._step_state(k)
+        assert ep._key_hold[i] < KEY_HOLD
+        assert not ep.step_done[k]
+        assert not np.isfinite(ep._key_precision_v08[k])
+        assert _partial_credit_v08(ep, k) == 0.0
+
+        # A proper uninterrupted hold, rather than a transient sweep, is the
+        # only path to completion. No early latch or precision is produced by
+        # crossing a window below KEY_HOLD.
+        ep.data.qpos[3] = s.key_yaw
+        for _ in range(KEY_HOLD):
+            done, _ = ep._step_state(k)
+        assert done
+        assert ep._key_hold[i] >= KEY_HOLD
+        assert not ep.step_done[k]  # parent bookkeeping has not run in this isolated fixture
+        assert not np.isfinite(ep._key_precision_v08[k])
+
+    # Completion precision is recorded once and cannot be improved by sweeping
+    # to the centre of a different key window later. The two/three-key physical
+    # finalization tests above exercise the actual seated-peg completion latch.
+    latched = AssemblyIVEpisode(conds[0], np.random.default_rng(12))
+    key = next(k for k, s in enumerate(latched.cs.steps) if s.kind == "key")
+    latched.step_done[key] = True
+    latched._key_precision_v08[key] = 0.37
+    latched.data.qpos[3] = latched.cs.steps[key].key_yaw
+    latched._update_milestones_v08()
+    assert latched._key_precision_v08[key] == pytest.approx(0.37)
+    other = next(k for k, s in enumerate(latched.cs.steps) if s.kind == "key" and k != key)
+    latched.data.qpos[3] = latched.cs.steps[other].key_yaw
+    latched._update_milestones_v08()
+    assert latched._key_precision_v08[key] == pytest.approx(0.37)
+
+
+def test_finalization_requires_upright_seated_peg(conds):
+    from nist_sim.env import PEG_LEN
+
+    for kind in ("insert", "key", "twist", "screw"):
+        ep = next(
+            ep
+            for c in conds for seed in range(50)
+            for ep in [AssemblyIVEpisode(c, np.random.default_rng(seed))]
+            if any(s.kind == kind and not ep.peg_parked[s.peg] for s in c.compound.steps)
+        )
+        k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == kind and not ep.peg_parked[s.peg])
+        i = ep.cs.steps[k].peg
+        assert not ep.peg_parked[i]
+        hx, hy = ep.slot_xy[i]
+        ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+        ep.seated_now[i] = True
+        ep._action_earned_v08 = True
+        ep.step_done[k] = True
+        ep.step_done_at[k] = 1
+        ep.done = True
+        # Test-only finalization fixture: retain depth but rotate the peg onto
+        # its side. A depth-only hole predicate must not preserve completion.
+        ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [0.70710678, 0.70710678, 0, 0])
+        assert ep._peg_in_hole(i)
+        ep._finalize_stability()
+        assert not ep.step_done[k], kind
+        assert not ep._physical_step_ok(k)[0], kind
+
+
 def test_no_closeness_or_detent_in_obs(conds):
     """Key task feats must not publish closeness / retarget pulse / key_tol."""
     ss = episode_seed_sequence(7, 1)
@@ -319,6 +897,80 @@ def test_no_closeness_or_detent_in_obs(conds):
     # feat2 may be present-mark 0.5; feat3 must stay 0 (no closeness); feat5 not key_tol.
     assert float(o[b + 3]) == 0.0
     assert float(o[b + 5]) in (0.0, 1.0, 2.0)  # collar flag or empty — not tol*10 (~0.4)
+
+
+def test_record_task_and_event_sanitizers_hide_key_windows(conds):
+    from nist_sim.compound_v08 import compound_record_events_v08, compound_record_task_v08
+
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(123))
+    task = compound_record_task_v08(ep.cs)
+    assert all("key_yaw" not in row and "key_tol" not in row for row in task["steps"])
+    events = compound_record_events_v08([
+        {"kind": "retarget", "step": 17, "key_step": 1, "old_yaw": 0.8, "new_yaw": -0.4},
+        {"kind": "gain", "step": 22, "scale": 1.7, "friction": 1.3},
+    ])
+    assert "old_yaw" not in events[0] and "new_yaw" not in events[0]
+    assert events[0]["kind"] == "retarget" and events[0]["step"] == 17
+    assert events[1] == {"kind": "gain", "step": 22, "scale": 1.7}
+
+
+def test_observation_has_no_seed_key_window_or_private_numeric_leak(conds, tmp_path, monkeypatch):
+    from nist_sim import conditions
+    from nist_sim.reserve import reserved_from_secret
+
+    reserved = reserved_from_secret("v081-redteam-privacy")
+    path = tmp_path / "reserved.json"
+    path.write_text(json.dumps(reserved))
+    monkeypatch.setattr(conditions, "RESERVED_PATH", path)
+    _, sampled = sample_compound_v08(43, 1, "live")
+    ep = AssemblyIVEpisode(sampled[0], np.random.default_rng(123))
+    keys = [(k, s) for k, s in enumerate(ep.cs.steps) if s.kind == "key"]
+    assert keys
+    for k, s in keys:
+        ep._active_key = k
+        ep._peg_touched[s.peg] = True
+        ep._peg_probe_frames[s.peg] = 99
+        ep._key_index_armed[s.peg] = True
+        ep._key_retarget_pulse[s.peg] = 20
+    frames = np.asarray([ep.observe(np.random.default_rng(500 + i)) for i in range(12)])
+    assert frames.shape == (12, 320)
+    assert np.all(np.isfinite(frames))
+
+    # These are referee-private numeric values, not values derivable from the
+    # public board/blueprint. No observation channel may reveal them verbatim.
+    private = [
+        float(s.key_yaw) for _, s in keys
+    ] + [
+        float(s.key_tol) for _, s in keys
+    ] + [
+        float(x) for pair in ep.c.slot_bias_list for x in pair
+    ] + [
+        float(x) for pair in ep.c.peg_bias_delta_list for x in pair
+    ] + [
+        ep.c.friction, ep.c.peg_mass, ep.c.gain_scale,
+        ep.c.obs_noise, ep.c.obs_noise_rad, ep.c.dropout_prob, ep.c.bias_drift,
+    ]
+    for value in private:
+        if abs(value) < 1e-9:
+            continue
+        assert not np.any(np.isclose(frames, value, rtol=0.0, atol=1e-12)), value
+        assert not np.any(np.isclose(frames, 10 * value, rtol=0.0, atol=1e-12)), 10 * value
+    for lo, hi in reserved["ranges"].values():
+        for value in (lo, hi):
+            assert not np.any(np.isclose(frames, value, rtol=0.0, atol=1e-12))
+    task0 = 184
+    for _, s in keys:
+        base = task0 + s.peg * 6
+        assert np.all(frames[:, base + 3] == 0.0)  # no closeness/search gradient
+        assert np.all(np.isin(frames[:, base + 5], (0.0, 1.0, 2.0)))
+        # A present mark is permitted, but it cannot vary with the hidden yaw.
+        yaw = ep.data.qpos[3]
+        for candidate in (s.key_yaw - 2 * s.key_tol, s.key_yaw, s.key_yaw + 2 * s.key_tol):
+            ep.data.qpos[3] = candidate
+            obs = ep.observe(np.random.default_rng(900))
+            assert obs[base + 3] == 0.0
+            assert obs[base + 5] in (0.0, 1.0, 2.0)
+        ep.data.qpos[3] = yaw
 
 
 def test_equal_weight_scoring_caps_insert_only(conds):
@@ -361,14 +1013,39 @@ def test_zero_policy_exactly_zero_on_sampled_round():
         assert compound_score_v08(ep)["score"] == 0.0, (i, ep.terminal_reason)
 
 
-def test_random_and_invalid_actions_cannot_earn_credit(conds):
-    for i, action in enumerate((np.ones(5), np.full(5, np.nan), np.full(5, 1e100))):
-        ss = episode_seed_sequence(7, i)
-        r1, _ = (np.random.default_rng(s) for s in ss.spawn(2))
-        ep = AssemblyIVEpisode(conds[i], r1)
-        while not ep.done:
-            ep.step(action)
-        assert compound_score_v08(ep)["score"] == 0.0, (i, ep.terminal_reason)
+def test_zero_actions_cannot_seat_board_top_part():
+    """A resting part over a recess is not an inserted part (seed 31, episode 58)."""
+    from nist_sim.env import PEG_LEN
+
+    fixture = Path(os.environ.get("NIST_V081_ARTIFACTS", "/home/bb/nist-v080-artifacts")) / "v080-free-start-condition.pkl"
+    if not fixture.exists():
+        pytest.skip("preserved v0.8.0 free-start fixture is unavailable")
+    import pickle
+    cond = pickle.loads(fixture.read_bytes())
+    r1, _ = (np.random.default_rng(s) for s in episode_seed_sequence(31, 58).spawn(2))
+    ep = AssemblyIVEpisode(cond, r1)
+    for _ in range(6):
+        ep.step(np.zeros(5))
+    p, _ = ep.peg_pose(0)
+    assert abs(p[2] - PEG_LEN / 2) < 0.001
+    assert not ep.seated_now[0]
+    assert not ep.step_done[0]
+    assert not ep._peg_in_hole(0)
+    while not ep.done:
+        ep.step(np.zeros(5))
+    assert compound_score_v08(ep)["score"] == 0.0
+
+
+def test_v08_recessed_seat_remains_valid(conds):
+    from nist_sim.env import PEG_LEN
+
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
+    i = next(s.peg for s in ep.cs.steps if s.kind == "insert")
+    hx, hy = ep.slot_xy[i]
+    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    assert ep._peg_in_hole(i)
+    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2 + 0.010], [1, 0, 0, 0])
+    assert not ep._peg_in_hole(i)
 
 
 def test_reset_and_passive_pose_do_not_complete_or_partially_credit():
@@ -423,7 +1100,9 @@ def test_partial_requires_prerequisites_and_never_uses_legacy_progress():
     assert step_credit_v08(True, False, 10, 100, None) == 0.03
 
 
-def test_dense_lift_requires_held_part_and_settled_reference(conds):
+def test_dense_lift_requires_bilateral_grasp_and_sustained_real_rise(conds, monkeypatch):
+    from nist_sim.compound_v08 import DENSE_LIFT_HOLD_FRAMES_V08, DENSE_LIFT_START_V08
+
     ep = AssemblyIVEpisode(conds[0], np.random.default_rng(4))
     k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert" and not s.prereq)
     i = ep.cs.steps[k].peg
@@ -436,32 +1115,75 @@ def test_dense_lift_requires_held_part_and_settled_reference(conds):
     ep._action_earned_v08 = True
     ep._update_milestones_v08()
     assert ep._milestones_v08[k].get("lift_fraction", 0.0) == 0.0
-    # A vertical wrist/part fixture at spawn height earns nothing. A small
-    # measured rise above settled height earns only a bounded partial fraction.
+
+    # The seed-31 episode-11 failure mode: sub-mm generic contact motion is not
+    # a grasp-and-raise and cannot earn a fractional lift, even if repeated.
+    monkeypatch.setattr(ep, "_bilateral_grasp_v08", lambda _body: False)
+    ep.data.qpos[ep.peg_qadr[i] + 2] = reference + 0.0008
+    for _ in range(2 * DENSE_LIFT_HOLD_FRAMES_V08):
+        ep._update_milestones_v08()
+    assert ep._milestones_v08[k].get("lift_fraction", 0.0) == 0.0
+
+    # A real grasp must sustain a rise above 4 mm. A brief or one-frame dip
+    # below the threshold resets the hold and cannot accumulate lift credit.
+    monkeypatch.setattr(ep, "_bilateral_grasp_v08", lambda _body: True)
     ep.data.qpos[ep.peg_qadr[i] + 2] = reference + 0.00425
+    for _ in range(DENSE_LIFT_HOLD_FRAMES_V08 - 1):
+        ep._update_milestones_v08()
+    assert ep._milestones_v08[k].get("lift_fraction", 0.0) == 0.0
+    ep.data.qpos[ep.peg_qadr[i] + 2] = reference + DENSE_LIFT_START_V08 - 0.0001
+    ep._update_milestones_v08()
+    ep.data.qpos[ep.peg_qadr[i] + 2] = reference + 0.00425
+    for _ in range(DENSE_LIFT_HOLD_FRAMES_V08 - 1):
+        ep._update_milestones_v08()
+    assert ep._milestones_v08[k].get("lift_fraction", 0.0) == 0.0
     ep._update_milestones_v08()
     fraction = ep._milestones_v08[k]["lift_fraction"]
-    assert 0.0 < fraction == pytest.approx(0.10)
-    ep.data.qpos[ep.peg_qadr[i] + 2] = reference
-    ep._update_milestones_v08()
-    assert ep._milestones_v08[k]["lift_fraction"] == fraction  # best-so-far, not oscillation farm
+    assert 0.0 < fraction == pytest.approx(0.0125)
+
+    # Only bilateral contact counts: a palm push or a one-finger grasp cannot
+    # start the hold even with a large apparent part rise.
+    ep._milestones_v08[k] = dict(lift=False, transport=False, align=False, stable=False, insert=False)
+    monkeypatch.setattr(ep, "_bilateral_grasp_v08", lambda _body: False)
+    ep.data.qpos[ep.peg_qadr[i] + 2] = reference + 0.020
+    for _ in range(2 * DENSE_LIFT_HOLD_FRAMES_V08):
+        ep._update_milestones_v08()
+    assert ep._milestones_v08[k].get("lift_fraction", 0.0) == 0.0
+
     ep._gripper_touching = lambda _b: False
     ep.data.qpos[ep.peg_qadr[i] + 2] = reference + 0.00425
     ep._update_milestones_v08()
-    assert ep._milestones_v08[k]["lift_fraction"] == fraction
-    ep._gripper_touching = lambda b: b == body
+    assert ep._milestones_v08[k].get("lift_fraction", 0.0) == 0.0
     for prereq in ep.cs.steps[k].prereq:
         ep.step_done[prereq] = False
-    if ep.cs.steps[k].prereq:
-        ep._milestones_v08[k] = dict(lift=False, align=False, stable=False)
-        ep._update_milestones_v08()
-        assert "lift_fraction" not in ep._milestones_v08[k]
-        for prereq in ep.cs.steps[k].prereq:
-            ep.step_done[prereq] = True
     ep._action_earned_v08 = False
-    ep._milestones_v08[k] = dict(lift=False, align=False, stable=False)
     ep._update_milestones_v08()
     assert compound_score_v08(ep)["score"] == 0.0
+
+
+def test_bilateral_grasp_requires_both_finger_bodies(conds):
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(4))
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert" and not s.prereq)
+    body = ep.peg_body[ep.cs.steps[k].peg]
+    fl = ep.model.body("fl").id
+    fr = ep.model.body("fr").id
+    palm = ep.model.body("hand").id
+    other = ep.peg_body[(ep.cs.steps[k].peg + 1) % ep.n_pegs]
+    contacts = []
+    from types import SimpleNamespace
+
+    def fixture(pairs):
+        rows = [SimpleNamespace(geom1=ep.model.body(a).geomadr[0], geom2=ep.model.body(b).geomadr[0]) for a, b in pairs]
+        data = SimpleNamespace(ncon=len(rows), contact=rows)
+        episode = AssemblyIVEpisode.__new__(AssemblyIVEpisode)
+        episode.model = ep.model
+        episode.data = data
+        return episode
+
+    assert not fixture([(fl, body)])._bilateral_grasp_v08(body)
+    assert fixture([(fl, body), (fr, body)])._bilateral_grasp_v08(body)
+    assert not fixture([(palm, body), (fr, body)])._bilateral_grasp_v08(body)
+    assert not fixture([(fl, other), (fr, body)])._bilateral_grasp_v08(body)
 
 
 def test_dense_lift_is_bounded_and_prerequisite_gated(conds):
@@ -469,7 +1191,7 @@ def test_dense_lift_is_bounded_and_prerequisite_gated(conds):
 
     ep = AssemblyIVEpisode(conds[0], np.random.default_rng(4))
     ep._action_earned_v08 = True
-    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert")
+    k = next(k for k, s in enumerate(ep.cs.steps) if s.kind == "insert" and not s.prereq)
     ep._milestones_v08[k] = dict(lift=False, align=False, stable=False, lift_fraction=0.5)
     if ep.cs.steps[k].prereq:
         assert step_results_v08(ep)[k]["credit"] == 0.0
