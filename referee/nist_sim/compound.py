@@ -529,6 +529,45 @@ class CompoundEpisode(Episode):
                 self._set_free(self.collar_qadr[j], self.collar_vadr[j], self._park_pose(), [1.0, 0, 0, 0])
 
     # -- spawn (parent hooks) ------------------------------------------------------------------------
+    def _collar_spawn_ok(self, j: int) -> bool:
+        """An active ring must start finite, settled, near its intended free spot."""
+        from .env import SPAWN_BOARD_MARGIN, SPAWN_MAX_DRIFT, SPAWN_MAX_SPEED
+
+        d = self.data
+        col = self.cs.collars[j]
+        p, _ = self.collar_pose(j)
+        bx, by = self.c.board_xy
+        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+        ox, oy = col.offset_xy
+        ix, iy = bx + c * ox - s * oy, by + s * ox + c * oy
+        return bool(
+            np.all(np.isfinite(p))
+            and abs(p[0]) <= SPAWN_BOARD_MARGIN
+            and abs(p[1]) <= SPAWN_BOARD_MARGIN
+            and p[2] >= -0.005
+            and float(np.linalg.norm(d.qvel[self.collar_vadr[j] : self.collar_vadr[j] + 3]))
+            <= SPAWN_MAX_SPEED
+            and float(np.hypot(p[0] - ix, p[1] - iy)) <= SPAWN_MAX_DRIFT
+        )
+
+    def _spawn_ok(self) -> bool:
+        from .env import SPAWN_MAX_PENETRATION
+
+        if not super()._spawn_ok():
+            return False
+        if any(
+            not parked and not self._collar_spawn_ok(j)
+            for j, parked in enumerate(self.collar_parked)
+        ):
+            return False
+        part_bodies = set(self.collar_body)
+        for con in self.data.contact[: self.data.ncon]:
+            b1 = self.model.geom_bodyid[con.geom1]
+            b2 = self.model.geom_bodyid[con.geom2]
+            if (b1 in part_bodies or b2 in part_bodies) and con.dist < -SPAWN_MAX_PENETRATION:
+                return False
+        return True
+
     def _place_peg(self, i: int, peg: PegStart) -> None:
         if self.peg_parked[i]:
             self._set_free(self.peg_qadr[i], self.peg_vadr[i], self._park_pose(), [1.0, 0, 0, 0])

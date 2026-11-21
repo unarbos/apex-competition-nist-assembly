@@ -1,82 +1,123 @@
-# NIST-Lite v0.8.1 calibration
+# NIST-Lite v0.8.2 calibration
 
 ## Scope
 
-This PR addresses the four scoring/envelope fixes requested in Macrocosmos
-[issue #45, comment 7003185456](https://github.com/macrocosm-os/apex-competitions-builder/issues/45#issuecomment-7003185456).
+This PR fixes stack finalization reported in Macrocosmos
+[issue #49](https://github.com/macrocosm-os/apex-competitions-builder/issues/49).
+A ring mated in play and left undisturbed retains credit. A ring that was never
+mated, was knocked off in play, was displaced, or is gripped scores zero.
+`spec.yaml` declares **0.8.2**.
+
 The `v08` profile, 320-float observation, five-float action, 0.36 per-step
-partial-credit cap, milestone weights, 920-action horizon, physical perturbation,
-and image digest pins are unchanged. `spec.yaml` declares **0.8.1**.
+partial-credit cap, milestone weights, 920-action horizon, physical task rules,
+and image digest pins are unchanged. Controller and PPO/SAC tuning are outside
+this patch. The assisted reference below is the existing **legacy assisted
+privileged solver**: it reads true state and may use simulator-state assists.
+It is not an action-only controller result or a release gate and was not tuned
+to improve its score.
 
-Controller and PPO/SAC tuning are deferred to a later PR. The measured privileged
-reference below is the existing **legacy assisted privileged solver**: it reads
-true state and may use simulator-state assists. It is not an action-only
-controller result and is not a gate for this scoring-fix PR. Across the 192
-matched episodes it completes 3 stack steps, 11 collars, 27 keys, 434 inserts,
-and 114 reworks.
+## Fix
 
-## Four fixes
+1. Snapshot completion claims using the physical predicates before finalization.
+   A passive end pose cannot synthesize an unearned completion.
+2. For a claimed, physically valid stack, skip the carrier peg's lateral impulse
+   so the calibration impulse does not throw its supported ring off. Draw the
+   kick angle in the original order. Unrelated seated pegs retain their kicks,
+   and never-mated rings retain their direct impulses.
+3. Place stack rings with their octagonal faces supporting the peg at its
+   measured slot yaw. Rectangular and regular-polygon cross-sections use their
+   shared symmetry to avoid unsupported face alignments.
+4. Continue measuring peg seating, ring position, ring height, upright pose, and
+   gripper clearance after settling. Never re-pin a mated ring during settling.
+   Invalid claims do not exempt the carrier peg and score zero.
 
-1. **Completed keys.** A completed key retains credit from its physical
-   completion latch and completion-time precision while its peg remains seated
-   upright. Final wrist yaw is not re-checked against every earlier key window.
-   Missing completion precision fails closed. Tests cover both two-key and
-   three-key graphs, a wrist moved to the last key's window, final perturbation,
-   and a key whose peg is pulled out losing credit.
-2. **Dependent partials.** Unfinished key, twist, and screw steps cannot earn
-   generic insert-part lift/transport/insert/alignment/stability partial credit
-   by re-grasping or lifting an already-inserted peg. Evidence collection skips
-   those steps and the scoring function also rejects stale generic evidence.
-   The regression inserts the peg, re-lifts it, and requires zero dependent
-   partial credit for key, twist, and screw.
-3. **Result envelope.** The top-level metadata keys are exactly
-   `schema_version`, `summary`, `units`, `metrics`, `capabilities`, and
-   `details`. `nist_profile` remains in `details` and per-episode history
-   records, not at the metadata root or in result units. Assembly IV is labeled
-   `IV`, not `II`, in details and records. The serialized `local_run.py`
-   integration test checks this contract.
-4. **Collar/stack finalization.** `collar_run` is refreshed during settling.
-   Final collar credit requires current physical seating rather than a stale
-   counter. Final stack credit checks the measured ring pose; finalization does
-   not re-pin a mated ring after the kick. An earned interference-fit stack
-   ring is exempt from the direct collar impulse; the peg is still kicked and
-   the ring's measured pose is verified after settling. Unmated loose rings
-   still receive the impulse. Default-kick tests verify that a mated stable
-   ring keeps credit, a displaced ring loses credit, and an unmated ring is
-   still kicked. Final peg seating requires both depth and upright orientation.
-   Stack fixtures are explicitly physical finalization fixtures, not a claimed
-   privileged stack demonstration.
+The board-42 investigation also exposed a reset-validation defect: rework
+contacts bypassed unrelated clutter/contact validation, allowing deeply embedded
+clutter to enter settling and become a projectile. Validation now limits the
+contact exemption to the intentional wrong-slot peg/hole pair, checks unrelated
+parts and active rings, and validates the collision-free fallback start before
+returning an episode. Spawn bounds, penetration, drift, and speed limits are not
+relaxed. Existing scoring tolerances and task difficulty are unchanged.
 
-Non-round key-window sampling is intentionally unchanged in this scoped PR:
-symmetry-midpoint windows remain predictable and are not a blind search. This is
-an open design choice, not a new randomization change.
+## Independent v0.8.1 reproduction
 
-Fractional lift now requires bilateral `fl`/`fr` finger contact with the part,
-gripper closure, and a rise of at least 4 mm for eight consecutive control frames
-(0.32 s at 25 Hz). A dip below threshold resets the hold. Fractional credit starts
-only above 4 mm and is bounded by the unchanged full-lift milestone at 8 mm. This
-tightens evidence: sub-mm contact jitter, palm or unilateral pushes, and brief
-spikes earn nothing. The full-lift milestone, 0.36 cap, milestone weights, horizon,
-and physical task rules are unchanged. Assembly IV task history omits
-`key_yaw`/`key_tol`; retarget events omit old/new window values.
+The public issue reproduction was run locally and adapted into regression tests;
+the original script is not committed. Published cases on v0.8.1 were reproduced:
+
+| Published case | Measured retention |
+|---|---:|
+| Board 1 step 9, round, yaw 0, with kick | 8/8 |
+| Board 1 step 9, round, slot yaw, with kick | 8/8 |
+| Board 62 step 15, rectangular, slot yaw, with kick | 0/8 |
+| Board 62 step 15, rectangular, yaw 0, with kick | 8/8, but 1.38 mm hole-wall overlap |
+| Board 35 step 10, low-friction round, slot yaw, with kick | 0/8 |
+
+The independent all-69-unparked-stack survey used measured slot yaw and four kick
+directions. Each final-source row has 276 trials; the separate committed test
+requires all 69 no-kick cases to keep credit and at least 95% in every kicked
+shape bucket.
+
+| Shape | Stacks | Before, no kick | Before, with kick | After, with kick |
+|---|---:|---:|---:|---:|
+| D-flat | 14 | 13/14 | 0/56 | **56/56 (100%)** |
+| n-gon | 18 | 18/18 | 1/72 | **72/72 (100%)** |
+| rect | 12 | 9/12 | 3/48 | **48/48 (100%)** |
+| round | 25 | 24/25 | 66/100 | **100/100 (100%)** |
+| **Total** | **69** | **64/69** | **70/276 (25.36%)** | **276/276 (100%)** |
+
+The final external no-kick scan independently retained all **276/276** trials.
+The adapted committed regression uses one no-kick fixture per stack plus four
+kick-seed trials per stack, verifies all 69 no-kick cases and every 95% shape
+bucket, explicitly covers boards 38/52/54 and board 42 without a kick, and
+rejects re-pinning. Valid-stack RNG/impulse checks and never-mated, displaced,
+and gripped zero-score fixtures are also included.
 
 ## Validation
 
 Test and evaluation artifacts remain outside the repository under
-`/home/bb/nist-v080-artifacts/`. The matched reports use simulator-source bundle
-SHA-256 `fbe94f221465134f598bbd1b63144d421991333544af04e45c9fe75d8ae73473`.
+`/home/bb/nist-v080-artifacts/`. The final matched reports use simulator-source
+bundle SHA-256
+`012ad46950fc9609e7c0c31fb03ff2b50d53468ceade3701db8a9f800080172d`.
 
 | Check | Result |
 |---|---|
-| Full test suite, evidence head `6939708` | **208 passed, 7 skipped, 4 warnings in 841.41 s** (CI run 44581816589) and **208 passed, 7 skipped, 4 warnings in 915.45 s** (CI run 44581828716); Stable-Baselines3 is absent |
-| Full test suite, scorer head `4eed6ad` | **208 passed, 7 skipped, 4 warnings in 917.68 s** (CI run 44574980029) and **208 passed, 7 skipped, 4 warnings in 1189.74 s** (CI run 44574994762); Stable-Baselines3 is absent |
-| Final-source focused regressions | **74 passed, 1 skipped in 616.70 s**; additional event-privacy and serialized-envelope checks **4 passed, 54 deselected in 28.89 s** |
-| Built-image 64-episode / two-CPU wall, evidence head `6939708` | **128.524 s** (CI run 44581816589) and **318.906 s** (CI run 44581828716), cpuset 0,1; no player fault; both pass 600 s |
-| Built-image 64-episode / two-CPU wall, scorer head `4eed6ad` | **232.121 s** (CI run 44574994762) and **232.520 s** (CI run 44574980029), cpuset 0,1; no player fault; both pass 600 s |
+| Final-source focused stack/reset regressions | **9 passed, 43 deselected in 99.50 s** |
+| Full test suite, CI environment locally | **218 passed, 5 skipped, 4 warnings in 995.02 s** (`NIST_PROFILE=v08`) |
+| GitHub Actions full suite | **216 passed, 7 skipped, 4 warnings in 1263.09 s** (`NIST_PROFILE=v08`), no failures; [pull-request run 44933410964](https://github.com/unarbos/apex-competition-nist-assembly/actions/runs/44933410964), pytest job 136934748411 on `bc9da2b`. Skip totals are reported separately for the two environments; there were no GitHub test failures. |
+| Supplemental no-profile full-suite runs | 217 passed, 5 skipped, 1 failed in legacy seed-1/episode-55 no-op stability in each of two runs; isolated patched and `origin/main` scans passed. This is not used as release-gate evidence. |
+| All 64 sampled boards × finalization RNGs 23–26 | **0 construction/validation failures in 256 resets** |
+| Built-image 64-episode / two-CPU wall | **156.832025864 s** on cpuset `0,1`, below 600 s; Docker return code 0, all 64 episodes scored, no player fault. Pull-request run 44933410964, `referee-image` job 136934749420, artifact `referee-wall-64` on `bc9da2b`. |
+| Digest pins | Unchanged from v0.8.1 |
 
-Per-round wall time is not aggregated across resumable measurement chunks. The
-built-image CI runs above are the wall-time evidence; they are separate from the
-in-process policy comparison below.
+Per-round wall time is not aggregated across resumable measurement chunks.
+Built-image CI is the wall-time evidence; in-process policy runs measure scores
+and determinism separately.
+
+## Assisted-reference stack retention
+
+Each seed contains 64 episodes. Eligibility means a physically valid stack that
+was completed in play before finalization; these are not passive pose fixtures.
+
+| Seed | Before: eligible | Before: kept | After: eligible | After: kept |
+|---|---:|---:|---:|---:|
+| 7 | 15 | 0 | 16 | 16 |
+| 19 | 23 | 3 | 22 | 22 |
+| 31 | 24 | 0 | 22 | 22 |
+| **Total** | **62** | **3 (4.84%)** | **60** | **60 (100%)** |
+
+| Shape | Before: eligible | Before: kept | After: eligible | After: kept |
+|---|---:|---:|---:|---:|
+| D-flat | 7 | 0 | 5 | 5 |
+| n-gon | 20 | 1 | 21 | 21 |
+| rect | 9 | 0 | 7 | 7 |
+| round | 26 | 2 | 27 | 27 |
+| **Total** | **62** | **3** | **60** | **60** |
+
+The before/after eligible counts are reported independently. Reset correction
+can change the assisted solver's subsequent trajectory; denominators are not
+assumed identical across scorer versions. All three final-source rounds measured
+**0** initially valid gripped stacks and **0** initially completed but physically
+invalid stacks.
 
 ## Matched fixed-scorer results
 
@@ -92,67 +133,55 @@ applicable, and contiguous episode indices. CEM uses selected theta
 |---|---:|---:|---:|---:|---:|
 | Zero | 0.000000000000 | 0.000000000000 | 0.000000000000 | 0.000000000000 [0.000000000000, 0.000000000000] | 0.000000000000 |
 | Uniform random | 0.000000000000 | 0.000000000000 | 0.000000000000 | 0.000000000000 [0.000000000000, 0.000000000000] | 0.000000000000 |
-| Ordinary observation-only script | 0.011692006070 | 0.009105692788 | 0.005630799528 | 0.008809499462 [0.007074604350, 0.010651619112] | 0.003041439470 |
-| Strong observation-only script | 0.008312436355 | 0.008266258032 | 0.008550083894 | 0.008376259427 [0.006663470605, 0.010172337927] | 0.000152296810 |
-| CEM | 0.013811296527 | 0.015439669214 | 0.009779517504 | 0.013010161082 [0.011147214975, 0.014878161420] | 0.002913879347 |
-| Legacy assisted privileged reference | 0.132693435266 | 0.142225513227 | 0.152449479002 | 0.142456142498 [0.127728299866, 0.157831118611] | 0.009880040912 |
+| Strong observation-only script | 0.007480294772 | 0.008054087099 | 0.008400895447 | 0.007978425772 [0.006322663418, 0.009737406456] | 0.000464940725 |
+| CEM | 0.013378643432 | 0.015659481659 | 0.010350975092 | 0.013129700061 [0.011209426954, 0.015060606764] | 0.002662994573 |
+| Legacy assisted privileged reference | 0.149044175561 | 0.162007288183 | 0.163256833316 | 0.158102765687 [0.141916240736, 0.174857568180] | 0.007869808260 |
 
-**Both zero and uniform random are exactly zero in all 320 episodes across all
-five seeds.** The additional seed-43 and seed-59 means are also exactly zero.
-The former seed-31 episode-11 sub-mm contact excursion earns no credit under the
-sustained bilateral-grasp rule; no scores are hidden by rounding.
-
-Ordinary-minus-strong script is **0.000433240035 [-0.001837687157, 0.002691805617]**
-(paired episode bootstrap; interval includes zero). CEM minus the best
-observation-only script is **0.004200661619 [0.002315596179, 0.006127752842]**
-(interval excludes zero). The privileged reference is not a release gate and was
-not tuned to increase its score.
+Zero and random also scored exactly zero on seeds 43 and 59, so each completed
+five-round report contains 320 exact-zero episodes. CEM minus strong script is
+**0.005151274289** with paired episode-bootstrap 95% CI
+**[0.003079704190, 0.007145657930]** over 192 matched episodes. The assisted
+reference completed 60 stack steps, all retained, as reported independently
+above.
 
 ## Red-team pass
 
-The following results are measured on the tightened scorer. Generic attack
-rollouts use seed 31 and eight episodes per attack; each listed generic rollout
-scored exactly zero. The red-team summary, per-attack reports, and physical
-fixtures remain in the external artifact directory.
+Generic attack rollouts use seed 31 and eight episodes per attack; each listed
+rollout scored exactly zero. The red-team summary and physical fixtures remain
+in the external artifact directory. The committed regressions additionally
+require zero target credit for never-mated, displaced, and gripped stack rings.
 
 | Attack class | Measured result |
 |---|---|
-| Contact jitter / push without grasp | `jitter`, `vibrate_parts`, `slam_down`, and `transport_wrist_spoof`: all zero. A sub-mm rise, unilateral or palm contact, or a rise that breaks the eight-frame hold earns no fractional lift. |
-| Wrist-yaw sweeps / key precision farming | `yaw_spin` and `cue_hillclimb_sweep`: all zero. Natural-seat key freebie completed **0/20** keys. Transient visits fail the hold; completion precision cannot improve after moving to another key yaw. |
-| Dependent-step re-grasp / re-lift | Key and screw target credit is exactly zero, including with injected stale insertion evidence. The separate prerequisite insert credit of 0.002727272727 in each fixture is not dependent-step credit. |
-| False / barely mated and knocked-off stack rings | Post-mate knock-off, 12 mm lateral false mate, and -20 mm vertical false mate: zero with final physical rejection. A +12 mm vertical displaced pose fails immediately but can settle back onto the peg; its fixture score remains zero because prerequisites were not completed. This is not described as a knock-off exemption bypass. |
-| NaN, infinity, extreme actions, and `/act` timing | NaN, ±infinity, wrong shape, nonnumeric, extreme-action, sensor-spoof, early-termination, solver-blowup, and drop-near-hole rollouts: zero. Invalid rows terminate their episodes with `invalid_action` and zero score; a one-step extreme action scores zero. Late `/act` returns `act failed: PlayerError`, zero score, in **1.358 s**. Wrong batch shape and unreadable responses also fail closed with zero score. |
-| Observation / player-visible envelope recovery | Observation-privacy and serialized-envelope tests pass. Assembly IV task history and retarget events contain no key-window values; private dynamics, salt, and reserved endpoints are absent. The explicitly public training-range header remains separate. |
+| Contact jitter / push without grasp | `jitter`, `vibrate_parts`, `slam_down`, and `transport_wrist_spoof`: all zero. |
+| Wrist-yaw sweeps / key precision farming | `yaw_spin` and `cue_hillclimb_sweep`: all zero. Natural-seat key freebie completed **0/20** keys. |
+| Dependent-step re-grasp / re-lift | Key and screw target credit is exactly zero, including with injected stale insertion evidence. The separate prerequisite insert credit of 0.002727272727 in each fixture is not dependent-step credit. No unparked twist step exists in that fixture; the screw remains explicit. |
+| False / barely mated and knocked-off stack rings | Post-mate knock-off, 12 mm lateral false mate, and -20 mm vertical false mate: zero with final physical rejection. A +12 mm vertical displaced pose fails immediately but can settle back onto the peg; its fixture score remains zero because prerequisites were not completed. |
+| Invalid/extreme actions and observation spoofing | NaN, extreme-action, sensor-spoof, early-termination, solver-blowup, and drop-near-hole rollouts: all zero. Invalid or unstable episodes terminate without earning target credit. |
+| Gripped / displaced / never-mated rings | Committed physical finalization regressions: zero target score; invalid claims cannot exempt the carrier peg, which still receives its kick. |
 
 The analytic single-kind-only bound across the tested blueprints is
-**0.427639751553**, below 0.55. This is a scoring bound, not an achieved attack
-score.
+**0.427639751553**. This is a scoring bound, not an achieved attack score.
 
 ## Determinism
 
-All six policies were independently repeated on seeds 7, 19, and 31: **1,152 repeat
-episodes**. Every per-seed report matches the original episode records, and every
-complete three-seed report is byte-identical to its canonical original, including
-scores, terminal reasons, completed kinds, and milestone fields. For zero and
-random, the comparison uses the three matched seeds from the original five-seed
-report. A redundant per-round scorer-hash field added by the repeat worker is
-validated then omitted for canonical comparison; the top-level scorer identity
-and all episode values are unchanged. Timing is null in both reports; wall time
-is measured separately by the built-image CI jobs.
+Zero, uniform random, strong observation-only script, CEM, and the assisted
+privileged reference are independently repeated on seeds 7, 19, and 31:
+**960 repeat episodes**. Every policy passed exact episode-record comparison and
+byte-identical complete canonical reports on the frozen scorer.
 
-| Policy | Complete repeated report SHA-256 |
-|---|---|
-| `zero` | `80f216a4479bf3a15032f185c9745117c7e13b47f945e0ded9a644444b77b45a` |
-| `random` | `f614a7c67651c558cbe79b062266a3277d897b70e75124d0849d87383b65261c` |
-| `script` | `c048e9cc9f697b0156c988936f86fb2fe1d4ea70ee7c1a0fcfdaec52a243f3c4` |
-| `strong_script` | `0d6b84f2a537399fca920ba3a7b40785d6214e7bbea505d9134efd2d3d043cba` |
-| `cem` | `2b3c76a4ca2a6ec0601c799f53bb44342f9f4679ca3f42f6a562d9bfda316405` |
-| `privileged` | `24060af8661b61800718ada2cfcb52b3b56fc121f386bdb59ed396fadb658918` |
+| Policy | Canonical report SHA-256 | Repeat episodes |
+|---|---|---:|
+| Zero | `63232e8c02178020c3ab942ef344999639d2e69b834781a72d80ac3bd7620e0b` | 192 |
+| Uniform random | `dd1deb327071f3dc1b784a72a2914c9dcab2e5795b81ee9213713a4007833403` | 192 |
+| Strong observation-only script | `86019cfe333e98514274853b168fcb6c8995b508cbcbfbc2ca17940860b546e3` | 192 |
+| CEM | `5cd2ee6223ac71f08a0237b0d9a928cee742d68d6fd84722c1c71d420d56030b` | 192 |
+| Legacy assisted privileged reference | `20f071746222237e0b7c7e99ee37e068d042b22c0fb157ba0c1369cdb33f07bd` | 192 |
 
 ## Historical results
 
-Earlier v0.8.0 and controller-tuning measurements are not evidence for this PR.
-In particular, prior stack-finalization comparisons that re-pinned rings during
-settling are not reused. Generated models, demonstrations, and measurement logs
-are not committed. No miner ONNX, hotkeys, secrets, merge, tag, release, image
-push, or digest change is included.
+Earlier v0.8.0/v0.8.1 and controller-tuning measurements are not evidence for
+this patch. In particular, v0.8.1 policy scores, CI walls, and red-team results
+are not carried forward as v0.8.2 evidence. Generated models, demonstrations,
+and measurement logs are not committed. No miner ONNX, hotkeys, secrets, merge,
+tag, release, image push, or digest change is included.
