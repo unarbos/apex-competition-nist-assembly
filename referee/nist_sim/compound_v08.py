@@ -1042,12 +1042,21 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 self._stability_ok[k] = False
 
         # Apply a small XY impulse to free pegs/collars that look seated, then settle.
+        # A claimed, physically valid stack rests on its carrier peg: that peg's
+        # impulse would transmit an artificial ring-off test through the mate.
+        # All other pegs and all unmated rings retain their impulses. Draw every
+        # angle in the original order so unrelated parts keep the same kicks.
+        supported_stack_pegs = {
+            self.cs.steps[k].peg for k in claimed if self.cs.steps[k].kind == "stack"
+        }
         for i in range(self.n_pegs):
             if self.peg_parked[i]:
                 continue
             if not (self.seated_now[i] or self._peg_in_hole(i)):
                 continue
             ang = float(self.rng.uniform(0, 2 * math.pi))
+            if i in supported_stack_pegs:
+                continue
             vx = PERTURB_XY * math.cos(ang) / max(PHYSICS_PROXY_DT(), 1e-3)
             vy = PERTURB_XY * math.sin(ang) / max(PHYSICS_PROXY_DT(), 1e-3)
             adr = self.peg_vadr[i]
@@ -1058,10 +1067,9 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 continue
             ang = float(self.rng.uniform(0, 2 * math.pi))
             if self.cs.collars[j].is_stack and self._stack_mated[j]:
-                # An earned interference-fit mate is not a loose collar. Do
-                # not kick the ring off its scored pose before measuring it.
-                # The peg still receives its impulse, and the final ring pose
-                # is verified below without re-pinning the mate.
+                # An earned interference-fit mate is not a loose collar. Its
+                # carrier peg was exempted only for a claimed valid stack, and
+                # the final ring pose is verified below without re-pinning.
                 continue
             vx = 0.7 * PERTURB_XY * math.cos(ang) / max(PHYSICS_PROXY_DT(), 1e-3)
             vy = 0.7 * PERTURB_XY * math.sin(ang) / max(PHYSICS_PROXY_DT(), 1e-3)

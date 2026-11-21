@@ -622,15 +622,8 @@ class Episode:
                 w, x, y, z = pquat
                 if abs(1.0 - 2.0 * (x * x + y * y)) < 0.85:
                     return False
-        for i, cl in enumerate(self.c.clutter):
-            ppos, _ = self.clutter_pose(i)
-            if abs(ppos[0]) > SPAWN_BOARD_MARGIN or abs(ppos[1]) > SPAWN_BOARD_MARGIN or ppos[2] < -0.005:
-                return False
-            bx, by = self.c.board_xy
-            c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
-            ox, oy = cl.offset_xy
-            ix, iy = bx + c * ox - s * oy, by + s * ox + c * oy
-            if float(np.hypot(ppos[0] - ix, ppos[1] - iy)) > SPAWN_MAX_DRIFT:
+        for i in range(self.n_clutter):
+            if not self._clutter_spawn_ok(i):
                 return False
         part_bodies = set(self.peg_body) | set(self.clutter_body)
         for i in range(d.ncon):
@@ -642,6 +635,35 @@ class Episode:
                 if b1 in part_bodies and b2 in part_bodies and con.dist > -0.003:
                     continue
                 return False
+        return True
+
+    def _clutter_spawn_ok(self, i: int) -> bool:
+        """Clutter stays valid even when rework pegs need a contact exemption."""
+        d = self.data
+        cl = self.c.clutter[i]
+        ppos, _ = self.clutter_pose(i)
+        if not np.all(np.isfinite(ppos)):
+            return False
+        if float(np.linalg.norm(d.qvel[self.clutter_vadr[i] : self.clutter_vadr[i] + 3])) > SPAWN_MAX_SPEED:
+            return False
+        if abs(ppos[0]) > SPAWN_BOARD_MARGIN or abs(ppos[1]) > SPAWN_BOARD_MARGIN or ppos[2] < -0.005:
+            return False
+        bx, by = self.c.board_xy
+        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+        ox, oy = cl.offset_xy
+        ix, iy = bx + c * ox - s * oy, by + s * ox + c * oy
+        if float(np.hypot(ppos[0] - ix, ppos[1] - iy)) > SPAWN_MAX_DRIFT:
+            return False
+        body = self.clutter_body[i]
+        part_bodies = set(self.peg_body) | set(self.clutter_body)
+        for con in d.contact[: d.ncon]:
+            b1 = self.model.geom_bodyid[con.geom1]
+            b2 = self.model.geom_bodyid[con.geom2]
+            if body not in (b1, b2) or con.dist >= -SPAWN_MAX_PENETRATION:
+                continue
+            if b1 in part_bodies and b2 in part_bodies and con.dist > -0.003:
+                continue
+            return False
         return True
 
     def _nudge_offsets(self) -> None:
@@ -684,38 +706,65 @@ class Episode:
         for i, cl in enumerate(self.c.clutter):
             cl.offset_xy = (0.10, -0.10 + 0.035 * i)
 
+    def _grid_part_radii(self) -> list[float]:
+        """Outer XY radii of active parts that need a fallback cell."""
+        return [
+            *(math.hypot(p.spec.outer_radius(), PEG_LEN / 2)
+              for p in self.c.pegs if p.start_type != "grasped"),
+            *(math.hypot(*cl.size_xy) for cl in self.c.clutter),
+        ]
+
+    def _fallback_grid(self) -> list[tuple[float, float]]:
+        """Collision-free board cells, including every active part's footprint."""
+        radii = self._grid_part_radii()
+        if not radii or min(radii) <= 0:
+            raise RuntimeError("fallback grid requires positive part radii")
+        pitch = 2 * max(radii, default=0.008) + 0.006
+        margin = SPAWN_BOARD_MARGIN - max(radii, default=0.008)
+        out = []
+        for gy in np.arange(-margin, margin + 0.5 * pitch, pitch):
+            for gx in np.arange(-margin, margin + 0.5 * pitch, pitch):
+                wx, wy = self.c.board_xy[0] + gx, self.c.board_xy[1] + gy
+                c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+                lx = c * gx + s * gy
+                ly = -s * gx + c * gy
+                if self._board_spot_clear(lx, ly, max(radii, default=0.008), 0.003):
+                    out.append((float(wx), float(wy)))
+        if len(out) < len(radii):
+            raise RuntimeError("no collision-free fallback grid for all parts")
+        return out[: len(radii)]
+
     def _teleport_safe_grid(self) -> None:
-        """Last-resort: snap free parts onto a clear grid on the board and freeze."""
+        """Last-resort: place active parts on distinct, validated board cells."""
         bx, by = self.c.board_xy
-        cells = self._clear_grid_cells()
+        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+        cells = iter(self._fallback_grid())
+        edge = SPAWN_BOARD_MARGIN - 0.001
+        self._grid_fallback_cells = {}
+        self._grid_fallback_collar_cells = {}
+        self._grid_fallback_clutter_cells = {}
         for i, peg in enumerate(self.c.pegs):
             if peg.start_type == "grasped":
                 continue
             r = peg.spec.outer_radius()
-            wx, wy = cells[i % len(cells)]
-            if peg.start_type == "lying":
-                self._set_free(
-                    self.peg_qadr[i],
-                    self.peg_vadr[i],
-                    [wx, wy, r + 1e-4],
-                    _lying_quat(math.pi / 2),
-                )
-            else:
-                peg.start_type = "loose"
-                self._set_free(
-                    self.peg_qadr[i],
-                    self.peg_vadr[i],
-                    [wx, wy, PEG_LEN / 2 + 1e-4],
-                    _yaw_quat(0.0),
-                )
-        for i, cl in enumerate(self.c.clutter):
-            wx = bx + 0.10
-            wy = by - 0.10 + 0.04 * i
+            wx, wy = next(cells)
+            wx, wy = float(np.clip(wx, -edge, edge)), float(np.clip(wy, -edge, edge))
+            self._grid_fallback_cells[i] = (wx, wy)
+            hx, hy = self._slot_origin(peg)
+            peg.offset_xy = (c * (wx - hx) + s * (wy - hy), -s * (wx - hx) + c * (wy - hy))
+            peg.start_type = "lying"
             self._set_free(
-                self.clutter_qadr[i],
-                self.clutter_vadr[i],
-                [wx, wy, cl.height / 2 + 1e-4],
-                _yaw_quat(0.0),
+                self.peg_qadr[i], self.peg_vadr[i],
+                [wx, wy, r + 1e-4], _lying_quat(math.pi / 2),
+            )
+        for i, cl in enumerate(self.c.clutter):
+            wx, wy = next(cells)
+            wx, wy = float(np.clip(wx, -edge, edge)), float(np.clip(wy, -edge, edge))
+            self._grid_fallback_clutter_cells[i] = (wx, wy)
+            cl.offset_xy = (c * (wx - bx) + s * (wy - by), -s * (wx - bx) + c * (wy - by))
+            self._set_free(
+                self.clutter_qadr[i], self.clutter_vadr[i],
+                [wx, wy, cl.height / 2 + 1e-4], _yaw_quat(0.0),
             )
         if not any(p.start_type == "grasped" for p in self.c.pegs):
             self._set_hand([bx, by, 0.12], self.c.board_yaw, 1.0)
@@ -739,25 +788,6 @@ class Episode:
                 return False
         return True
 
-    def _clear_grid_cells(self) -> list[tuple[float, float]]:
-        """World-frame teleport cells that clear every slot (fallback: the legacy grid)."""
-        bx, by = self.c.board_xy
-        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
-        legacy = [(bx - 0.06 + 0.06 * col, by - 0.12 + 0.04 * row) for row in range(2) for col in range(3)]
-        out = []
-        po = max((p.spec.outer_radius() for p in self.c.pegs), default=0.008)
-        for gy in np.arange(-0.13, 0.131, 0.026):
-            for gx in np.arange(-0.15, 0.151, 0.03):
-                wx, wy = bx + gx, by + gy
-                # world -> board-local
-                lx = c * (wx - bx) + s * (wy - by)
-                ly = -s * (wx - bx) + c * (wy - by)
-                if self._board_spot_clear(lx, ly, po, 0.003) and all(
-                    math.hypot(wx - ox, wy - oy) >= 0.026 for ox, oy in out
-                ):
-                    out.append((float(wx), float(wy)))
-        return out if len(out) >= self.n_pegs else legacy
-
     def _reset(self) -> None:
         for attempt in range(MAX_SPAWN_ATTEMPTS):
             if attempt > 0:
@@ -769,6 +799,8 @@ class Episode:
         self._place_and_settle()
         if not self._spawn_ok():
             self._teleport_safe_grid()
+        if not self._spawn_ok():
+            raise RuntimeError("could not construct a finite, non-penetrating settled start")
 
     # ---- observation ---------------------------------------------------------
     def _upright(self, quat) -> bool:

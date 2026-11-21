@@ -54,6 +54,7 @@ from . import profile as _profile
 from .compound import (
     COLLAR_H,
     COLLAR_MAX_PEG_OUTER,
+    COLLAR_NSEG,
     COLLAR_T,
     EVENT_KINDS,
     GLOBAL_FEAT,
@@ -104,13 +105,16 @@ def _assign_v07(rng: np.random.Generator, n: int) -> list[str]:
 from .conditions import EpisodeConditions, sample_episodes, slot_world_xy
 from .env import (
     BLOCK_H,
+    MAX_OPEN,
     MAX_PEGS,
     PAD_CENTRE_Z,
     PEG_LEN,
     SEATED_HOLD,
     SPAWN_BOARD_MARGIN,
     SPAWN_MAX_DRIFT,
+    SPAWN_MAX_PENETRATION,
     SPAWN_MAX_SPEED,
+    _lying_quat,
     _yaw_quat,
 )
 
@@ -619,6 +623,26 @@ def _is_hard_prereq(sa: TaskStep, sb: TaskStep) -> bool:
 class AssemblyIIIEpisode(CompoundEpisode):
     """v0.7 episode: rework spawns, screw press gate, stack seat, key yaw, late reveals."""
 
+    def _rework_contact_exempt(self, con) -> bool:
+        """Only the deliberately mis-seated peg and its assigned hole are exempt."""
+        b1 = self.model.geom_bodyid[con.geom1]
+        b2 = self.model.geom_bodyid[con.geom2]
+        involved = [i for i in self._rework_wrong if self.peg_body[i] in (b1, b2)]
+        return bool(involved) and all(
+            self.model.geom(g).name.startswith(f"h{self._rework_wrong[i]}_")
+            for i in involved for g in (con.geom1, con.geom2)
+            if self.model.geom_bodyid[g] != self.peg_body[i]
+        )
+
+    def _grid_part_radii(self) -> list[float]:
+        """Do not spend fallback cells on wave-parked pegs or collars."""
+        return [
+            *(math.hypot(p.spec.outer_radius(), PEG_LEN / 2) for i, p in enumerate(self.c.pegs)
+              if not self.peg_parked[i] and p.start_type != "grasped" and i not in self._rework_wrong),
+            *(cl.r_out for j, cl in enumerate(self.cs.collars) if not self.collar_parked[j]),
+            *(math.hypot(*cl.size_xy) for cl in self.c.clutter),
+        ]
+
     def __init__(self, cond: EpisodeConditions, rng: np.random.Generator):
         self._rework_wrong = {
             s.peg: s.wrong_slot for s in cond.compound.steps if s.kind == "rework" and s.wrong_slot is not None
@@ -697,14 +721,104 @@ class AssemblyIIIEpisode(CompoundEpisode):
                 return False
             if abs(ppos[0]) > SPAWN_BOARD_MARGIN or abs(ppos[1]) > SPAWN_BOARD_MARGIN or ppos[2] < -0.005:
                 return False
-            ix, iy = self._intended_peg_xy(peg)
-            if float(np.hypot(ppos[0] - ix, ppos[1] - iy)) > SPAWN_MAX_DRIFT:
-                return False
+            if i not in self._rework_wrong:
+                ix, iy = self._intended_peg_xy(peg)
+                if float(np.hypot(ppos[0] - ix, ppos[1] - iy)) > SPAWN_MAX_DRIFT:
+                    return False
+            else:
+                wrong_slot = self.c.slots[self._rework_wrong[i]]
+                ix, iy = slot_world_xy(self.c.board_xy, self.c.board_yaw, wrong_slot)
+                if float(np.hypot(ppos[0] - ix, ppos[1] - iy)) > 1e-6:
+                    return False
             if peg.start_type != "lying" and i not in self._rework_wrong:
                 w, x, y, z = pquat
                 if abs(1.0 - 2.0 * (x * x + y * y)) < 0.85:
                     return False
+        # The contact exemption belongs only to the intentionally mis-seated
+        # rework peg. Unrelated parts, including frozen clutter in a hole, must
+        # still satisfy the shared non-penetrating spawn checks.
+        for j, parked in enumerate(self.collar_parked):
+            if not parked and not self._collar_spawn_ok(j):
+                return False
+        for i in range(self.n_clutter):
+            if not self._clutter_spawn_ok(i):
+                return False
+        part_bodies = set(self.peg_body) | set(self.collar_body) | set(self.clutter_body)
+        for con in d.contact[: d.ncon]:
+            if con.dist >= -SPAWN_MAX_PENETRATION:
+                continue
+            b1 = self.model.geom_bodyid[con.geom1]
+            b2 = self.model.geom_bodyid[con.geom2]
+            if b1 in part_bodies and b2 in part_bodies and con.dist > -0.003:
+                continue
+            if self._rework_contact_exempt(con):
+                continue
+            return False
         return True
+
+    def _teleport_safe_grid(self) -> None:
+        self._grid_fallback_cells = {}
+        self._grid_fallback_collar_cells = {}
+        self._grid_fallback_clutter_cells = {}
+        cells = self._fallback_grid()
+        edge = SPAWN_BOARD_MARGIN - 0.001
+        bx, by = self.c.board_xy
+        c, s = math.cos(self.c.board_yaw), math.sin(self.c.board_yaw)
+        for i, peg in enumerate(self.c.pegs):
+            if self.peg_parked[i] or peg.start_type == "grasped":
+                continue
+            if i in self._rework_wrong:
+                # Only intentional rework starts stay upright in a wrong hole.
+                self._seat_in_wrong_slot(i)
+                continue
+            wx, wy = cells.pop(0)
+            wx, wy = float(np.clip(wx, -edge, edge)), float(np.clip(wy, -edge, edge))
+            self._grid_fallback_cells[i] = (wx, wy)
+            hx, hy = self._slot_origin(peg)
+            peg.offset_xy = (c * (wx - hx) + s * (wy - hy), -s * (wx - hx) + c * (wy - hy))
+            peg.start_type = "lying"
+            self._set_free(
+                self.peg_qadr[i], self.peg_vadr[i],
+                [wx, wy, peg.spec.outer_radius() + 1e-4], _lying_quat(math.pi / 2),
+            )
+        for j, col in enumerate(self.cs.collars):
+            if self.collar_parked[j]:
+                continue
+            wx, wy = cells.pop(0)
+            wx, wy = float(np.clip(wx, -edge, edge)), float(np.clip(wy, -edge, edge))
+            self._grid_fallback_collar_cells[j] = (wx, wy)
+            col.offset_xy = (c * (wx - bx) + s * (wy - by), -s * (wx - bx) + c * (wy - by))
+            self._set_free(
+                self.collar_qadr[j], self.collar_vadr[j],
+                [wx, wy, COLLAR_H / 2 + 1e-4], _yaw_quat(0.0),
+            )
+        for i, cl in enumerate(self.c.clutter):
+            wx, wy = cells.pop(0)
+            wx, wy = float(np.clip(wx, -edge, edge)), float(np.clip(wy, -edge, edge))
+            self._grid_fallback_clutter_cells[i] = (wx, wy)
+            cl.offset_xy = (c * (wx - bx) + s * (wy - by), -s * (wx - bx) + c * (wy - by))
+            self._set_free(
+                self.clutter_qadr[i], self.clutter_vadr[i],
+                [wx, wy, cl.height / 2 + 1e-4], _yaw_quat(0.0),
+            )
+        if not any(p.start_type == "grasped" for p in self.c.pegs):
+            self._set_hand([bx, by, 0.12], self.c.board_yaw, 1.0)
+            self.grip = MAX_OPEN
+        self._apply_ctrl()
+        self._pin_rework_pegs()
+        for _ in range(30):
+            self._apply_ctrl()
+            mujoco.mj_step(self.model, self.data)
+        for i in range(self.n_pegs):
+            self.data.qvel[self.peg_vadr[i] : self.peg_vadr[i] + 6] = 0
+        for j in range(self.n_collars):
+            self.data.qvel[self.collar_vadr[j] : self.collar_vadr[j] + 6] = 0
+        for i in range(self.n_clutter):
+            self.data.qvel[self.clutter_vadr[i] : self.clutter_vadr[i] + 6] = 0
+        # As in the ordinary reset path, restore the intentional shallow rework
+        # seat after free parts settle; contact must not shift its assigned slot.
+        self._pin_rework_pegs()
+        mujoco.mj_forward(self.model, self.data)
 
     def _reset(self) -> None:
         super()._reset()
@@ -847,6 +961,20 @@ class AssemblyIIIEpisode(CompoundEpisode):
         palm_z = float(self.data.qpos[2] + PAD_CENTRE_Z)
         return palm_z >= float(p[2] + COLLAR_H / 2 + 0.010)
 
+    def _stack_mate_quat(self, peg: int):
+        """Align ring faces to support the peg's measured cross-section."""
+        spec = self.c.pegs[peg].spec
+        yaw = quat_yaw(self.peg_pose(peg)[1])
+        if spec.shape == "rect":
+            # Rectangle corners reach the octagonal ring's inner face middles.
+            yaw += math.pi / 4
+        elif spec.shape == "ngon":
+            # Half a sector in the common peg/ring symmetry avoids the exact
+            # alignment where an even-order peg can pass through a face gap.
+            n = int(spec.params["n"])
+            yaw += math.pi * math.gcd(n, COLLAR_NSEG) / (n * COLLAR_NSEG)
+        return _yaw_quat(yaw)
+
     def _pin_stack_on_peg(self, j: int) -> None:
         """Mate a stack ring to the peg top (latches the interference-fit place)."""
         col = self.cs.collars[j]
@@ -854,7 +982,9 @@ class AssemblyIIIEpisode(CompoundEpisode):
         peg_p, _ = self.peg_pose(col.peg)
         peg_top = peg_p[2] + PEG_LEN / 2
         z = peg_top + COLLAR_H / 2
-        self._set_free(self.collar_qadr[j], self.collar_vadr[j], [hx, hy, z], _yaw_quat(0.0))
+        self._set_free(
+            self.collar_qadr[j], self.collar_vadr[j], [hx, hy, z], self._stack_mate_quat(col.peg)
+        )
         self.data.qvel[self.collar_vadr[j] : self.collar_vadr[j] + 6] = 0.0
         self._stack_mated[j] = True
         mujoco.mj_forward(self.model, self.data)
@@ -871,7 +1001,9 @@ class AssemblyIIIEpisode(CompoundEpisode):
         peg_p, _ = self.peg_pose(col.peg)
         peg_top = float(peg_p[2] + PEG_LEN / 2)
         z = peg_top + COLLAR_H / 2
-        self._set_free(self.collar_qadr[j], self.collar_vadr[j], [hx, hy, z], _yaw_quat(0.0))
+        self._set_free(
+            self.collar_qadr[j], self.collar_vadr[j], [hx, hy, z], self._stack_mate_quat(col.peg)
+        )
         self.data.qvel[self.collar_vadr[j] : self.collar_vadr[j] + 6] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
@@ -920,7 +1052,7 @@ class AssemblyIIIEpisode(CompoundEpisode):
                         self.collar_qadr[j],
                         self.collar_vadr[j],
                         [float(p[0]), float(p[1]), float(p[2])],
-                        _yaw_quat(0.0),
+                        self._stack_mate_quat(col.peg),
                     )
                     self.data.qvel[self.collar_vadr[j] : self.collar_vadr[j] + 6] = 0.0
                     mujoco.mj_forward(self.model, self.data)
