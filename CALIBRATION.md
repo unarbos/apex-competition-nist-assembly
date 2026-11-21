@@ -82,13 +82,12 @@ bundle SHA-256
 | Check | Result |
 |---|---|
 | Final-source focused stack/reset regressions | **9 passed, 43 deselected in 99.50 s** |
-| Full test suite, exact CI environment | **218 passed, 5 skipped in 995.02 s** (`NIST_PROFILE=v08`); GitHub Actions pending |
+| Full test suite, CI environment locally | **218 passed, 5 skipped, 4 warnings in 995.02 s** (`NIST_PROFILE=v08`) |
+| GitHub Actions full suite | **216 passed, 7 skipped, 4 warnings in 1263.09 s** (`NIST_PROFILE=v08`), no failures; [pull-request run 44933410964](https://github.com/unarbos/apex-competition-nist-assembly/actions/runs/44933410964), pytest job 136934748411 on `bc9da2b`. Skip totals are reported separately for the two environments; there were no GitHub test failures. |
 | Supplemental no-profile full-suite runs | 217 passed, 5 skipped, 1 failed in legacy seed-1/episode-55 no-op stability in each of two runs; isolated patched and `origin/main` scans passed. This is not used as release-gate evidence. |
 | All 64 sampled boards × finalization RNGs 23–26 | **0 construction/validation failures in 256 resets** |
-| Built-image 64-episode / two-CPU wall | Pending CI; must be below 600 s |
+| Built-image 64-episode / two-CPU wall | **156.832025864 s** on cpuset `0,1`, below 600 s; Docker return code 0, all 64 episodes scored, no player fault. Pull-request run 44933410964, `referee-image` job 136934749420, artifact `referee-wall-64` on `bc9da2b`. |
 | Digest pins | Unchanged from v0.8.1 |
-
-<!-- FINAL_VALIDATION_TABLE: insert local/CI results and exact run IDs. -->
 
 Per-round wall time is not aggregated across resumable measurement chunks.
 Built-image CI is the wall-time evidence; in-process policy runs measure scores
