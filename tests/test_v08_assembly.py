@@ -670,6 +670,337 @@ def test_collar_finalization_uses_current_physical_seat_not_stale_counter(conds,
     assert ep.collar_run[j] >= SEATED_HOLD
 
 
+def _stack_finalization_fixture(cond, k, rng=23, *, mated=True):
+    """Place one earned stack at its measured slot yaw for finalization."""
+    import copy
+    from nist_sim.env import MAX_OPEN, PEG_LEN, _yaw_quat
+
+    # Reset retries adjust offsets in the condition object. Keep this fixture
+    # independent of other boards and kick-direction trials.
+    ep = AssemblyIVEpisode(copy.deepcopy(cond), np.random.default_rng(rng))
+    s = ep.cs.steps[k]
+    assert s.kind == "stack" and not ep.peg_parked[s.peg]
+    j, i = s.part, s.peg
+    hx, hy = ep.slot_xy[i]
+    ep._set_free(
+        ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2],
+        _yaw_quat(float(ep.slot_yaw[i])),
+    )
+    ep.seated_now[i] = True
+    ep.collar_parked[j] = False
+    ep._set_body_active(ep.collar_body[j], True)
+    if mated:
+        ep._pin_stack_on_peg(j)
+    ep._action_earned_v08 = True
+    ep.step_done[k] = True
+    ep.step_in_order[k] = True
+    ep.step_done_at[k] = 1
+    ep.done = True
+    ep.data.qpos[2] = 0.16
+    ep.grip = MAX_OPEN
+    ep._apply_ctrl()
+    return ep, j, i
+
+
+def test_all_unparked_stacks_survive_slot_yaw_finalization(conds, monkeypatch):
+    """Every shape bucket retains >=95% of valid mates over several kick angles."""
+    from collections import Counter
+    import copy
+    import nist_sim.compound_v08 as v08
+
+    count, kept = Counter(), Counter()
+    failures = []
+    explicit_cases = {}
+    for board, cond in enumerate(conds):
+        probe = AssemblyIVEpisode(copy.deepcopy(cond), np.random.default_rng(23))
+        stacks = [
+            k for k, s in enumerate(probe.cs.steps)
+            if s.kind == "stack" and not probe.peg_parked[s.peg]
+        ]
+        for k in stacks:
+            shape = probe.c.pegs[probe.cs.steps[k].peg].spec.shape
+            for kick, rng in [(False, 23)] + [(True, seed) for seed in range(23, 27)]:
+                monkeypatch.setattr(v08, "PERTURB_XY", 0.0018 if kick else 0.0)
+                ep, j, i = _stack_finalization_fixture(cond, k, rng)
+                pins = []
+                original_pin = ep._pin_stack_on_peg
+
+                def reject_repin(ring):
+                    pins.append(ring)
+                    return original_pin(ring)
+
+                ep._pin_stack_on_peg = reject_repin
+                ep._finalize_stability()
+                if not kick:
+                    explicit_cases[(board, k)] = ep
+                    assert ep.step_done[k], (board, k, shape)
+                    assert ep._physical_step_ok(k)[0]
+                elif ep.step_done[k]:
+                    count[shape] += 1
+                    kept[shape] += 1
+                else:
+                    count[shape] += 1
+                    failures.append((board, k, shape, rng, ep.collar_pose(j)[0].tolist()))
+                assert not pins, "settling must not restore the mate"
+    assert sum(count.values()) == 69 * 4
+    for shape in sorted(count):
+        assert kept[shape] / count[shape] >= 0.95, (shape, kept[shape], count[shape], failures)
+    # Explicit support regressions and the former board-42 clutter projectile.
+    for case in ((38, 13), (52, 10), (54, 12), (42, 12)):
+        assert explicit_cases[case].step_done[case[1]], case
+
+
+@pytest.mark.parametrize("board", [1, 41, 42])
+def test_forced_fallback_validates_all_active_parts_and_preserves_rework(conds, monkeypatch, board):
+    """Fallback cells include active rings and respect parked parts and rework."""
+    import copy
+    import mujoco
+    from nist_sim.env import SPAWN_BOARD_MARGIN, SPAWN_MAX_PENETRATION
+    from nist_sim.conditions import slot_world_xy
+
+    ep = AssemblyIVEpisode(copy.deepcopy(conds[board]), np.random.default_rng(26))
+    assert ep._rework_wrong
+    assert (any(ep.peg_parked) and any(ep.collar_parked)) or board == 41
+    # The sampled reset already constructed a valid board. Run the fallback
+    # directly so its all-active-part invariant is exercised deterministically.
+    ep._teleport_safe_grid()
+    assert ep._spawn_ok()
+    cells = ep._fallback_grid()
+    expected = sum(
+        not ep.peg_parked[i] and p.start_type != "grasped" and i not in ep._rework_wrong
+        for i, p in enumerate(ep.c.pegs)
+    ) + sum(not parked for parked in ep.collar_parked) + ep.n_clutter
+    assert len(cells) == expected
+    for i, p in enumerate(ep.c.pegs):
+        pos, _ = ep.peg_pose(i)
+        if ep.peg_parked[i]:
+            assert pos[2] > 0.4
+        else:
+            assert np.all(np.isfinite(pos))
+            assert max(abs(pos[0]), abs(pos[1])) <= SPAWN_BOARD_MARGIN
+    for j, parked in enumerate(ep.collar_parked):
+        pos, _ = ep.collar_pose(j)
+        assert pos[2] > 0.4 if parked else max(abs(pos[0]), abs(pos[1])) <= SPAWN_BOARD_MARGIN
+        if not parked:
+            expected_xy = np.array(ep._grid_fallback_collar_cells[j])
+            np.testing.assert_allclose(pos[:2], expected_xy, atol=0.002)
+    for i in range(ep.n_clutter):
+        pos, _ = ep.clutter_pose(i)
+        assert np.all(np.isfinite(pos))
+        assert max(abs(pos[0]), abs(pos[1])) <= SPAWN_BOARD_MARGIN
+        assert ep._clutter_spawn_ok(i)
+    part_bodies = set(ep.peg_body) | set(ep.collar_body) | set(ep.clutter_body)
+    for con in ep.data.contact[:ep.data.ncon]:
+        b1 = ep.model.geom_bodyid[con.geom1]
+        b2 = ep.model.geom_bodyid[con.geom2]
+        if con.dist < -SPAWN_MAX_PENETRATION and (b1 in part_bodies or b2 in part_bodies):
+            # Only the intentional wrong-slot peg/hole pair can remain.
+            assert ep._rework_contact_exempt(con)
+    for i, wrong_slot in ep._rework_wrong.items():
+        hx, hy = slot_world_xy(ep.c.board_xy, ep.c.board_yaw, ep.c.slots[wrong_slot])
+        np.testing.assert_allclose(ep.peg_pose(i)[0][:2], [hx, hy], atol=1e-6)
+    mujoco.mj_forward(ep.model, ep.data)
+
+
+def test_valid_stack_preserves_unrelated_kicks_and_angle_stream(conds, monkeypatch):
+    """The claimed carrier is exempt; another seated peg still gets its drawn kick."""
+    import copy
+    from nist_sim.env import PEG_LEN, _yaw_quat
+
+    k = next(
+        k for k, s in enumerate(conds[1].compound.steps)
+        if s.kind == "stack" and conds[1].compound.peg_wave[s.peg] == 0
+    )
+    ep, j, i = _stack_finalization_fixture(conds[1], k)
+    other = next(p for p in range(ep.n_pegs) if p != i and not ep.peg_parked[p])
+    hx, hy = ep.slot_xy[other]
+    ep._set_free(
+        ep.peg_qadr[other], ep.peg_vadr[other], [hx, hy, PEG_LEN / 2],
+        _yaw_quat(float(ep.slot_yaw[other])),
+    )
+    ep.seated_now[other] = True
+    peg_order = [
+        p for p in range(ep.n_pegs)
+        if not ep.peg_parked[p] and (ep.seated_now[p] or ep._peg_in_hole(p))
+    ]
+    assert set(peg_order) == {i, other}
+    expected_rng = np.random.default_rng(23)
+    expected_rng.bit_generator.state = ep.rng.bit_generator.state
+    angles = expected_rng.uniform(0, 2 * np.pi, len(peg_order) + sum(not p for p in ep.collar_parked))
+    other_angle = angles[peg_order.index(other)]
+    observed_angles = []
+    original_rng = ep.rng
+
+    class AngleRecorder:
+        def __getattr__(self, name):
+            return getattr(original_rng, name)
+
+        def uniform(self, low, high, *args, **kwargs):
+            value = original_rng.uniform(low, high, *args, **kwargs)
+            if low == 0 and high == 2 * np.pi:
+                observed_angles.append(float(value))
+            return value
+
+    ep.rng = AngleRecorder()
+    checked = []
+
+    import nist_sim.compound_v08 as v08
+    import mujoco
+    original_step = mujoco.mj_step
+
+    def check_impulses_before_settle(model, data):
+        if not checked:
+            checked.append(True)
+            np.testing.assert_allclose(data.qvel[ep.peg_vadr[i] : ep.peg_vadr[i] + 2], [0.0, 0.0])
+            np.testing.assert_allclose(
+                data.qvel[ep.peg_vadr[other] : ep.peg_vadr[other] + 2],
+                0.9 * np.array([np.cos(other_angle), np.sin(other_angle)]),
+            )
+            np.testing.assert_allclose(data.qvel[ep.collar_vadr[j] : ep.collar_vadr[j] + 2], [0.0, 0.0])
+        original_step(model, data)
+
+    monkeypatch.setattr(v08.mujoco, "mj_step", check_impulses_before_settle)
+    ep._finalize_stability()
+    assert checked
+    np.testing.assert_allclose(observed_angles, angles)
+    assert ep.step_done[k]
+    np.testing.assert_allclose(ep.collar_pose(j)[0][:2], ep.slot_xy[i], atol=0.003)
+
+
+def test_invalid_stack_claim_cannot_exempt_carrier_peg(conds, monkeypatch):
+    """False, displaced and gripped claims fail; only valid claimed stacks skip a peg kick."""
+    from nist_sim.compound import COLLAR_H
+    import nist_sim.compound_v08 as v08
+    from nist_sim.env import _yaw_quat
+
+    board, k = 1, next(
+        k for k, s in enumerate(conds[1].compound.steps)
+        if s.kind == "stack" and conds[1].compound.peg_wave[s.peg] == 0
+    )
+    for attack in ("never_mated", "displaced", "gripped"):
+        ep, j, i = _stack_finalization_fixture(conds[board], k, mated=attack != "never_mated")
+        if attack == "never_mated":
+            hx, hy = ep.slot_xy[i]
+            ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [hx, hy, 0.054], [1, 0, 0, 0])
+            ep._stack_mated[j] = False
+        elif attack == "displaced":
+            p, _ = ep.collar_pose(j)
+            ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [p[0] + 0.05, p[1], COLLAR_H / 2], [1, 0, 0, 0])
+        else:
+            ep._gripper_touching = lambda body: body == ep.collar_body[j]
+        other = next(p for p in range(ep.n_pegs) if p != i and not ep.peg_parked[p])
+        peg_order = [
+            p for p in range(ep.n_pegs)
+            if not ep.peg_parked[p] and (ep.seated_now[p] or ep._peg_in_hole(p))
+        ]
+        assert i in peg_order and other not in peg_order
+        hx, hy = ep.slot_xy[other]
+        ep._set_free(
+            ep.peg_qadr[other], ep.peg_vadr[other], [hx, hy, 0.025],
+            _yaw_quat(float(ep.slot_yaw[other])),
+        )
+        ep.seated_now[other] = True
+        peg_order = [
+            p for p in range(ep.n_pegs)
+            if not ep.peg_parked[p] and (ep.seated_now[p] or ep._peg_in_hole(p))
+        ]
+        assert set(peg_order) == {i, other}
+        monkeypatch.setattr(v08.mujoco, "mj_step", lambda model, data: None)
+        before = ep.data.qvel.copy()
+        angles = []
+        original_rng = ep.rng
+        expected_rng = np.random.default_rng(23)
+        expected_rng.bit_generator.state = original_rng.bit_generator.state
+
+        class AngleRecorder:
+            def __getattr__(self, name):
+                return getattr(original_rng, name)
+
+            def uniform(self, low, high, *args, **kwargs):
+                value = original_rng.uniform(low, high, *args, **kwargs)
+                if low == 0 and high == 2 * np.pi:
+                    angles.append(float(value))
+                return value
+
+        ep.rng = AngleRecorder()
+        active_collars = sum(not parked for parked in ep.collar_parked)
+        ep._finalize_stability()
+        expected_angles = expected_rng.uniform(0, 2 * np.pi, len(peg_order) + active_collars)
+        np.testing.assert_allclose(angles, expected_angles)
+        for peg in (i, other):
+            angle = expected_angles[peg_order.index(peg)]
+            np.testing.assert_allclose(
+                ep.data.qvel[ep.peg_vadr[peg] : ep.peg_vadr[peg] + 2],
+                before[ep.peg_vadr[peg] : ep.peg_vadr[peg] + 2] + 0.9 * np.array([np.cos(angle), np.sin(angle)]),
+            )
+        assert not ep.step_done[k], attack
+        assert compound_score_v08(ep)["score"] == 0.0, attack
+        if attack == "never_mated":
+            np.testing.assert_allclose(
+                ep.data.qvel[ep.collar_vadr[j] : ep.collar_vadr[j] + 2],
+                before[ep.collar_vadr[j] : ep.collar_vadr[j] + 2] + 0.63 * np.array([np.cos(angles[len(peg_order)]), np.sin(angles[len(peg_order)])]),
+            )
+
+
+def test_active_collar_cannot_start_embedded_without_rework(conds):
+    """A rework-free episode also rejects a collar embedded in the board."""
+    import copy
+    import mujoco
+
+    ep = AssemblyIVEpisode(copy.deepcopy(conds[49]), np.random.default_rng(23))
+    assert not ep._rework_wrong
+    j = next(j for j, parked in enumerate(ep.collar_parked) if not parked)
+    p, q = ep.collar_pose(j)
+    ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [p[0], p[1], p[2] - 0.004], q)
+    mujoco.mj_forward(ep.model, ep.data)
+    assert any(
+        ep.collar_body[j] in (
+            ep.model.geom_bodyid[con.geom1], ep.model.geom_bodyid[con.geom2]
+        ) and con.dist < -0.0015
+        for con in ep.data.contact[:ep.data.ncon]
+    )
+    assert not ep._spawn_ok()
+    p, q = ep.collar_pose(j)
+    ep._set_free(ep.collar_qadr[j], ep.collar_vadr[j], [p[0] + 0.050, p[1], p[2]], q)
+    ep.data.qvel[ep.collar_vadr[j] : ep.collar_vadr[j] + 3] = 0.0
+    assert not ep._collar_spawn_ok(j)
+
+
+def test_rework_spawn_validation_also_checks_clutter(conds, monkeypatch):
+    """A rework contact exemption must not admit a frozen clutter projectile."""
+    import mujoco
+    import nist_sim.compound_v08 as v08
+    from nist_sim.env import SPAWN_MAX_PENETRATION
+
+    monkeypatch.setattr(v08, "PERTURB_XY", 0.0)
+    ep = AssemblyIVEpisode(conds[42], np.random.default_rng(23))
+    assert ep._rework_wrong and ep.n_clutter
+    for i in range(ep.n_clutter):
+        p, _ = ep.clutter_pose(i)
+        assert np.all(np.isfinite(p)) and np.linalg.norm(p) < 0.3
+    # Isolate the original failure: a wrong-hole peg remains exempt while a
+    # deeply embedded block must invalidate the same spawn candidate.
+    ep._place_clutter(0)
+    p, q = ep.clutter_pose(0)
+    rework_peg = min(ep._rework_wrong)
+    spec = ep.c.slots[ep._rework_wrong[rework_peg]]
+    from nist_sim.conditions import slot_world_xy
+    hx, hy = slot_world_xy(ep.c.board_xy, ep.c.board_yaw, spec)
+    ep._set_free(ep.clutter_qadr[0], ep.clutter_vadr[0], [hx, hy, p[2]], q)
+    ep._seat_in_wrong_slot(rework_peg)
+    mujoco.mj_forward(ep.model, ep.data)
+    deep = min(
+        (float(con.dist) for con in ep.data.contact[:ep.data.ncon]
+         if ep.clutter_body[0] in (
+             ep.model.geom_bodyid[con.geom1], ep.model.geom_bodyid[con.geom2],
+         )),
+        default=0.0,
+    )
+    assert deep < -SPAWN_MAX_PENETRATION
+    assert not ep._clutter_spawn_ok(0)
+    assert not ep._spawn_ok()
+
+
 def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
     from nist_sim.env import PEG_LEN
 
@@ -683,7 +1014,11 @@ def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
     ep.collar_parked[j] = False
     ep._set_body_active(ep.collar_body[j], True)
     hx, hy = ep.slot_xy[i]
-    ep._set_free(ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2], [1, 0, 0, 0])
+    from nist_sim.env import _yaw_quat
+    ep._set_free(
+        ep.peg_qadr[i], ep.peg_vadr[i], [hx, hy, PEG_LEN / 2],
+        _yaw_quat(float(ep.slot_yaw[i])),
+    )
     ep.seated_now[i] = True
     ep.data.qpos[2] = 0.16
     ep._pin_stack_on_peg(j)
@@ -692,15 +1027,21 @@ def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
     ep.step_in_order[k] = True
     ep.step_done_at[k] = 1
     ep.done = True
+    initial_impulses = []
+    real_step = v08.mujoco.mj_step
+    def capture_impulse(model, data):
+        if not initial_impulses:
+            initial_impulses.append(float(np.linalg.norm(data.qvel[adr:adr + 2])))
+        return real_step(model, data)
+    adr = ep.peg_vadr[i]
+    monkeypatch.setattr(v08.mujoco, "mj_step", capture_impulse)
     ep._finalize_stability()
     assert ep.step_done[k]
     assert ep._physical_step_ok(k)[0]
     assert ep._stack_mated[j]
-    # The mated ring is not directly kicked; the seated peg still is. An
-    # unmated ring must still receive the direct perturbation impulse.
-    adr = ep.peg_vadr[i]
-    peg_speed = float(np.linalg.norm(ep.data.qvel[adr:adr + 2]))
-    assert peg_speed > 0.0
+    # Neither the claimed mated ring nor its carrier peg is directly kicked.
+    # An unmated ring and unrelated pegs must still receive their impulses.
+    assert initial_impulses == [0.0]
 
     displaced = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
     monkeypatch.setattr(v08, "PERTURB_XY", 0.0018)
