@@ -123,7 +123,11 @@ reloads, and **53 passed, 3 warnings in 150.28 s** for Assembly IV. The clean
 ordered repository-wide suite passed: **245 passed, 5 skipped, 4 warnings in
 1209.55 s (0:20:09)**, with `NIST_PROFILE=v08` and single-threaded BLAS/OpenMP.
 Stopped or pre-fix runs are not used as final evidence.
-GitHub Actions built-image wall is pending at PR creation.
+GitHub Actions built-image wall passed on PR run 45093432142, `referee-image`
+job 137427878255: **240.743684844 s for 64 episodes** on cpuset `0,1`, below
+600 s. Docker returned 0, all 64 episodes scored, the raw score was exactly 0.0,
+and there was no player fault. The artifact is `referee-wall-64`; the image's
+runtime `v08` profile assertion also passed.
 
 Final-source ONNX-player/referee checks used public development seed 7 with
 eight episodes and two workers, running zero and uniform random sequentially.
