@@ -1,43 +1,172 @@
-# NIST-Lite v0.8.2 calibration
+# NIST-Lite v0.8.3 calibration
 
-## Scope
+## v0.8.3 reset-failure guard
 
-This PR fixes stack finalization reported in Macrocosmos
-[issue #49](https://github.com/macrocosm-os/apex-competitions-builder/issues/49).
-A ring mated in play and left undisturbed retains credit. A ring that was never
-mated, was knocked off in play, was displaced, or is gripped scores zero.
-`spec.yaml` declares **0.8.2**.
+This PR addresses the reset-failure rollout gate in Macrocosmos
+[issue #45, comment 7084678153](https://github.com/macrocosm-os/apex-competitions-builder/issues/45#issuecomment-7084678153).
+`spec.yaml` declares **0.8.3**. It contains construction exceptions inside the
+referee worker, keeps the affected episode as a deterministic zero in the fixed
+scoring denominator, and continues the remaining episodes. Records identify the
+episode with `terminal_reason` and `failure_reason` equal to `reset_failure`.
+Workers report contained reset failures before stepping, so a later worker death
+cannot replace them with a generic worker failure. Exception text and private
+simulator inputs are not recorded.
+
+The parent closes child pipe endpoints after forking and polls readability and
+process liveness around every receive. A one-byte readiness channel confirms
+that each child has closed inherited parent endpoints before the next fork,
+without waiting for its episode construction to finish. The parent waits on
+pending startup pipes rather than serializing behind one child's construction,
+so an early-dead peer can still be collected. EOF or a dead child produces
+complete `worker_failure` zero records for that child's episodes instead of
+waiting for the platform timeout. A failed readiness launch explicitly closes
+its current pipe and terminates and reaps every started worker. Summary validation also rejects non-finite or oversized
+numeric values and non-JSON-serializable public record/trajectory payloads before
+aggregation or record writing. Healthy episode construction and simulation have
+no additional wall-clock cutoff. Only a partial live frame or a backpressured
+parent-to-worker frame with no transport progress for five seconds is contained
+as a worker failure. Reset-only workers are excluded from action and `fail_all`
+delivery but still receive their final summary request.
+
+A claimed stack's carrier peg is exempt from its finalization impulse only when
+`seated_now` is true, not merely `_peg_in_hole`. Kick-angle draws are unchanged.
+Ordinary, non-stack collars continue to receive 0.63 m/s kicks. The wrist-sweep
+and key-precision observations in the issue comment remain design notes, not
+changes in this patch.
 
 The `v08` profile, 320-float observation, five-float action, 0.36 per-step
 partial-credit cap, milestone weights, 920-action horizon, physical task rules,
 and image digest pins are unchanged. Controller and PPO/SAC tuning are outside
-this patch. The assisted reference below is the existing **legacy assisted
-privileged solver**: it reads true state and may use simulator-state assists.
-It is not an action-only controller result or a release gate and was not tuned
-to improve its score.
+this patch.
 
-## Fix
+### Released-image reset sweep
 
-1. Snapshot completion claims using the physical predicates before finalization.
-   A passive end pose cannot synthesize an unearned completion.
-2. For a claimed, physically valid stack, skip the carrier peg's lateral impulse
-   so the calibration impulse does not throw its supported ring off. Draw the
-   kick angle in the original order. Unrelated seated pegs retain their kicks,
-   and never-mated rings retain their direct impulses.
-3. Place stack rings with their octagonal faces supporting the peg at its
-   measured slot yaw. Rectangular and regular-polygon cross-sections use their
-   shared symmetry to avoid unsupported face alignments.
-4. Continue measuring peg seating, ring position, ring height, upright pose, and
-   gripper clearance after settling. Never re-pin a mated ring during settling.
-   Invalid claims do not exempt the carrier peg and score zero.
+The sweep constructs all 64 Assembly IV episodes for each of 100 independently
+derived live-split round seeds using the released v0.8.2 referee application
+layers and isolated live build inputs. Its report contains anonymous sample
+indices only; no held-out round seed, range, or build salt is printed or stored.
+Each construction uses the normal round and per-episode seed derivation and an
+independent condition copy. Instrumentation counts calls to `_force_safe_start`
+and `_teleport_safe_grid`, plus any exception raised during construction.
 
-The board-42 investigation also exposed a reset-validation defect: rework
-contacts bypassed unrelated clutter/contact validation, allowing deeply embedded
-clutter to enter settling and become a projectile. Validation now limits the
-contact exemption to the intentional wrong-slot peg/hole pair, checks unrelated
-parts and active rings, and validates the collision-free fallback start before
-returning an episode. Spawn bounds, penetration, drift, and speed limits are not
-relaxed. Existing scoring tolerances and task difficulty are unchanged.
+Final result: **100 samples × 64 episodes = 6,400 constructions**. Across those
+episodes, **45 (0.703125%) reached `_force_safe_start`**, **0 reached
+`_teleport_safe_grid`**, and **0 raised during reset/construction**. The sweep
+completed in 326.29 s with two workers. Application-layer digests were verified
+during retrieval, and the released public `nist_sim` source matched tag v0.8.2;
+the simulator-source file hashes are retained in the external sweep report.
+
+Each entry below is `anonymous sample: force-safe / safe-grid / raised`. No entry
+contains a round seed or any private build input.
+
+```text
+0: 0/0/0 | 1: 0/0/0 | 2: 0/0/0 | 3: 0/0/0 | 4: 0/0/0
+5: 0/0/0 | 6: 0/0/0 | 7: 0/0/0 | 8: 1/0/0 | 9: 0/0/0
+10: 0/0/0 | 11: 0/0/0 | 12: 0/0/0 | 13: 0/0/0 | 14: 0/0/0
+15: 0/0/0 | 16: 0/0/0 | 17: 2/0/0 | 18: 0/0/0 | 19: 1/0/0
+20: 0/0/0 | 21: 0/0/0 | 22: 0/0/0 | 23: 0/0/0 | 24: 0/0/0
+25: 0/0/0 | 26: 1/0/0 | 27: 2/0/0 | 28: 0/0/0 | 29: 0/0/0
+30: 0/0/0 | 31: 0/0/0 | 32: 0/0/0 | 33: 2/0/0 | 34: 0/0/0
+35: 2/0/0 | 36: 0/0/0 | 37: 1/0/0 | 38: 1/0/0 | 39: 0/0/0
+40: 0/0/0 | 41: 1/0/0 | 42: 0/0/0 | 43: 0/0/0 | 44: 0/0/0
+45: 0/0/0 | 46: 1/0/0 | 47: 1/0/0 | 48: 2/0/0 | 49: 0/0/0
+50: 1/0/0 | 51: 0/0/0 | 52: 0/0/0 | 53: 0/0/0 | 54: 0/0/0
+55: 0/0/0 | 56: 0/0/0 | 57: 0/0/0 | 58: 0/0/0 | 59: 1/0/0
+60: 2/0/0 | 61: 0/0/0 | 62: 0/0/0 | 63: 1/0/0 | 64: 1/0/0
+65: 0/0/0 | 66: 2/0/0 | 67: 0/0/0 | 68: 0/0/0 | 69: 0/0/0
+70: 1/0/0 | 71: 0/0/0 | 72: 0/0/0 | 73: 1/0/0 | 74: 1/0/0
+75: 0/0/0 | 76: 0/0/0 | 77: 0/0/0 | 78: 1/0/0 | 79: 0/0/0
+80: 0/0/0 | 81: 1/0/0 | 82: 0/0/0 | 83: 0/0/0 | 84: 1/0/0
+85: 0/0/0 | 86: 1/0/0 | 87: 0/0/0 | 88: 0/0/0 | 89: 1/0/0
+90: 0/0/0 | 91: 0/0/0 | 92: 3/0/0 | 93: 0/0/0 | 94: 1/0/0
+95: 3/0/0 | 96: 0/0/0 | 97: 1/0/0 | 98: 1/0/0 | 99: 2/0/0
+```
+
+### Ordinary-collar retention survey
+
+The independent v0.8.3 survey exercised ordinary, non-stack collars that are
+active at reset, using physically valid collar placements and four kick seeds
+(23–26) per collar. Parked collars are excluded; they do not receive an impulse.
+All **72/72 observed impulses were 0.63 m/s**, and **60/72 (83.33%)** retained
+physically verified collar credit after settling. These fixtures verify the
+ordinary-collar kick and report its retention; they do not modify the physical
+rules or relax retention requirements.
+
+### v0.8.3 validation
+
+Guard tests use the actual fork/pipe implementation and an eight-episode,
+two-worker round. They force selected constructions to fail, repeat the same
+round for exact record/metadata equality, and terminate one child before its
+first observation. Additional cases inject truncated and malformed pipe frames
+and terminate a worker after it accepts an action, checking that surviving
+workers do not consume stale acknowledgements or silently skip their next action.
+Additional cases use three workers to kill the middle worker after an earlier
+worker has acknowledged, kill a worker during observation collection in a
+three-step round, return a decoded malformed observation, and return incomplete
+summary rows. The normal action phase stores one action batch and completes every
+surviving worker's unacknowledged delivery before requesting another observation.
+Assertions cover deterministic zero scores, reason flags, fixed episode count
+and denominator, normal per-kind schema keys, public-record privacy,
+player-fault absence, complete output, bounded completion, and pipe/liveness-
+based dead-worker recovery. The carrier regression requires a non-upright,
+in-hole carrier to receive its kick while all random-angle draws remain
+unchanged. A normal two-worker regression independently requires all eight
+episodes to receive all 920 actions, protecting the non-failure lockstep path.
+
+The final guard selection contains **26 cases**, including early-death during a
+peer's construction, readiness-failure cleanup, oversized-number,
+non-JSON-summary, nonzero-reset-summary, and reset-then-worker-death
+regressions. Both partial-write and initially fully backpressured sends are
+covered. Final-source focused results are **26 passed in 123.81 s** for the
+guard module, including per-test `v08` profile restoration after legacy module
+reloads, and **53 passed, 3 warnings in 150.28 s** for Assembly IV. The clean
+ordered repository-wide suite passed: **245 passed, 5 skipped, 4 warnings in
+1209.55 s (0:20:09)**, with `NIST_PROFILE=v08` and single-threaded BLAS/OpenMP.
+Stopped or pre-fix runs are not used as final evidence.
+GitHub Actions built-image wall passed on PR run 45093432142, `referee-image`
+job 137427878255: **240.743684844 s for 64 episodes** on cpuset `0,1`, below
+600 s. Docker returned 0, all 64 episodes scored, the raw score was exactly 0.0,
+and there was no player fault. The artifact is `referee-wall-64`; the image's
+runtime `v08` profile assertion also passed.
+
+Final-source ONNX-player/referee checks used public development seed 7 with
+eight episodes and two workers, running zero and uniform random sequentially.
+Both returned code 0, completed all eight episodes at 920 steps, made 920 player
+calls, and had no player fault. **Zero scored exactly 0.0 in 30.557978339 s;
+uniform random scored exactly 0.0 in 30.786305332 s.** Both scores are unchanged
+from the v0.8.2 zero/random baseline. These local runs measure score behavior,
+not the required 64-episode built-image wall.
+
+The v0.8.2 measurements retained in the following sections are historical
+baseline evidence, not reattributed to v0.8.3.
+
+
+## v0.8.2 baseline: stack finalization
+
+The previous PR fixed stack finalization reported in Macrocosmos
+[issue #49](https://github.com/macrocosm-os/apex-competitions-builder/issues/49).
+A ring mated in play and left undisturbed retained credit. A ring that was never
+mated, was knocked off in play, was displaced, or was gripped scored zero.
+
+1. Completion claims were snapshotted using physical predicates before
+   finalization; passive end poses could not synthesize completions.
+2. A claimed, physically valid stack skipped its carrier peg's lateral impulse
+   to avoid throwing its supported ring off. Angles retained their original
+   order; unrelated pegs and never-mated rings retained their impulses. v0.8.3
+   narrows this exemption to an upright (`seated_now`) carrier.
+3. Stack rings were placed with their octagonal faces supporting the peg at its
+   measured slot yaw, using shared cross-section symmetries.
+4. Finalization continued to measure peg seating, ring position, height,
+   upright pose, and gripper clearance after settling without re-pinning.
+
+The board-42 investigation also fixed reset validation around intentional rework
+contacts: unrelated clutter/contact validation is enforced, fallback starts are
+validated, and spawn bounds, penetration, drift, speed limits, and scoring
+tolerances are not relaxed.
+
+The following assisted-reference measurements used the existing **legacy
+assisted privileged solver**, which reads true state and may use simulator-state
+assists. They are not action-only controller results or release gates.
 
 ## Independent v0.8.1 reproduction
 

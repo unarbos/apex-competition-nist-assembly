@@ -50,8 +50,9 @@ For each blueprint step:
    action-earned physical evidence buckets: `0.12` for sustained grasp/lift, and `0.06`
    each for held transport toward the real hole, held insertion, near-target
    alignment, and stable release through the final perturbation-settle window.
-   An earned, physically valid mated interference-fit stack ring and its carrier
-   peg are exempt from the direct finalization impulses. The kick angle is still
+   An earned, physically valid mated interference-fit stack ring and its upright
+   (`seated_now`) carrier peg are exempt from the direct finalization impulses.
+   A merely in-hole carrier is not exempt. The kick angle is still
    drawn for the carrier peg, leaving unrelated random streams and kicks unchanged.
    The measured ring pose is verified after settling and finalization never re-pins
    the ring. Never-mated, displaced, knocked-off, and gripped rings score zero;
