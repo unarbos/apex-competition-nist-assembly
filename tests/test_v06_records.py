@@ -169,6 +169,8 @@ def test_referee_worker_writes_record_four_fields():
     proc = mp.Process(target=ref._worker, args=(worker_conn, seed, per, [idx], 1, "live"))
     proc.start()
     try:
+        # Startup publishes contained reset failures before the first observation.
+        assert ctx_conn.recv() == ("reset_failures", [])
         # One obs + one zero act so traj has a frame, then summary.
         ctx_conn.send(("obs",))
         ids, obs = ctx_conn.recv()

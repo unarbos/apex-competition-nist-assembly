@@ -867,6 +867,47 @@ def test_valid_stack_preserves_unrelated_kicks_and_angle_stream(conds, monkeypat
     np.testing.assert_allclose(ep.collar_pose(j)[0][:2], ep.slot_xy[i], atol=0.003)
 
 
+def test_non_upright_in_hole_stack_carrier_is_kicked_without_changing_angles(conds, monkeypatch):
+    """An in-hole predicate alone must not exempt a claimed stack's carrier."""
+    k = next(
+        k for k, s in enumerate(conds[1].compound.steps)
+        if s.kind == "stack" and conds[1].compound.peg_wave[s.peg] == 0
+    )
+    ep, _j, i = _stack_finalization_fixture(conds[1], k)
+    ep.seated_now[i] = False
+    ep._peg_in_hole = lambda peg: peg == i
+    assert not ep.seated_now[i] and ep._peg_in_hole(i)
+    peg_order = [
+        p for p in range(ep.n_pegs)
+        if not ep.peg_parked[p] and (ep.seated_now[p] or ep._peg_in_hole(p))
+    ]
+    assert peg_order == [i]
+    expected_rng = np.random.default_rng(23)
+    expected_rng.bit_generator.state = ep.rng.bit_generator.state
+    angles = expected_rng.uniform(0, 2 * np.pi, 1 + sum(not p for p in ep.collar_parked))
+    observed_angles = []
+    original_rng = ep.rng
+
+    class AngleRecorder:
+        def __getattr__(self, name):
+            return getattr(original_rng, name)
+
+        def uniform(self, low, high, *args, **kwargs):
+            value = original_rng.uniform(low, high, *args, **kwargs)
+            if low == 0 and high == 2 * np.pi:
+                observed_angles.append(float(value))
+            return value
+
+    ep.rng = AngleRecorder()
+    monkeypatch.setattr("nist_sim.compound_v08.mujoco.mj_step", lambda model, data: None)
+    ep._finalize_stability()
+    np.testing.assert_allclose(observed_angles, angles)
+    np.testing.assert_allclose(
+        ep.data.qvel[ep.peg_vadr[i] : ep.peg_vadr[i] + 2],
+        0.9 * np.array([np.cos(angles[0]), np.sin(angles[0])]),
+    )
+
+
 def test_invalid_stack_claim_cannot_exempt_carrier_peg(conds, monkeypatch):
     """False, displaced and gripped claims fail; only valid claimed stacks skip a peg kick."""
     from nist_sim.compound import COLLAR_H

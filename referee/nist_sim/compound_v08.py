@@ -1042,8 +1042,9 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
                 self._stability_ok[k] = False
 
         # Apply a small XY impulse to free pegs/collars that look seated, then settle.
-        # A claimed, physically valid stack rests on its carrier peg: that peg's
-        # impulse would transmit an artificial ring-off test through the mate.
+        # A claimed, physically valid stack rests on an upright carrier peg: that
+        # peg's impulse would transmit an artificial ring-off test through the mate.
+        # A merely in-hole carrier is not exempt; its kick can expose a bad mate.
         # All other pegs and all unmated rings retain their impulses. Draw every
         # angle in the original order so unrelated parts keep the same kicks.
         supported_stack_pegs = {
@@ -1055,7 +1056,7 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             if not (self.seated_now[i] or self._peg_in_hole(i)):
                 continue
             ang = float(self.rng.uniform(0, 2 * math.pi))
-            if i in supported_stack_pegs:
+            if i in supported_stack_pegs and self.seated_now[i]:
                 continue
             vx = PERTURB_XY * math.cos(ang) / max(PHYSICS_PROXY_DT(), 1e-3)
             vy = PERTURB_XY * math.sin(ang) / max(PHYSICS_PROXY_DT(), 1e-3)

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.3 — 2026-11-23
+
+- Contain episode-construction failures in referee workers. A failed reset
+  produces a deterministic zero with `reset_failure` / `failure_reason` in its
+  public record and stays in the fixed 64-episode scoring denominator; other
+  episodes continue normally.
+- Close child pipe endpoints in the parent after forking and close inherited
+  parent endpoints in each child before the next fork. Poll pipe readability
+  and child liveness instead of blocking indefinitely, recover from EOF or
+  malformed frames, and produce complete deterministic `worker_failure` zero
+  records for a failed worker's slice while preserving already-contained reset
+  failures. Resynchronize surviving workers after a partial action delivery.
+  Reject invalid or non-JSON summary payloads before aggregation. Live episode
+  construction and simulation have no additional wall-clock scoring cutoff;
+  only a partial live frame or a backpressured send with no transport progress
+  for five seconds is contained as a worker failure. Workers that die before
+  the next fork can be collected while peers are still constructing episodes;
+  a failed readiness launch explicitly terminates and reaps every started worker.
+- Exempt a claimed stack's carrier peg from its finalization impulse only when
+  `seated_now` is true; a merely in-hole carrier still receives its kick. Keep
+  every kick-angle draw unchanged, including ordinary collars' 0.63 m/s kicks.
+- Add forced-reset, repeated-record, dead-worker, malformed-frame,
+  action-delivery recovery, and non-upright-carrier regressions. Keep
+  observation/action contracts, task rules, partial-credit
+  scoring, horizon, resources, and released image digest pins unchanged.
+
 ## 0.8.2 — 2026-11-21
 
 - Retain credit for a stack ring that was mated in play and remains physically

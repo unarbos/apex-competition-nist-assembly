@@ -21,8 +21,13 @@ from __future__ import annotations
 import http.client
 import json
 import multiprocessing as mp
+import multiprocessing.connection as mp_connection
 import os
+import select
+import socket
+import struct
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +43,7 @@ from gym_v1.referee import GameResult, Referee, RefereeContext
 from nist_sim import profile as _profile
 from nist_sim.compound import (
     OBS_DIM_V06,
+    STEP_KINDS,
     CompoundEpisode,
     compound_score as compound_score_v06,
     record_events,
@@ -46,12 +52,14 @@ from nist_sim.compound import (
 )
 from nist_sim.compound_v07 import (
     OBS_DIM_V07,
+    STEP_KINDS_V07,
     AssemblyIIIEpisode,
     compound_score_v07,
     sample_compound_v07,
 )
 from nist_sim.compound_v08 import (
     OBS_DIM_V08,
+    STEP_KINDS_V08,
     AssemblyIVEpisode,
     compound_score_v08,
     compound_record_events_v08,
@@ -61,7 +69,7 @@ from nist_sim.compound_v08 import (
 )
 from nist_sim.conditions import episode_seed_sequence, sample_episodes
 from nist_sim.env import ACT_DIM, CONTROL_HZ, OBS_DIM, Episode
-from nist_sim.scoring import episode_score, raw_score_from_episodes
+from nist_sim.scoring import episode_score
 
 # Read the env (not profile.ACTIVE): ACTIVE is fixed at first import of nist_sim.profile and
 # stays stale across NIST_PROFILE changes / importlib.reload in tests.
@@ -120,107 +128,394 @@ def _make_episode(cond, rng):
     return Episode(cond, rng)
 
 
-def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, split: str):
-    _, conds = _sample(seed, per_stratum, split)
-    eps = {}
-    noise = {}
-    traj = {}
-    for i in indices:
-        ss = episode_seed_sequence(seed, i)
-        r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
-        eps[i] = _make_episode(conds[i], r1)
-        noise[i] = r2
-        if stride and i % stride == 0:
-            traj[i] = []
-    while True:
-        msg = conn.recv()
-        if msg[0] == "obs":
-            ids = [i for i in indices if not eps[i].done]
-            obs = (
-                np.stack([eps[i].observe(noise[i]) for i in ids])
-                if ids
-                else np.zeros((0, OBS_W), np.float32)
+def _failed_episode_row(cond, episode: int, terminal_reason: str) -> dict:
+    """Deterministic zero record; never include exception text or hidden state."""
+    public = cond.public()
+    if COMPOUND:
+        public = dict(public)
+        public["collars"] = cond.compound.record_collars()
+    n_steps = len(cond.compound.steps) if COMPOUND else 0
+    steps = cond.compound.steps if COMPOUND else []
+    if ASSEMBLY_IV:
+        kinds = STEP_KINDS_V08
+    elif COMPOUND:
+        # v0.7 falls back to the v0.6 three-kind report for legacy blueprints.
+        kinds = (
+            STEP_KINDS_V07
+            if {s.kind for s in steps} - set(STEP_KINDS)
+            else STEP_KINDS
+        )
+    else:
+        kinds = ()
+    row = {
+        "format": RECORD_FORMAT,
+        "episode": episode,
+        "conditions": public,
+        "success": False,
+        "success_step": None,
+        "steps": 0,
+        "terminal_reason": terminal_reason,
+        "failure_reason": terminal_reason,
+        "mean_sq_action": 0.0,
+        "peg_seated_at_end": [False] * len(cond.pegs),
+        "peg_first_seat_step": [None] * len(cond.pegs),
+        "pegs_seated": 0,
+        "n_pegs": len(cond.pegs),
+        "score": 0.0,
+    }
+    if COMPOUND:
+        row.update({
+            "task": compound_record_task_v08(cond.compound) if ASSEMBLY_IV else cond.compound.record_task(),
+            "tier": cond.compound.tier,
+            "steps_done": 0,
+            "steps_in_order": 0,
+            "n_steps": n_steps,
+            "credit_by_kind": {k: (0.0 if any(s.kind == k for s in steps) else None) for k in kinds},
+            "step_results": [
+                {
+                    "done": False,
+                    "done_at": None,
+                    "in_order": False,
+                    "credit": 0.0,
+                    **({
+                        "precision": 0.0,
+                        "stable": False,
+                        "partial": {
+                            "lift": False, "transport": False, "align": False,
+                            "stable": False, "insert": False,
+                        },
+                        "lift_fraction": 0.0,
+                        "transport_fraction": 0.0,
+                        "insert_fraction": 0.0,
+                    } if ASSEMBLY_IV else {}),
+                }
+                for _ in steps
+            ],
+            "events": [],
+            "events_fired": 0,
+            "parts_lost": 0,
+            "nist_profile": _PROFILE_NAME,
+        })
+    return row
+
+
+def _valid_observation_reply(reply, indices: list[int]) -> bool:
+    if not isinstance(reply, tuple) or len(reply) != 2:
+        return False
+    ids, obs = reply
+    return (
+        isinstance(ids, list)
+        and all(type(i) is int for i in ids)
+        and ids == [i for i in indices if i in ids]
+        and isinstance(obs, np.ndarray)
+        and obs.dtype.kind == "f"
+        and obs.shape == (len(ids), OBS_W)
+        and bool(np.all(np.isfinite(obs)))
+    )
+
+
+def _is_record_int(value) -> bool:
+    return type(value) is int
+
+
+def _is_record_number(value) -> bool:
+    if not isinstance(value, (int, float, np.integer, np.floating)) or isinstance(value, (bool, np.bool_)):
+        return False
+    try:
+        return bool(np.isfinite(value))
+    except (TypeError, ValueError, OverflowError):
+        # NumPy rejects Python integers too large for its numeric conversion.
+        return False
+
+
+def _valid_summary_row(row, cond, episode: int) -> bool:
+    """Validate everything aggregation/reporting reads before trusting a child."""
+    if not isinstance(row, dict) or type(row.get("episode")) is not int or row["episode"] != episode:
+        return False
+    required = {
+        "format": str, "conditions": dict, "success": bool, "steps": int,
+        "terminal_reason": str, "mean_sq_action": (int, float),
+        "peg_seated_at_end": list, "peg_first_seat_step": list,
+        "pegs_seated": int, "n_pegs": int, "score": (int, float),
+    }
+    if any(key not in row or not isinstance(row[key], typ) for key, typ in required.items()):
+        return False
+    if (
+        row["format"] != RECORD_FORMAT
+        or type(row["success"]) is not bool
+        or any(type(row[k]) is not int for k in ("steps", "pegs_seated", "n_pegs"))
+        or not _is_record_number(row["score"])
+        or not _is_record_number(row["mean_sq_action"])
+        or not 0 <= row["steps"] <= cond.max_steps
+        or row["n_pegs"] != len(cond.pegs)
+        or not 0 <= row["pegs_seated"] <= row["n_pegs"]
+        or len(row["peg_seated_at_end"]) != row["n_pegs"]
+        or len(row["peg_first_seat_step"]) != row["n_pegs"]
+        or any(type(v) is not bool for v in row["peg_seated_at_end"])
+        or any(v is not None and (not _is_record_int(v) or not 0 <= v <= row["steps"]) for v in row["peg_first_seat_step"])
+        or "success_step" not in row
+        or row["success_step"] is not None and (
+            not _is_record_int(row["success_step"]) or not 0 <= row["success_step"] <= row["steps"]
+        )
+        or not isinstance(row["conditions"].get("pegs"), list)
+        or type(row["conditions"].get("n_pegs")) is not int
+        or row["conditions"]["n_pegs"] != row["n_pegs"]
+        or len(row["conditions"]["pegs"]) != row["n_pegs"]
+        or any(
+            not isinstance(p, dict)
+            or not isinstance(p.get("shape"), str)
+            or not _is_record_number(p.get("size"))
+            for p in row["conditions"]["pegs"]
+        )
+        or not COMPOUND and not isinstance(row["conditions"].get("clutter_bucket"), str)
+    ):
+        return False
+    if not COMPOUND:
+        return True
+    if "failure_reason" in row and not isinstance(row["failure_reason"], str):
+        return False
+    compound_keys = {
+        "task": dict, "tier": str, "steps_done": int, "steps_in_order": int,
+        "n_steps": int, "credit_by_kind": dict, "step_results": list,
+        "events": list, "events_fired": int, "parts_lost": int, "nist_profile": str,
+    }
+    if any(key not in row or not isinstance(row[key], typ) for key, typ in compound_keys.items()):
+        return False
+    steps = cond.compound.steps
+    if ASSEMBLY_IV:
+        kinds = STEP_KINDS_V08
+    else:
+        kinds = STEP_KINDS_V07 if {s.kind for s in steps} - set(STEP_KINDS) else STEP_KINDS
+    if (
+        any(type(row[k]) is not int for k in ("steps_done", "steps_in_order", "n_steps", "events_fired", "parts_lost"))
+        or row["n_steps"] != len(steps)
+        or not 0 <= row["steps_done"] <= row["n_steps"]
+        or not 0 <= row["steps_in_order"] <= row["n_steps"]
+        or row["events_fired"] != len(row["events"])
+        or row["events_fired"] < 0
+        or row["parts_lost"] < 0
+        or len(row["step_results"]) != row["n_steps"]
+        or not isinstance(row["task"].get("steps"), list)
+        or len(row["task"]["steps"]) != row["n_steps"]
+        or set(row["credit_by_kind"]) != set(kinds)
+        or any(
+            not _is_record_number(row["credit_by_kind"][k])
+            for k in kinds if any(s.kind == k for s in steps)
+        )
+        or any(
+            row["credit_by_kind"][k] is not None
+            for k in kinds if not any(s.kind == k for s in steps)
+        )
+    ):
+        return False
+    for sr in row["step_results"]:
+        if not isinstance(sr, dict):
+            return False
+        keys = {"done": bool, "in_order": bool, "credit": (int, float)}
+        if ASSEMBLY_IV:
+            keys.update({
+                "precision": (int, float), "stable": bool, "partial": dict,
+                "lift_fraction": (int, float), "transport_fraction": (int, float),
+                "insert_fraction": (int, float),
+            })
+        if any(k not in sr or not isinstance(sr[k], typ) for k, typ in keys.items()):
+            return False
+        if (
+            "done_at" not in sr
+            or sr["done_at"] is not None and (
+                not _is_record_int(sr["done_at"]) or not 0 <= sr["done_at"] <= row["steps"]
             )
-            conn.send((ids, obs))
-        elif msg[0] == "act":
-            acts: dict[int, Any] = msg[1]
-            for i, a in acts.items():
-                e = eps[i]
-                if a is None:
-                    e.fail("invalid_action")
-                else:
-                    e.step(a)
-                if i in traj:
-                    pegs = []
-                    for pi in range(e.n_pegs):
-                        p, q = e.peg_pose(pi)
-                        pegs.append({"pos": np.round(p, 5).tolist(), "quat": np.round(q, 4).tolist()})
-                    frame = {
-                        "t": e.steps,
-                        "pegs": pegs,
-                        "hand": np.round(e.data.qpos[0:4], 5).tolist(),
-                        "action": None if a is None else np.round(np.clip(a, -1, 1), 3).tolist(),
-                        "seated": list(e.seated_now),
+            or any(type(sr[k]) is not bool for k in ("done", "in_order"))
+            or any(not _is_record_number(sr[k]) for k, typ in keys.items() if typ == (int, float))
+        ):
+            return False
+        if ASSEMBLY_IV and (
+            type(sr["stable"]) is not bool
+            or set(sr["partial"]) != {"lift", "transport", "align", "stable", "insert"}
+            or any(type(v) is not bool for v in sr["partial"].values())
+        ):
+            return False
+    return True
+
+
+def _valid_worker_summary(response, conds, indices: list[int], reset_failures=frozenset()) -> bool:
+    if not isinstance(response, tuple) or len(response) != 2:
+        return False
+    rows, traj = response
+    if not (
+        isinstance(rows, list)
+        and len(rows) == len(indices)
+        and isinstance(traj, dict)
+        and all(type(i) is int and i in indices and isinstance(frames, list) for i, frames in traj.items())
+        and all(_valid_summary_row(row, conds[i], i) for row, i in zip(rows, indices))
+    ):
+        return False
+    try:
+        # Accepted summaries must be writable as public JSON records, not merely
+        # well-shaped enough to aggregate before failing during serialization.
+        json.dumps((rows, traj), allow_nan=False)
+        expected = {
+            i: _failed_episode_row(conds[i], i, "reset_failure")
+            for i in indices if i in reset_failures
+        }
+        return all(
+            json.dumps(row, sort_keys=True, allow_nan=False)
+            == json.dumps(expected[row["episode"]], sort_keys=True, allow_nan=False)
+            for row in rows if row["episode"] in expected
+        )
+    except (TypeError, ValueError, OverflowError):
+        # This also contains array-valued fields whose equality would otherwise
+        # raise before an invalid worker summary can become deterministic zeroes.
+        return False
+
+
+def _worker_entry(
+    conn,
+    inherited,
+    ready,
+    seed: int,
+    per_stratum: int,
+    indices: list[int],
+    stride: int,
+    split: str,
+):
+    # A later fork must not retain a parent's duplex endpoints: such copies can
+    # suppress EOF when an earlier worker dies before sending a response. The
+    # parent reads this readiness byte before forking again, so all inherited
+    # copies are closed first. Episode construction still proceeds in parallel.
+    for other in inherited:
+        other.close()
+    # Drop the inherited parent handle as soon as it is closed; otherwise the
+    # local argument list retains an inert descriptor object until this returns.
+    inherited.clear()
+    try:
+        ready.send_bytes(b"\0")
+    finally:
+        ready.close()
+    return _worker(conn, seed, per_stratum, indices, stride, split)
+
+
+def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, split: str):
+    try:
+        _, conds = _sample(seed, per_stratum, split)
+        eps = {}
+        noise = {}
+        traj = {}
+        reset_failures = set()
+        for i in indices:
+            ss = episode_seed_sequence(seed, i)
+            r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
+            try:
+                eps[i] = _make_episode(conds[i], r1)
+            except Exception:
+                # Reset construction is not a player fault. Keep this episode out of
+                # the action batch, but include its deterministic zero in the round.
+                eps[i] = None
+                reset_failures.add(i)
+            noise[i] = r2
+            if stride and i % stride == 0:
+                traj[i] = []
+        # Publish contained construction failures before any step or transport
+        # failure so a later worker death cannot erase their classification.
+        conn.send(("reset_failures", sorted(reset_failures)))
+        while True:
+            try:
+                msg = conn.recv()
+            except EOFError:
+                return
+            if msg[0] == "obs":
+                ids = [i for i in indices if eps[i] is not None and not eps[i].done]
+                obs = (
+                    np.stack([eps[i].observe(noise[i]) for i in ids])
+                    if ids
+                    else np.zeros((0, OBS_W), np.float32)
+                )
+                conn.send((ids, obs))
+            elif msg[0] == "act":
+                acts: dict[int, Any] = msg[1]
+                for i, a in acts.items():
+                    e = eps[i]
+                    if a is None:
+                        e.fail("invalid_action")
+                    else:
+                        e.step(a)
+                    if i in traj:
+                        pegs = []
+                        for pi in range(e.n_pegs):
+                            p, q = e.peg_pose(pi)
+                            pegs.append({"pos": np.round(p, 5).tolist(), "quat": np.round(q, 4).tolist()})
+                        frame = {
+                            "t": e.steps,
+                            "pegs": pegs,
+                            "hand": np.round(e.data.qpos[0:4], 5).tolist(),
+                            "action": None if a is None else np.round(np.clip(a, -1, 1), 3).tolist(),
+                            "seated": list(e.seated_now),
+                        }
+                        if COMPOUND:
+                            collars = []
+                            for cj in range(e.n_collars):
+                                cp, cq = e.collar_pose(cj)
+                                collars.append(
+                                    {"pos": np.round(cp, 5).tolist(), "quat": np.round(cq, 4).tolist()}
+                                )
+                            frame["collars"] = collars
+                            frame["parked"] = list(e.peg_parked)
+                            frame["collar_parked"] = list(e.collar_parked)
+                        traj[i].append(frame)
+                conn.send(True)
+            elif msg[0] == "fail_all":
+                for i in indices:
+                    if eps[i] is not None and not eps[i].done:
+                        eps[i].fail(msg[1])
+                conn.send(True)
+            elif msg[0] == "summary":
+                rows = []
+                for i in indices:
+                    e = eps[i]
+                    if e is None:
+                        assert i in reset_failures
+                        rows.append(_failed_episode_row(conds[i], i, "reset_failure"))
+                        continue
+                    seated = e.peg_seated_at_end()
+                    first = e.peg_first_seat_steps()
+                    msa = e.action_l2 / max(1, e.steps)
+                    cinfo = compound_score(e) if COMPOUND else None
+                    score = cinfo["score"] if COMPOUND else episode_score(seated, first, e.c.max_steps, msa)
+                    row = {
+                        "format": RECORD_FORMAT,
+                        "episode": i,
+                        "conditions": conds[i].public(),
+                        "success": bool(e.success),
+                        "success_step": e.success_step,
+                        "steps": e.steps,
+                        "terminal_reason": e.terminal_reason,
+                        "mean_sq_action": round(msa, 5),
+                        "peg_seated_at_end": seated,
+                        "peg_first_seat_step": first,
+                        "pegs_seated": int(sum(seated)),
+                        "n_pegs": e.n_pegs,
+                        "score": score,
                     }
                     if COMPOUND:
-                        collars = []
-                        for cj in range(e.n_collars):
-                            cp, cq = e.collar_pose(cj)
-                            collars.append(
-                                {"pos": np.round(cp, 5).tolist(), "quat": np.round(cq, 4).tolist()}
-                            )
-                        frame["collars"] = collars
-                        frame["parked"] = list(e.peg_parked)
-                        frame["collar_parked"] = list(e.collar_parked)
-                    traj[i].append(frame)
-            conn.send(True)
-        elif msg[0] == "fail_all":
-            for i in indices:
-                if not eps[i].done:
-                    eps[i].fail(msg[1])
-            conn.send(True)
-        elif msg[0] == "summary":
-            rows = []
-            for i in indices:
-                e = eps[i]
-                seated = e.peg_seated_at_end()
-                first = e.peg_first_seat_steps()
-                msa = e.action_l2 / max(1, e.steps)
-                cinfo = compound_score(e) if COMPOUND else None
-                score = cinfo["score"] if COMPOUND else episode_score(seated, first, e.c.max_steps, msa)
-                row = {
-                    "format": RECORD_FORMAT,
-                    "episode": i,
-                    "conditions": conds[i].public(),
-                    "success": bool(e.success),
-                    "success_step": e.success_step,
-                    "steps": e.steps,
-                    "terminal_reason": e.terminal_reason,
-                    "mean_sq_action": round(msa, 5),
-                    "peg_seated_at_end": seated,
-                    "peg_first_seat_step": first,
-                    "pegs_seated": int(sum(seated)),
-                    "n_pegs": e.n_pegs,
-                    "score": score,
-                }
-                if COMPOUND:
-                    pub = dict(row["conditions"])
-                    pub["collars"] = conds[i].compound.record_collars()
-                    row["conditions"] = pub
-                    row["task"] = compound_record_task_v08(conds[i].compound) if ASSEMBLY_IV else conds[i].compound.record_task()
-                    row["tier"] = conds[i].compound.tier
-                    row["steps_done"] = cinfo["n_done"]
-                    row["steps_in_order"] = cinfo["n_in_order"]
-                    row["n_steps"] = cinfo["n_steps"]
-                    row["credit_by_kind"] = cinfo["per_kind"]
-                    row["step_results"] = step_results_v08(e) if ASSEMBLY_IV else step_results(e)
-                    row["events"] = compound_record_events_v08(e.events_fired) if ASSEMBLY_IV else record_events(e)
-                    row["events_fired"] = cinfo["events"]
-                    row["parts_lost"] = int(e.parts_lost)
-                    row["nist_profile"] = _PROFILE_NAME
-                rows.append(row)
-            conn.send((rows, traj))
-            return
+                        pub = dict(row["conditions"])
+                        pub["collars"] = conds[i].compound.record_collars()
+                        row["conditions"] = pub
+                        row["task"] = compound_record_task_v08(conds[i].compound) if ASSEMBLY_IV else conds[i].compound.record_task()
+                        row["tier"] = conds[i].compound.tier
+                        row["steps_done"] = cinfo["n_done"]
+                        row["steps_in_order"] = cinfo["n_in_order"]
+                        row["n_steps"] = cinfo["n_steps"]
+                        row["credit_by_kind"] = cinfo["per_kind"]
+                        row["step_results"] = step_results_v08(e) if ASSEMBLY_IV else step_results(e)
+                        row["events"] = compound_record_events_v08(e.events_fired) if ASSEMBLY_IV else record_events(e)
+                        row["events_fired"] = cinfo["events"]
+                        row["parts_lost"] = int(e.parts_lost)
+                        row["nist_profile"] = _PROFILE_NAME
+                    rows.append(row)
+                conn.send((rows, traj))
+                return
+    finally:
+        conn.close()
 
 
 def _validate_actions(raw: Any, n: int) -> list[np.ndarray | None] | None:
@@ -242,6 +537,10 @@ def _validate_actions(raw: Any, n: int) -> list[np.ndarray | None] | None:
 
 
 class NistLiteReferee(Referee):
+    # Bound only an already-stalled kernel pipe. There is no new deadline while
+    # a live worker is constructing or simulating before writing its next frame.
+    TRANSPORT_STALL_TIMEOUT_S = 5.0
+
     def play_game(self, ctx: RefereeContext, players: list[PlayerClient]) -> GameResult:
         cfg = {**DEFAULTS, **(ctx.config or {})}
         per = int(cfg["episodes_per_stratum"])
@@ -255,79 +554,354 @@ class NistLiteReferee(Referee):
         slices = [list(range(w, n, workers)) for w in range(workers)]
 
         ctx_mp = mp.get_context("fork")
-        conns, procs = [], []
-        for sl in slices:
-            a, b = ctx_mp.Pipe()
-            p = ctx_mp.Process(
-                target=_worker, args=(b, ctx.seed, per, sl, stride, split), daemon=True
-            )
-            p.start()
-            conns.append(a)
-            procs.append(p)
+        worker_info = []
+        try:
+            for sl in slices:
+                parent_conn, child_conn = ctx_mp.Pipe()
+                p = None
+                try:
+                    ready_reader, ready_writer = ctx_mp.Pipe(duplex=False)
+                except Exception:
+                    child_conn.close()
+                    parent_conn.close()
+                    raise
+                try:
+                    try:
+                        inherited = [info["conn"] for info in worker_info]
+                        p = ctx_mp.Process(
+                            target=_worker_entry,
+                            args=(
+                                child_conn,
+                                inherited,
+                                ready_writer,
+                                ctx.seed,
+                                per,
+                                sl,
+                                stride,
+                                split,
+                            ),
+                            daemon=True,
+                        )
+                        p.start()
+                    finally:
+                        # Only the child may retain these endpoints. A retained
+                        # readiness writer would itself hide an early worker death.
+                        child_conn.close()
+                        ready_writer.close()
+                    try:
+                        # A one-way pipe cannot poll forever after its only writer
+                        # exits. Do not impose a deadline on healthy setup.
+                        ready = ready_reader.recv_bytes(1)
+                    except EOFError:
+                        ready = b""
+                    finally:
+                        ready_reader.close()
+                    if ready != b"\0":
+                        raise RuntimeError("referee worker exited before readiness")
+                    worker_info.append({"conn": parent_conn, "proc": p, "indices": sl})
+                    p = None
+                except Exception:
+                    parent_conn.close()
+                    if p is not None and p.pid is not None:
+                        if p.is_alive():
+                            p.terminate()
+                        p.join(timeout=10)
+                    raise
+        except Exception:
+            for info in worker_info:
+                info["conn"].close()
+                if info["proc"].is_alive():
+                    info["proc"].terminate()
+            for info in worker_info:
+                info["proc"].join(timeout=10)
+            raise
 
         player = players[0]
         player_fault = None
-        try:
-            player.reset(
-                match_id=ctx.match_id,
-                player_index=0,
-                seed=0,
-                config={"obs_dim": OBS_W, "obs_dim_v05_prefix": OBS_DIM, "act_dim": ACT_DIM, "control_hz": CONTROL_HZ},
-            )
-        except (PlayerError, OSError, http.client.HTTPException) as e:
-            player_fault = f"reset failed: {type(e).__name__}"
-
-        calls = 0
-        for _ in range(max_steps):
-            if player_fault:
-                break
-            for c in conns:
-                c.send(("obs",))
-            parts = [c.recv() for c in conns]
-            ids = [i for p_ids, _ in parts for i in p_ids]
-            if not ids:
-                break
-            obs = np.concatenate([o for _, o in parts if len(o)], axis=0)
-            try:
-                raw = player.act(observation=np.round(obs, 6).tolist(), deadline_ms=deadline_ms)
-                calls += 1
-            except (PlayerError, OSError, http.client.HTTPException) as e:
-                player_fault = f"act failed: {type(e).__name__}"
-                break
-            except (ValueError, json.JSONDecodeError):
-                player_fault = "act returned an unreadable response"
-                break
-            acts = _validate_actions(raw, len(ids))
-            if acts is None:
-                player_fault = "act returned a batch of the wrong shape"
-                break
-            by_id = dict(zip(ids, acts))
-            for c, (p_ids, _) in zip(conns, parts):
-                c.send(("act", {i: by_id[i] for i in p_ids}))
-            for c in conns:
-                c.recv()
-
-        reason = "player_fault" if player_fault else "time_limit"
-        for c in conns:
-            c.send(("fail_all", reason))
-        for c in conns:
-            c.recv()
         rows, traj = [], {}
-        for c in conns:
-            c.send(("summary",))
-            r, t = c.recv()
-            rows += r
-            traj.update(t)
-        for p in procs:
-            p.join(timeout=30)
+        dead = set()
+        idle = set()
+        contained_reset_failures = set()
+        try:
+            # A pipe becoming readable/writable says nothing about completion of
+            # its next framed message. Keep incremental buffers and never call
+            # the stdlib's blocking recv()/send() on a live worker socket.
+            for info in worker_info:
+                info["sock"] = socket.socket(fileno=info["conn"].fileno())
+                info["sock"].setblocking(False)
+                info["recv_buffer"] = bytearray()
+                info["recv_expected"] = None
+                info["recv_stalled_since"] = None
+                info["send_buffer"] = bytearray()
+                info["send_stalled_since"] = None
+
+            def close_parent_conn(info) -> None:
+                # The socket wrapper only configures nonblocking IO. Relinquish
+                # it before Connection closes the descriptor it exclusively owns.
+                sock = info.pop("sock", None)
+                if sock is not None:
+                    sock.detach()
+                info["conn"].close()
+
+            def fail_worker(w: int) -> None:
+                dead.add(w)
+                info = worker_info[w]
+                close_parent_conn(info)
+                if info["proc"].is_alive():
+                    info["proc"].terminate()
+                info["proc"].join(timeout=1.0)
+
+            def _take_frame(info):
+                """Return a complete pickled frame, False if incomplete, or None if invalid."""
+                buf, expected = info["recv_buffer"], info["recv_expected"]
+                if expected is None:
+                    if len(buf) < 4:
+                        return False
+                    expected = struct.unpack("!i", buf[:4])[0]
+                    del buf[:4]
+                    if expected < -1:
+                        return None
+                    info["recv_expected"] = expected
+                if expected == -1:
+                    if len(buf) < 8:
+                        return False
+                    expected = struct.unpack("!Q", buf[:8])[0]
+                    del buf[:8]
+                    info["recv_expected"] = expected
+                if len(buf) < expected:
+                    return False
+                payload = bytes(buf[:expected])
+                del buf[:expected]
+                info["recv_expected"] = None
+                try:
+                    return mp_connection._ForkingPickler.loads(payload)
+                except Exception:
+                    return None
+
+            def recv_worker(w: int, wait: bool = True):
+                """Receive complete frames without blocking on a partial live-writer frame."""
+                info = worker_info[w]
+                conn, proc = info["conn"], info["proc"]
+                while w not in dead:
+                    try:
+                        frame = _take_frame(info)
+                        if frame is None:
+                            break
+                        if frame is not False:
+                            return frame
+                        if info["recv_buffer"] or info["recv_expected"] is not None:
+                            if info["recv_stalled_since"] is None:
+                                info["recv_stalled_since"] = time.monotonic()
+                            if time.monotonic() - info["recv_stalled_since"] >= self.TRANSPORT_STALL_TIMEOUT_S:
+                                break
+                        chunk = os.read(conn.fileno(), 65536)
+                        if not chunk:
+                            break
+                        info["recv_buffer"].extend(chunk)
+                        info["recv_stalled_since"] = None
+                        continue
+                    except BlockingIOError:
+                        pass
+                    except (EOFError, OSError):
+                        break
+                    if not proc.is_alive():
+                        break
+                    if not wait:
+                        return False
+                    try:
+                        select.select([conn.fileno()], [], [], 0.1)
+                    except (OSError, ValueError):
+                        break
+                fail_worker(w)
+                return None
+
+            def send_worker(w: int, msg) -> bool:
+                if w in dead or (w in idle and msg[0] != "summary"):
+                    return False
+                info = worker_info[w]
+                proc, fd = info["proc"], info["conn"].fileno()
+                if not info["send_buffer"]:
+                    payload = mp_connection._ForkingPickler.dumps(msg)
+                    header = (
+                        struct.pack("!iQ", -1, len(payload))
+                        if len(payload) > 0x7fffffff
+                        else struct.pack("!i", len(payload))
+                    )
+                    info["send_buffer"].extend(header + payload)
+                while w not in dead:
+                    try:
+                        if info["send_buffer"]:
+                            written = os.write(fd, info["send_buffer"])
+                            del info["send_buffer"][:written]
+                            info["send_stalled_since"] = None
+                            if info["send_buffer"]:
+                                info["send_stalled_since"] = time.monotonic()
+                                raise BlockingIOError
+                        return True
+                    except BlockingIOError:
+                        pass
+                    except (BrokenPipeError, EOFError, OSError):
+                        break
+                    if not proc.is_alive():
+                        break
+                    if info["send_stalled_since"] is None:
+                        info["send_stalled_since"] = time.monotonic()
+                    if time.monotonic() - info["send_stalled_since"] >= self.TRANSPORT_STALL_TIMEOUT_S:
+                        break
+                    try:
+                        select.select([], [fd], [], 0.1)
+                    except (OSError, ValueError):
+                        break
+                fail_worker(w)
+                return False
+
+            awaiting_startup = set(range(len(worker_info)))
+            while awaiting_startup:
+                # Wait for readable startup pipes without letting one slow
+                # construction hide another worker's death or busy-spinning.
+                pending = [worker_info[w]["conn"] for w in sorted(awaiting_startup)]
+                try:
+                    readable = set(mp_connection.wait(pending, timeout=0.1))
+                except (EOFError, OSError):
+                    readable = set()
+                progress = False
+                for w in sorted(awaiting_startup):
+                    if worker_info[w]["conn"] not in readable and worker_info[w]["proc"].is_alive():
+                        continue
+                    initial = recv_worker(w, wait=False)
+                    if initial is False:
+                        continue
+                    awaiting_startup.remove(w)
+                    progress = True
+                    if (
+                        not isinstance(initial, tuple)
+                        or len(initial) != 2
+                        or initial[0] != "reset_failures"
+                        or not isinstance(initial[1], list)
+                        or any(type(i) is not int or i not in worker_info[w]["indices"] for i in initial[1])
+                        or len(set(initial[1])) != len(initial[1])
+                    ):
+                        if w not in dead:
+                            fail_worker(w)
+                        continue
+                    contained_reset_failures.update(initial[1])
+                if not readable and not progress:
+                    # Recheck all liveness even if wait() failed on a closed pipe.
+                    for w in sorted(awaiting_startup):
+                        if not worker_info[w]["proc"].is_alive():
+                            recv_worker(w)
+
+            try:
+                player.reset(
+                    match_id=ctx.match_id,
+                    player_index=0,
+                    seed=0,
+                    config={"obs_dim": OBS_W, "obs_dim_v05_prefix": OBS_DIM, "act_dim": ACT_DIM, "control_hz": CONTROL_HZ},
+                )
+            except (PlayerError, OSError, http.client.HTTPException) as e:
+                player_fault = f"reset failed: {type(e).__name__}"
+
+            calls = 0
+            steps_used = 0
+            pending_actions = None
+            delivered_workers = set()
+            while steps_used < max_steps or (pending_actions is not None and not player_fault):
+                if player_fault:
+                    break
+                if pending_actions is None:
+                    parts = []
+                    for w in range(len(worker_info)):
+                        if not send_worker(w, ("obs",)) or (part := recv_worker(w)) is None:
+                            continue
+                        if not _valid_observation_reply(part, worker_info[w]["indices"]):
+                            fail_worker(w)
+                            continue
+                        parts.append((w, part))
+                    ids = [i for _, (p_ids, _) in parts for i in p_ids]
+                    if not ids:
+                        # An all-reset or already-complete slice has no fail_all
+                        # acknowledgment to consume; its next reply is its summary.
+                        idle.update(w for w, (p_ids, _) in parts if not p_ids)
+                        break
+                    obs = np.concatenate([o for _, (_, o) in parts], axis=0)
+                    try:
+                        raw = player.act(observation=np.round(obs, 6).tolist(), deadline_ms=deadline_ms)
+                        calls += 1
+                    except (PlayerError, OSError, http.client.HTTPException) as e:
+                        player_fault = f"act failed: {type(e).__name__}"
+                        break
+                    except (ValueError, json.JSONDecodeError):
+                        player_fault = "act returned an unreadable response"
+                        break
+                    acts = _validate_actions(raw, len(ids))
+                    if acts is None:
+                        player_fault = "act returned a batch of the wrong shape"
+                        break
+                    by_id = dict(zip(ids, acts))
+                    pending_actions = {
+                        w: {i: by_id[i] for i in p_ids} for w, (p_ids, _) in parts if p_ids
+                    }
+                    idle.update(w for w, (p_ids, _) in parts if not p_ids)
+                    steps_used += 1
+                for w, action_map in pending_actions.items():
+                    if w in delivered_workers:
+                        continue
+                    if not send_worker(w, ("act", action_map)):
+                        continue
+                    ack = recv_worker(w)
+                    if ack is None:
+                        continue
+                    if ack is not True:
+                        fail_worker(w)
+                        continue
+                    delivered_workers.add(w)
+                if all(w in dead or w in delivered_workers for w in pending_actions):
+                    pending_actions = None
+                    delivered_workers.clear()
+                # A failure leaves only unacknowledged actions pending. Continue
+                # those same deliveries before collecting any new observations;
+                # this keeps every survivor on one logical control-step boundary.
+
+            reason = "player_fault" if player_fault else "time_limit"
+            for w in range(len(worker_info)):
+                if send_worker(w, ("fail_all", reason)):
+                    recv_worker(w)
+            for w in range(len(worker_info)):
+                if not send_worker(w, ("summary",)):
+                    continue
+                response = recv_worker(w)
+                if response is not None:
+                    if not _valid_worker_summary(response, conds, worker_info[w]["indices"], contained_reset_failures):
+                        fail_worker(w)
+                        continue
+                    r, t = response
+                    rows += r
+                    traj.update(t)
+            for w in sorted(dead):
+                rows.extend(
+                    _failed_episode_row(
+                        conds[i], i,
+                        "reset_failure" if i in contained_reset_failures else "worker_failure",
+                    )
+                    for i in worker_info[w]["indices"]
+                )
+        finally:
+            for info in worker_info:
+                close_parent_conn(info)
+                if info["proc"].is_alive():
+                    info["proc"].terminate()
+            for info in worker_info:
+                info["proc"].join(timeout=10)
         rows.sort(key=lambda r: r["episode"])
+        if len(rows) != n or {r["episode"] for r in rows} != set(range(n)):
+            raise RuntimeError("incomplete or duplicate episode records")
 
         successes = sum(1 for r in rows if r["success"])
         success_rate = successes / n
         pegs_seated = sum(r["pegs_seated"] for r in rows)
         pegs_total = sum(r["n_pegs"] for r in rows)
         peg_fraction = pegs_seated / max(1, pegs_total)
-        raw_score = raw_score_from_episodes(rows)
+        raw_score = sum(float(r["score"]) for r in rows) / n
         self._write_records(rows, traj, round_ranges)
 
         by_k: dict[str, list[float]] = {}
