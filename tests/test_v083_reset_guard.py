@@ -192,7 +192,6 @@ def test_observation_and_action_requests_reach_all_workers_before_receives(tmp_p
                     if phase == "obs" else True
                 )
             assert conn.recv()[0] == "fail_all"
-            conn.send(True)
             assert conn.recv()[0] == "summary"
             _, conds = ref._sample(seed, per_stratum, split)
             rows = [ref._failed_episode_row(conds[i], i, "time_limit") for i in indices]
@@ -212,7 +211,6 @@ def test_observation_and_action_requests_reach_all_workers_before_receives(tmp_p
                 if expected == "obs" else True
             )
         assert conn.recv()[0] == "fail_all"
-        conn.send(True)
         assert conn.recv()[0] == "summary"
         _, conds = ref._sample(seed, per_stratum, split)
         rows = [ref._failed_episode_row(conds[i], i, "time_limit") for i in indices]
@@ -434,6 +432,10 @@ def test_exited_worker_final_summary_is_preserved(tmp_path, monkeypatch):
         if indices[0] != 0:
             return original(conn, seed, per_stratum, indices, stride, split)
         _, conds = ref._sample(seed, per_stratum, split)
+        for cond in conds:
+            # The worker below consumes exactly three action frames, so its
+            # time_limit rows must use the same three-step public horizon.
+            cond.max_steps = 3
         conn.send(("reset_failures", []))
         try:
             for _ in range(3):
@@ -442,12 +444,12 @@ def test_exited_worker_final_summary_is_preserved(tmp_path, monkeypatch):
                 assert conn.recv()[0] == "act"
                 conn.send(True)
             assert conn.recv()[0] == "fail_all"
-            conn.send(True)
             # Queue the final response and close without ever waiting for its
             # request. EOF draining must preserve this complete final frame.
             rows = []
             for i in indices:
                 row = ref._failed_episode_row(conds[i], i, "time_limit")
+                row["steps"] = 3
                 del row["failure_reason"]
                 rows.append(row)
             conn.send((rows, {}))
@@ -460,6 +462,84 @@ def test_exited_worker_final_summary_is_preserved(tmp_path, monkeypatch):
     assert not any(row["terminal_reason"] == "worker_failure" for row in rows)
     assert [row["terminal_reason"] for row in rows] == ["time_limit"] * 8
     assert all(row["score"] == 0.0 for row in rows)
+
+
+def test_already_complete_worker_finalizes_without_ack_round_trip(tmp_path, monkeypatch):
+    """An idle worker consumes ordered finalization and sends only its summary."""
+    original = ref._worker
+
+    def already_complete(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        real_make = ref._make_episode
+
+        def completed_episode(cond, rng):
+            ep = real_make(cond, rng)
+            ep.fail("time_limit")
+            return ep
+
+        ref._make_episode = completed_episode
+        return original(conn, seed, per_stratum, indices, stride, split)
+
+    monkeypatch.setattr(ref, "_worker", already_complete)
+    result, rows = _play(tmp_path, monkeypatch, "already-complete-summary", max_steps=3)
+    assert result.metadata["details"]["player_calls"] == 3
+    assert result.metadata["details"]["terminal_reasons"] == {"time_limit": 8}
+    assert all(row["score"] == 0.0 for row in rows)
+
+
+def test_half_open_final_summary_is_preserved(tmp_path, monkeypatch):
+    """A failed request direction cannot invalidate an already queued summary."""
+    original = ref._worker
+
+    def half_open_summary(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        _, conds = ref._sample(seed, per_stratum, split)
+        conn.send(("reset_failures", []))
+        for _ in range(3):
+            assert conn.recv()[0] == "obs"
+            conn.send((indices, np.zeros((len(indices), ref.OBS_W), np.float32)))
+            assert conn.recv()[0] == "act"
+            conn.send(True)
+        assert conn.recv()[0] == "fail_all"
+        rows = []
+        for i in indices:
+            row = ref._failed_episode_row(conds[i], i, "time_limit")
+            row["steps"] = 3
+            del row["failure_reason"]
+            rows.append(row)
+        conn.send((rows, {}))
+        sock = ref.socket.socket(fileno=conn.fileno())
+        sock.shutdown(ref.socket.SHUT_RD)
+        sock.detach()
+        time.sleep(60)
+
+    monkeypatch.setattr(ref, "_worker", half_open_summary)
+    result, rows = _play(tmp_path, monkeypatch, "half-open-summary", max_steps=3)
+    assert result.metadata["details"]["terminal_reasons"] == {"time_limit": 8}
+    assert all(row["score"] == 0.0 for row in rows)
+
+
+def test_false_action_ack_is_rejected_without_waiting_for_another_frame(tmp_path, monkeypatch):
+    """A valid pickle containing False is a reply, not an incomplete frame."""
+    original = ref._worker
+
+    def false_ack(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+        assert conn.recv()[0] == "obs"
+        conn.send((indices, np.zeros((len(indices), ref.OBS_W), np.float32)))
+        assert conn.recv()[0] == "act"
+        conn.send(False)
+        time.sleep(60)
+
+    monkeypatch.setattr(ref, "_worker", false_ack)
+    result, rows = _play(tmp_path, monkeypatch, "false-action-ack", max_steps=3)
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+    assert result.metadata["details"]["player_calls"] == 3
 
 
 def test_malformed_worker_frame_is_recovered_without_hang(tmp_path, monkeypatch):
@@ -957,7 +1037,6 @@ def test_misseat_done_at_sentinel_preserves_normal_score(monkeypatch):
     try:
         assert parent.recv() == ("reset_failures", [])
         parent.send(("fail_all", "time_limit"))
-        assert parent.recv() is True
         parent.send(("summary",))
         response = parent.recv()
         assert ref._valid_worker_summary(response, conds, [0])
@@ -1011,7 +1090,7 @@ def test_invalid_summary_row_preserves_positive_sibling_scores(tmp_path, monkeyp
                         rows.append(row)
                     conn.send((rows, {}))
                     return
-                else:
+                elif msg[0] == "act":
                     conn.send(True)
         finally:
             conn.close()
@@ -1081,7 +1160,8 @@ def _summary_mutation_worker(mutation, announced_reset_failures=()):
                         # Preserve real action stepping and fail_all bookkeeping so
                         # valid siblings have exactly the referee's expected horizon.
                         parent.send(msg)
-                        conn.send(parent.recv())
+                        if msg[0] != "fail_all":
+                            conn.send(parent.recv())
             finally:
                 conn.close()
 
