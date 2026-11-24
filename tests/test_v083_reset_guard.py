@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import atexit
+import pickle
+import ctypes
 import importlib
 import multiprocessing as mp
 import os
@@ -14,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
+import resource
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "referee"))
 os.environ["NIST_PROFILE"] = "v08"
@@ -489,12 +491,23 @@ def test_already_complete_worker_finalizes_without_ack_round_trip(tmp_path, monk
 
 
 def test_half_open_final_summary_is_preserved(tmp_path, monkeypatch):
-    """A failed request direction cannot invalidate an already queued summary."""
+    """An observed request failure cannot invalidate an in-flight valid summary."""
     original = ref._worker
+    original_os_write = ref.os.write
+    original_dumps = ref.mp_connection._ForkingPickler.dumps
+    request_error_seen = []
+    write_event = mp.get_context("fork").Event()
+    fail_all_delivered = mp.get_context("fork").Event()
+    original_socket = ref.socket.socket
 
     def half_open_summary(conn, seed, per_stratum, indices, stride, split):
         if indices[0] != 0:
             return original(conn, seed, per_stratum, indices, stride, split)
+        # Shrink the response receive buffer before forking the second worker,
+        # which closes every other child descriptor retained by its peer.
+        sock = original_socket(fileno=conn.fileno())
+        sock.setsockopt(ref.socket.SOL_SOCKET, ref.socket.SO_RCVBUF, 4096)
+        sock.detach()
         _, conds = ref._sample(seed, per_stratum, split)
         conn.send(("reset_failures", []))
         for _ in range(3):
@@ -509,14 +522,52 @@ def test_half_open_final_summary_is_preserved(tmp_path, monkeypatch):
             row["steps"] = 3
             del row["failure_reason"]
             rows.append(row)
-        conn.send((rows, {}))
-        sock = ref.socket.socket(fileno=conn.fileno())
+        # The worker queues a response prefix after fail_all, without waiting for
+        # the summary command. Its request direction then half-closes. Write the
+        # actual frame bytes: Connection._send_bytes() itself adds a frame header.
+        def write_all(data):
+            view = memoryview(data)
+            while view:
+                written = original_os_write(conn.fileno(), view)
+                assert written > 0
+                view = view[written:]
+
+        payload = ref.mp_connection._ForkingPickler.dumps((rows, {}))
+        write_all(struct.pack("!i", len(payload)) + payload[:60])
+        sock = original_socket(fileno=conn.fileno())
         sock.shutdown(ref.socket.SHUT_RD)
         sock.detach()
+        # Only the parent's failing summary write releases the response remainder.
+        fail_all_delivered.set()
+        if not write_event.wait(5):
+            os._exit(23)
+        write_all(payload[60:])
         time.sleep(60)
 
+    fail_all_payload = bytes(original_dumps(("fail_all", "time_limit")))
+    fail_all_frame = struct.pack("!i", len(fail_all_payload)) + fail_all_payload
+
+    def record_write_error(fd, data):
+        data = bytes(data)
+        delivered = data == fail_all_frame
+        try:
+            written = original_os_write(fd, data)
+            if delivered:
+                # This small complete frame fits atomically. Hold only its return
+                # until the peer half-closes; the next summary write observes EPIPE.
+                assert written == len(data)
+                assert fail_all_delivered.wait(5)
+            return written
+        except (BrokenPipeError, OSError) as error:
+            if not request_error_seen:
+                request_error_seen.append(type(error).__name__)
+                write_event.set()
+            raise
+
+    monkeypatch.setattr(ref.os, "write", record_write_error)
     monkeypatch.setattr(ref, "_worker", half_open_summary)
     result, rows = _play(tmp_path, monkeypatch, "half-open-summary", max_steps=3)
+    assert request_error_seen == ["BrokenPipeError"]
     assert result.metadata["details"]["terminal_reasons"] == {"time_limit": 8}
     assert all(row["score"] == 0.0 for row in rows)
 
@@ -540,6 +591,377 @@ def test_false_action_ack_is_rejected_without_waiting_for_another_frame(tmp_path
     _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
     assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
     assert result.metadata["details"]["player_calls"] == 3
+
+
+def test_complete_malformed_frame_fails_open_worker_immediately(tmp_path, monkeypatch):
+    """An invalid complete pickle cannot hide behind an indefinitely open peer."""
+    original = ref._worker
+
+    def malformed_summary(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+        for _ in range(3):
+            assert conn.recv()[0] == "obs"
+            conn.send((indices, np.zeros((len(indices), ref.OBS_W), np.float32)))
+            assert conn.recv()[0] == "act"
+            conn.send(True)
+        assert conn.recv()[0] == "fail_all"
+        assert conn.recv()[0] == "summary"
+        conn._send(struct.pack("!i", 1) + b"X")
+        time.sleep(60)
+
+    monkeypatch.setattr(ref, "_worker", malformed_summary)
+    monkeypatch.setattr(ref.NistLiteReferee, "TRANSPORT_STALL_TIMEOUT_S", 60.0)
+    result, rows = _play(tmp_path, monkeypatch, "open-malformed-summary", max_steps=3)
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+
+
+def test_high_numbered_worker_descriptors_do_not_fail_siblings(tmp_path, monkeypatch):
+    """Shared readiness uses poll(), not select()'s fixed-size descriptor set."""
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if min(soft_limit, hard_limit) < 1200:
+        pytest.skip("requires at least 1200 open file descriptors")
+    fds = [os.open("/dev/null", os.O_RDONLY) for _ in range(1100)]
+    original_pipe = ref.mp.get_context("fork").Pipe
+    checked = []
+
+    def checked_pipe(duplex=True):
+        parent, child = original_pipe(duplex)
+        if duplex:
+            checked.append(parent.fileno())
+            assert parent.fileno() >= 1024
+        return parent, child
+
+    monkeypatch.setattr(ref.mp.get_context("fork"), "Pipe", checked_pipe)
+    try:
+        result, rows = _play(tmp_path, monkeypatch, "high-worker-fd", max_steps=3)
+    finally:
+        for fd in fds:
+            os.close(fd)
+    assert checked
+    assert result.metadata["details"]["terminal_reasons"] == {"time_limit": 8}
+    assert all(row["steps"] == 3 for row in rows)
+
+
+def test_failed_request_without_response_has_bounded_drain(tmp_path, monkeypatch):
+    """A half-open peer that never replies cannot suspend finalization forever."""
+    original = ref._worker
+    original_socket = ref.socket.socket
+    original_write = ref.os.write
+    original_poll = ref.select.poll
+    request_errors = []
+    waits = []
+
+    class RecordPoll:
+        def __init__(self):
+            self.poller = original_poll()
+
+        def register(self, *args, **kwargs):
+            return self.poller.register(*args, **kwargs)
+
+        def poll(self, timeout=None):
+            waits.append(timeout)
+            return self.poller.poll(timeout)
+
+    def half_open_silence(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        sock = original_socket(fileno=conn.fileno())
+        sock.setsockopt(ref.socket.SOL_SOCKET, ref.socket.SO_RCVBUF, 4096)
+        sock.shutdown(ref.socket.SHUT_RD)
+        sock.detach()
+        conn.send(("reset_failures", []))
+        time.sleep(60)
+
+    def record_request_error(fd, data):
+        try:
+            return original_write(fd, data)
+        except BrokenPipeError as error:
+            request_errors.append(type(error).__name__)
+            raise
+
+    monkeypatch.setattr(ref.os, "write", record_request_error)
+    monkeypatch.setattr(ref.select, "poll", RecordPoll)
+    monkeypatch.setattr(ref, "_worker", half_open_silence)
+    monkeypatch.setattr(ref.NistLiteReferee, "TRANSPORT_STALL_TIMEOUT_S", 0.2)
+    result, rows = _play(tmp_path, monkeypatch, "half-open-silence", max_steps=3)
+    assert "BrokenPipeError" in request_errors
+    assert any(value is not None and value <= 200 for value in waits)
+    assert not any(row["terminal_reason"] == "worker_failure" for row in rows if row["episode"] % 2)
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+
+
+def test_continuous_partial_frame_does_not_starve_siblings(tmp_path, monkeypatch):
+    """A legal-sized incomplete frame yields to its sibling between read budgets."""
+    original_socket = ref.socket.socket
+    original_entry = ref._worker_entry
+    original_read = ref.os.read
+    ctx = mp.get_context("fork")
+    sibling_sent = ctx.Value(ctypes.c_bool, False, lock=False)
+    streaming_started = ctx.Value(ctypes.c_bool, False, lock=False)
+    release = ctx.Value(ctypes.c_bool, False, lock=False)
+    observed = set()
+    fds = []
+    busy_reads = 0
+
+    def stream_incomplete_frame(conn, inherited, ready, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original_entry(conn, inherited, ready, seed, per_stratum, indices, stride, split)
+        for other in inherited:
+            other.close()
+        inherited.clear()
+        try:
+            ready.send_bytes(b"\0")
+        finally:
+            ready.close()
+        if indices[0] != 0:
+            conn.send(("reset_failures", []))
+            sibling_sent.value = True
+            time.sleep(60)
+            return
+        # _send() writes these bytes unchanged; _send_bytes() would frame them
+        # as a complete nested message instead of exposing an incomplete header.
+        conn._send(struct.pack("!i", (1 << 20) - 1))
+        streaming_started.value = True
+        while not release.value:
+            try:
+                conn._send(b"x" * 65536)
+            except (BrokenPipeError, EOFError, OSError):
+                return
+            time.sleep(0.001)
+        conn.close()
+
+    def record_read(fd, count):
+        nonlocal busy_reads
+        data = original_read(fd, count)
+        if fd in fds:
+            observed.add(fd)
+            if streaming_started.value and fd == fds[0]:
+                busy_reads += 1
+            # Require a second complete read budget and sibling IO before EOF.
+            if busy_reads > 16 and len(observed) == len(fds) == 2:
+                release.value = True
+        return data
+
+    def capture_fd(*args, **kwargs):
+        sock = original_socket(*args, **kwargs)
+        if "fileno" in kwargs:
+            fds.append(sock.fileno())
+        return sock
+
+    monkeypatch.setattr(ref, "_worker_entry", stream_incomplete_frame)
+    monkeypatch.setattr(ref.socket, "socket", capture_fd)
+    monkeypatch.setattr(ref.os, "read", record_read)
+    monkeypatch.setattr(ref.NistLiteReferee, "TRANSPORT_STALL_TIMEOUT_S", 60.0)
+    result, rows = _play(tmp_path, monkeypatch, "continuous-partial-frame", max_steps=0)
+    assert busy_reads > 16
+    assert len(fds) == 2
+    assert observed == set(fds)
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    assert all(row["terminal_reason"] == "time_limit" for row in rows if row["episode"] % 2)
+
+
+def test_read_budget_boundary_starts_finite_stall_timer(tmp_path, monkeypatch):
+    """A stopped partial frame cannot return from its read budget to poll(None)."""
+    original = ref._worker
+    original_read = ref.os.read
+    original_poll = ref.select.poll
+    reads = []
+    waits = []
+
+    class RecordPoll:
+        def __init__(self):
+            self.poller = original_poll()
+
+        def register(self, *args, **kwargs):
+            return self.poller.register(*args, **kwargs)
+
+        def poll(self, timeout=None):
+            waits.append(timeout)
+            return self.poller.poll(timeout)
+
+    def stopped_frame(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn._send(struct.pack("!i", (1 << 20) - 1))
+        conn._send(b"x" * (16 * 65536 - 4))
+        time.sleep(60)
+
+    def record_read(fd, count):
+        data = original_read(fd, count)
+        reads.append((fd, len(data)))
+        return data
+
+    monkeypatch.setattr(ref, "_worker", stopped_frame)
+    monkeypatch.setattr(ref.os, "read", record_read)
+    monkeypatch.setattr(ref.select, "poll", RecordPoll)
+    monkeypatch.setattr(ref.NistLiteReferee, "TRANSPORT_STALL_TIMEOUT_S", 0.2)
+    result, rows = _play(tmp_path, monkeypatch, "read-budget-stall", max_steps=0)
+    assert any(size == 65536 for _, size in reads)
+    assert any(value is not None and value <= 200 for value in waits)
+    assert any(value is not None and value <= 200 for value in waits[:-1])
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    assert all(row["terminal_reason"] == "time_limit" for row in rows if row["episode"] % 2)
+
+
+def test_mixed_request_and_receive_stalls_do_not_crash_round(tmp_path, monkeypatch):
+    """Each timeout source is checked independently without a None subtraction."""
+    original = ref._worker
+    original_socket = ref.socket.socket
+    original_write = ref.os.write
+    request_errors = []
+
+    def mixed_stalls(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] == 0:
+            sock = original_socket(fileno=conn.fileno())
+            sock.setsockopt(ref.socket.SOL_SOCKET, ref.socket.SO_RCVBUF, 4096)
+            sock.shutdown(ref.socket.SHUT_RD)
+            sock.detach()
+            conn.send(("reset_failures", []))
+            time.sleep(60)
+            return
+        conn.send(("reset_failures", []))
+        conn._send(struct.pack("!i", 100) + b"x")
+        time.sleep(60)
+
+    def record_request_error(fd, data):
+        try:
+            return original_write(fd, data)
+        except BrokenPipeError as error:
+            request_errors.append(type(error).__name__)
+            raise
+
+    monkeypatch.setattr(ref, "_worker", mixed_stalls)
+    monkeypatch.setattr(ref.os, "write", record_request_error)
+    monkeypatch.setattr(ref.NistLiteReferee, "TRANSPORT_STALL_TIMEOUT_S", 0.2)
+    result, rows = _play(tmp_path, monkeypatch, "mixed-stall-sources", max_steps=0)
+    assert "BrokenPipeError" in request_errors
+    assert all(row["terminal_reason"] == "worker_failure" for row in rows)
+    assert all(row["score"] == 0.0 for row in rows)
+
+
+@pytest.mark.parametrize("size", [4096, 1 << 40])
+def test_oversized_bytearray_pickle_is_rejected_before_expansion(
+    tmp_path, monkeypatch, size
+):
+    """Both above-limit and truncated below-limit declarations fail closed."""
+    original = ref._worker
+
+    def oversized_scalar(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+        payload = pickle.BYTEARRAY8 + size.to_bytes(8, "little") + pickle.STOP
+        conn._send_bytes(payload)
+        time.sleep(60)
+
+    monkeypatch.setattr(ref, "_worker", oversized_scalar)
+    monkeypatch.setattr(ref.NistLiteReferee, "TRANSPORT_STALL_TIMEOUT_S", 60.0)
+    result, rows = _play(tmp_path, monkeypatch, f"oversized-bytearray-{size}", max_steps=0)
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    assert all(row["terminal_reason"] == "time_limit" for row in rows if row["episode"] % 2)
+
+
+@pytest.mark.parametrize("protocol", [4, 5])
+def test_bounded_pickle_preserves_valid_bytearray_frames(protocol):
+    value = bytearray(b"x" * 65536)
+    assert ref._limited_pickle_loads(pickle.dumps(value, protocol=protocol)) == value
+
+
+def test_schema_maximum_recording_and_worker_frame_bounds():
+    _, conds = ref._sample(7, 64, "live")
+    slices = [list(range(w, len(conds), 4)) for w in range(4)]
+    limits = ref._frame_limits(conds, slices, 1, True)
+    assert sum(limits) > 256 * 1024 * 1024
+    assert ref._frame_limits(conds, [list(range(len(conds)))], 1, True)[0] > 256 * 1024 * 1024
+    for w, indices in enumerate(slices):
+        rows = []
+        for i in indices:
+            c = conds[i]
+            row = ref._failed_episode_row(c, i, "worker_failure")
+            event = {
+                "kind": "reorder", "step": c.max_steps,
+                "edges": [[a, b] for a in range(len(c.compound.steps))
+                          for b in range(a + 1, len(c.compound.steps))],
+                "validation_forced": True,
+            }
+            row["events"] = [event] * (1 + 2 * len(c.compound.steps))
+            row["events_fired"] = len(row["events"])
+            rows.append(row)
+        assert ref._valid_worker_summary((rows, {}), conds, indices)
+        limit_without_recording = ref._frame_limits(
+            conds, [indices], 0, False
+        )[0]
+        assert len(pickle.dumps((rows, {}), protocol=4)) <= limit_without_recording
+        assert len(pickle.dumps((rows, {}), protocol=4)) <= limits[w]
+
+
+def test_frame_limits_are_worker_local():
+    _, conds = ref._sample(7, 1, "live")
+    limits = ref._frame_limits(conds, [[0], [1]], 1, True)
+    assert limits[0] > limits[1] >= 1048576
+
+
+def test_legacy_v05_frame_limits_do_not_require_compound_fields(monkeypatch):
+    monkeypatch.setenv("NIST_PROFILE", "v05")
+    importlib.reload(ref)
+    assert not ref.COMPOUND
+    _, conds = ref._sample(7, 1, "live")
+    assert not hasattr(conds[0], "compound")
+    limits = ref._frame_limits(conds, [[0], [1]], 1, True)
+    assert limits[0] >= limits[1] >= 1048576
+
+
+def test_deserializer_system_exit_is_contained_to_worker(tmp_path, monkeypatch):
+    original = ref._worker
+
+    def system_exit_frame(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+
+        class Exit:
+            def __reduce__(self):
+                return (sys.exit, (23,))
+
+        conn.send(Exit())
+        time.sleep(60)
+
+    monkeypatch.setattr(ref, "_worker", system_exit_frame)
+    result, rows = _play(tmp_path, monkeypatch, "deserializer-system-exit", max_steps=0)
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    assert all(row["terminal_reason"] == "time_limit" for row in rows if row["episode"] % 2)
+
+
+@pytest.mark.parametrize("extended", [False, True])
+def test_announced_frame_size_is_bounded_before_payload_allocation(
+    tmp_path, monkeypatch, extended
+):
+    original = ref._worker
+
+    def huge_frame(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+        size = (1 << 40) if extended else (1 << 30)
+        conn._send_bytes(
+            struct.pack("!iQ", -1, size) if extended else struct.pack("!i", size)
+        )
+        while True:
+            try:
+                conn._send_bytes(b"x" * 65536)
+            except (BrokenPipeError, EOFError, OSError):
+                return
+
+    monkeypatch.setattr(ref, "_worker", huge_frame)
+    monkeypatch.setattr(ref.NistLiteReferee, "TRANSPORT_STALL_TIMEOUT_S", 60.0)
+    result, rows = _play(
+        tmp_path, monkeypatch, f"oversized-frame-{extended}", max_steps=0
+    )
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
 
 
 def test_malformed_worker_frame_is_recovered_without_hang(tmp_path, monkeypatch):
@@ -841,11 +1263,12 @@ def test_incomplete_summary_rows_become_worker_failure(tmp_path, monkeypatch):
                 msg = conn.recv()
                 if msg[0] == "obs":
                     conn.send((indices, np.zeros((len(indices), ref.OBS_W), np.float32)))
+                elif msg[0] == "act":
+                    conn.send(True)
                 elif msg[0] == "summary":
                     conn.send(([{"episode": i} for i in indices], {}))
                     return
-                else:
-                    conn.send(True)
+                # fail_all is ordered before summary and has no acknowledgement.
         finally:
             conn.close()
 
