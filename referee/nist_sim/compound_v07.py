@@ -1209,9 +1209,11 @@ class AssemblyIIIEpisode(CompoundEpisode):
             return
         if ev["kind"] == "misseat":
             # Partial unseat of a currently seated peg — insert/key/screw credit can drop.
+            payload = dict(ev, step=self.steps)
             seated = [i for i in range(self.n_pegs) if self.seated_now[i] and not self.peg_parked[i]]
             if seated:
                 i = int(seated[int(self.rng.integers(0, len(seated)))])
+                payload["peg"] = i
                 p, q = self.peg_pose(i)
                 lift = float(ev.get("lift", 0.010))
                 self._set_free(
@@ -1231,7 +1233,7 @@ class AssemblyIIIEpisode(CompoundEpisode):
                         if not self.step_done[k]:
                             self.step_progress[k] = 0.0
                 mujoco.mj_forward(self.model, self.data)
-            self.events_fired.append(dict(ev, step=self.steps))
+            self.events_fired.append(payload)
             return
         if ev["kind"] == "retarget":
             unfinished = [k for k, s in enumerate(self.cs.steps) if s.kind == "key" and not self.step_done[k]]
@@ -1488,6 +1490,14 @@ class AssemblyIIIEpisode(CompoundEpisode):
         return super()._step_state(k)
 
     def step(self, action: np.ndarray) -> None:
+        self._step_without_key_detent(action, key_detent=True)
+
+    def _step_without_key_detent(self, action: np.ndarray, *, key_detent: bool = False) -> None:
+        """Assembly III bookkeeping, with an optional legacy synthetic key cue.
+
+        Assembly IV calls this with ``key_detent=False`` so v0.7.5's randomized
+        detent cannot enter its dynamics RNG stream or observation.
+        """
         if self.done:
             return
         # Screw yaw must not free-spin: clear prev so the parent skip-accumulates, then apply
@@ -1512,23 +1522,23 @@ class AssemblyIIIEpisode(CompoundEpisode):
             at = self.step_done_at[k]
             if at is not None and int(at) >= 0:
                 self.step_done[k] = True
-        # Key detent on wrist yaw-torque while pressing inside an active key window.
-        # Physically grounded cue: F/T carries information only near the software check.
-        for k, s in enumerate(self.cs.steps):
-            if s.kind != "key" or self.step_done[k]:
-                continue
-            if not self._key_is_active(k):
-                continue
-            if not (self.seated_now[s.peg] or self._peg_in_hole(s.peg)):
-                continue
-            if not self._pressing_on_peg(s.peg):
-                continue
-            if self._peg_probe_frames[s.peg] < KEY_PROBE_FRAMES:
-                continue
-            if not self._key_aligned(s):
-                continue
-            tau = KEY_DETENT_TAU + float(self.rng.normal(0.0, KEY_DETENT_NOISE))
-            self._wrist_torque[2] = float(self._wrist_torque[2]) + tau
+        if key_detent:
+            # Legacy v0.7.5 key detent while pressing inside an active key window.
+            for k, s in enumerate(self.cs.steps):
+                if s.kind != "key" or self.step_done[k]:
+                    continue
+                if not self._key_is_active(k):
+                    continue
+                if not (self.seated_now[s.peg] or self._peg_in_hole(s.peg)):
+                    continue
+                if not self._pressing_on_peg(s.peg):
+                    continue
+                if self._peg_probe_frames[s.peg] < KEY_PROBE_FRAMES:
+                    continue
+                if not self._key_aligned(s):
+                    continue
+                tau = KEY_DETENT_TAU + float(self.rng.normal(0.0, KEY_DETENT_NOISE))
+                self._wrist_torque[2] = float(self._wrist_torque[2]) + tau
         # Decay retarget/disarm pulses (observable in task feat 2).
         for i in range(len(self._key_retarget_pulse)):
             if self._key_retarget_pulse[i] > 0:

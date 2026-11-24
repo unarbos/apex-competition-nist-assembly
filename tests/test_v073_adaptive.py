@@ -184,6 +184,7 @@ def test_misseat_clears_key_hold():
     e._fire_event(dict(kind="misseat", lift=0.010))
     assert e._key_hold[i] == 0
     assert e.seated_now[i] is False
+    assert e.events_fired[-1] == {"kind": "misseat", "lift": 0.010, "step": e.steps, "peg": i}
 
 
 def test_record_task_includes_touch_reveal():

@@ -457,6 +457,23 @@ def test_contact_cache_matches_direct_scan(conds):
     assert ep._touching_bodies_cache is None
 
 
+def test_v08_never_requests_legacy_key_detent_and_preserves_genuine_torque(conds, monkeypatch):
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(31))
+    called = []
+
+    def no_detent(action, *, key_detent=False):
+        called.append(key_detent)
+        # Contact-torque fixture at the legacy bookkeeping boundary: v0.8 must
+        # neither inject the random detent nor revert a jump greater than 0.10.
+        ep._wrist_torque[2] = 0.22
+
+    monkeypatch.setattr(ep, "_step_without_key_detent", no_detent)
+    ep._wrist_torque[2] = 0.0
+    ep.step(np.zeros(5))
+    assert called == [False]
+    assert ep._wrist_torque[2] == pytest.approx(0.22)
+
+
 def test_obs_dim_is_320(conds):
     ss = episode_seed_sequence(7, 0)
     r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
@@ -473,6 +490,38 @@ def test_v08_conditions_keep_easy_drift_invariant(conds):
     for c in conds:
         if c.difficulty_tier == "easy":
             assert c.bias_drift <= 0.5 * RANGES["bias_drift"][1] + 1e-12
+
+
+def test_key_shared_collar_and_stack_flags_are_preserved(conds):
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(17))
+    shared = {}
+    for step in ep.cs.steps:
+        if step.kind in ("collar", "stack") and any(
+            key.kind == "key" and key.peg == step.peg for key in ep.cs.steps
+        ):
+            shared[step.kind] = step.peg
+    assert set(shared) == {"collar", "stack"}
+    for kind, peg in shared.items():
+        ep._active_key = next(
+            k for k, step in enumerate(ep.cs.steps) if step.kind == "key" and step.peg == peg
+        )
+        ep._peg_touched[peg] = True
+        ep._peg_probe_frames[peg] = 99
+        obs = ep.observe(np.random.default_rng(23))
+        assert obs[184 + peg * 6 + 5] == (1.0 if kind == "collar" else 2.0)
+
+
+def test_generator_step_count_is_bounded_by_twenty(conds):
+    # Every peg has one insert/rework and at most one of key/twist/screw.
+    # There are at most four ring operations across all eight pegs.
+    for cond in conds:
+        steps = cond.compound.steps
+        peg_ops = [s for s in steps if s.kind in ("insert", "rework", "key", "twist", "screw")]
+        rings = [s for s in steps if s.kind in ("collar", "stack")]
+        assert len({s.peg for s in peg_ops if s.kind in ("insert", "rework")}) <= 8
+        assert len({s.peg for s in peg_ops if s.kind in ("key", "twist", "screw")}) <= 8
+        assert len(rings) <= 4
+        assert len(steps) <= 20
 
 
 def test_blueprint_longer_than_v07(conds):
@@ -1473,6 +1522,41 @@ def test_partial_requires_prerequisites_and_never_uses_legacy_progress():
             "insert_fraction": 1.0,
         },
     ) == PARTIAL_CAP_V08
+
+
+def test_physically_reachable_partial_credit_cap_is_0312():
+    """Producer gains, not the looser numeric clamp, bound transport/insert."""
+    from nist_sim.compound_v08 import (
+        ALIGN_CREDIT_V08,
+        INSERT_CREDIT_V08,
+        INSERT_GAIN_V08,
+        LIFT_CREDIT_V08,
+        PARTIAL_CAP_V08,
+        STABLE_CREDIT_V08,
+        TRANSPORT_CREDIT_V08,
+        TRANSPORT_GAIN_V08,
+        step_credit_v08,
+    )
+
+    reachable = (
+        LIFT_CREDIT_V08
+        + TRANSPORT_CREDIT_V08 * TRANSPORT_GAIN_V08
+        + INSERT_CREDIT_V08 * INSERT_GAIN_V08
+        + ALIGN_CREDIT_V08
+        + STABLE_CREDIT_V08
+    )
+    assert reachable == pytest.approx(0.312)
+    producer_maximum = {
+        "lift": True,
+        "transport": True,
+        "transport_fraction": TRANSPORT_GAIN_V08,
+        "align": True,
+        "stable": True,
+        "insert": True,
+        "insert_fraction": INSERT_GAIN_V08,
+    }
+    assert step_credit_v08(False, False, None, 920, producer_maximum) == pytest.approx(0.312)
+    assert PARTIAL_CAP_V08 == pytest.approx(0.36)  # nominal clamp; unchanged scoring
     assert step_credit_v08(False, False, None, 100, {"lift_fraction": 0.5}) == 0.5 * LIFT_CREDIT_V08
     assert step_credit_v08(False, False, None, 100, {"lift": True, "lift_fraction": 0.5}) == LIFT_CREDIT_V08
     assert step_credit_v08(False, False, None, 100, {"lift_fraction": 100.0}) == LIFT_CREDIT_V08

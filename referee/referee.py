@@ -308,7 +308,7 @@ def _valid_summary_row(row, cond, episode: int) -> bool:
         )
     ):
         return False
-    for sr in row["step_results"]:
+    for k, sr in enumerate(row["step_results"]):
         if not isinstance(sr, dict):
             return False
         keys = {"done": bool, "in_order": bool, "credit": (int, float)}
@@ -320,12 +320,28 @@ def _valid_summary_row(row, cond, episode: int) -> bool:
             })
         if any(k not in sr or not isinstance(sr[k], typ) for k, typ in keys.items()):
             return False
+        if "done_at" not in sr:
+            return False
+        done_at = sr["done_at"]
+        if done_at is not None and not _is_record_int(done_at):
+            return False
+        if done_at == -1:
+            # Only the real Assembly IV misseat path produces this sentinel:
+            # completion was undone, and its public event names the same peg.
+            if not ASSEMBLY_IV or sr["done"] or steps[k].kind not in ("insert", "rework") or not any(
+                isinstance(event, dict)
+                and event.get("kind") == "misseat"
+                and type(event.get("step")) is int
+                and 0 <= event["step"] <= row["steps"]
+                and type(event.get("peg")) is int
+                and event["peg"] == steps[k].peg
+                for event in row["events"]
+            ):
+                return False
+        elif done_at is not None and not 0 <= done_at <= row["steps"]:
+            return False
         if (
-            "done_at" not in sr
-            or sr["done_at"] is not None and (
-                not _is_record_int(sr["done_at"]) or not 0 <= sr["done_at"] <= row["steps"]
-            )
-            or any(type(sr[k]) is not bool for k in ("done", "in_order"))
+            any(type(sr[k]) is not bool for k in ("done", "in_order"))
             or any(not _is_record_number(sr[k]) for k, typ in keys.items() if typ == (int, float))
         ):
             return False
@@ -367,6 +383,59 @@ def _valid_worker_summary(response, conds, indices: list[int], reset_failures=fr
         # This also contains array-valued fields whose equality would otherwise
         # raise before an invalid worker summary can become deterministic zeroes.
         return False
+
+
+def _contain_invalid_summary_rows(response, conds, indices: list[int], reset_failures=frozenset()):
+    """Replace only invalid rows when a summary still has a trustworthy envelope.
+
+    Entirely missing or duplicate episode identities make a row-wise mapping unsafe;
+    those summaries retain the worker-level failure path. Valid siblings are never
+    rewritten, and a malformed reset-failure row becomes a worker_failure zero.
+    """
+    if not isinstance(response, tuple) or len(response) != 2:
+        return None
+    rows, traj = response
+    if not (
+        isinstance(rows, list)
+        and len(rows) == len(indices)
+        and isinstance(traj, dict)
+        and all(type(i) is int and i in indices and isinstance(frames, list) for i, frames in traj.items())
+    ):
+        return None
+    try:
+        if not all(isinstance(row, dict) and type(row.get("episode")) is int for row in rows):
+            return None
+        if [row["episode"] for row in rows] != indices:
+            return None
+        contained = []
+        for row, i in zip(rows, indices):
+            expected = (
+                _failed_episode_row(conds[i], i, "reset_failure")
+                if i in reset_failures else None
+            )
+            try:
+                valid = _valid_summary_row(row, conds[i], i)
+                if valid and expected is not None:
+                    # The reset-failure handshake identifies this row. Compare it
+                    # through JSON, not raw equality, so array values fail closed.
+                    valid = json.dumps(row, sort_keys=True, allow_nan=False) == json.dumps(
+                        expected, sort_keys=True, allow_nan=False
+                    )
+                if valid:
+                    # An extra non-JSON field is still an invalid episode row;
+                    # it must not poison otherwise valid siblings.
+                    json.dumps(row, allow_nan=False)
+            except (TypeError, ValueError, OverflowError):
+                valid = False
+            contained.append(
+                row if valid else _failed_episode_row(conds[i], i, "worker_failure")
+            )
+        # The episode identities above remain the only accepted trajectory keys;
+        # their frame payloads must be writable with the preserved records.
+        json.dumps(traj, allow_nan=False)
+        return contained, traj
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _worker_entry(
@@ -679,17 +748,22 @@ class NistLiteReferee(Referee):
                     return None
 
             def recv_worker(w: int, wait: bool = True):
-                """Receive complete frames without blocking on a partial live-writer frame."""
+                """Receive complete frames, draining a dead child's pipe to EOF."""
                 info = worker_info[w]
                 conn, proc = info["conn"], info["proc"]
+                draining = False
                 while w not in dead:
                     try:
+                        # Always retry a partial frame before polling or reading:
+                        # the previous read may have completed it in the buffer.
                         frame = _take_frame(info)
                         if frame is None:
                             break
                         if frame is not False:
                             return frame
-                        if info["recv_buffer"] or info["recv_expected"] is not None:
+                        if not draining and (
+                            info["recv_buffer"] or info["recv_expected"] is not None
+                        ):
                             if info["recv_stalled_since"] is None:
                                 info["recv_stalled_since"] = time.monotonic()
                             if time.monotonic() - info["recv_stalled_since"] >= self.TRANSPORT_STALL_TIMEOUT_S:
@@ -705,8 +779,13 @@ class NistLiteReferee(Referee):
                     except (EOFError, OSError):
                         break
                     if not proc.is_alive():
-                        break
-                    if not wait:
+                        # The child can exit after send() while its final frame is
+                        # still buffered. Drain until EOF, not a live-writer timeout.
+                        # Empty userspace bytes are not EOF: the complete frame may
+                        # still be queued in the kernel. Only a zero-byte read is EOF.
+                        # A truncated final frame then fails closed.
+                        draining = True
+                    elif not wait:
                         return False
                     try:
                         select.select([conn.fileno()], [], [], 0.1)
@@ -809,9 +888,14 @@ class NistLiteReferee(Referee):
                 if player_fault:
                     break
                 if pending_actions is None:
+                    # Every live worker starts observing before the parent waits for
+                    # any one of them. Preserve worker order in the concatenated batch.
+                    observation_workers = [
+                        w for w in range(len(worker_info)) if send_worker(w, ("obs",))
+                    ]
                     parts = []
-                    for w in range(len(worker_info)):
-                        if not send_worker(w, ("obs",)) or (part := recv_worker(w)) is None:
+                    for w in observation_workers:
+                        if (part := recv_worker(w)) is None:
                             continue
                         if not _valid_observation_reply(part, worker_info[w]["indices"]):
                             fail_worker(w)
@@ -843,10 +927,14 @@ class NistLiteReferee(Referee):
                     }
                     idle.update(w for w, (p_ids, _) in parts if not p_ids)
                     steps_used += 1
+                # Send every outstanding action before waiting for acknowledgements.
+                # Workers simulate in parallel while the player sees one unchanged,
+                # deterministically ordered batch at the next control boundary.
                 for w, action_map in pending_actions.items():
-                    if w in delivered_workers:
-                        continue
-                    if not send_worker(w, ("act", action_map)):
+                    if w not in delivered_workers:
+                        send_worker(w, ("act", action_map))
+                for w in pending_actions:
+                    if w in delivered_workers or w in dead:
                         continue
                     ack = recv_worker(w)
                     if ack is None:
@@ -863,15 +951,28 @@ class NistLiteReferee(Referee):
                 # this keeps every survivor on one logical control-step boundary.
 
             reason = "player_fault" if player_fault else "time_limit"
-            for w in range(len(worker_info)):
-                if send_worker(w, ("fail_all", reason)):
-                    recv_worker(w)
-            for w in range(len(worker_info)):
-                if not send_worker(w, ("summary",)):
-                    continue
+            finalizing_workers = [
+                w for w in range(len(worker_info)) if send_worker(w, ("fail_all", reason))
+            ]
+            for w in finalizing_workers:
+                recv_worker(w)
+            summary_workers = [
+                w for w in range(len(worker_info)) if send_worker(w, ("summary",))
+            ]
+            for w in summary_workers:
                 response = recv_worker(w)
                 if response is not None:
-                    if not _valid_worker_summary(response, conds, worker_info[w]["indices"], contained_reset_failures):
+                    summary_valid = _valid_worker_summary(
+                        response, conds, worker_info[w]["indices"], contained_reset_failures
+                    )
+                    if not summary_valid:
+                        # A malformed episode record is contained to that episode.
+                        # An invalid envelope still fails the worker: there is no safe
+                        # one-to-one mapping for missing, duplicate, or unreadable rows.
+                        response = _contain_invalid_summary_rows(
+                            response, conds, worker_info[w]["indices"], contained_reset_failures
+                        )
+                    if response is None:
                         fail_worker(w)
                         continue
                     r, t = response

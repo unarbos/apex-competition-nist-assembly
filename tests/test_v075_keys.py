@@ -20,10 +20,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 os.environ["NIST_PROFILE"] = "v07"
 
 from nist_sim import conditions as C  # noqa: E402
-from nist_sim.compound import TASK_PEG_FEAT, wrap  # noqa: E402
+from nist_sim.compound import CompoundEpisode, TASK_PEG_FEAT, wrap  # noqa: E402
 from nist_sim.compound_v07 import (  # noqa: E402
     KEY_CLOSE_NOISE,
     KEY_CLOSE_SOFT,
+    KEY_DETENT_NOISE,
     KEY_DETENT_TAU,
     KEY_HOLD,
     KEY_PROBE_FRAMES,
@@ -94,6 +95,39 @@ def test_key_obs_publishes_noisy_closeness_not_absolute_yaw():
     assert KEY_CLOSE_NOISE > 0.0
     assert KEY_DETENT_TAU > 0.0
     assert abs(e._key_hand_yaw() - s.key_yaw) < 1e-5
+
+
+def test_v07_legacy_key_detent_is_preserved(monkeypatch):
+    """The shared Assembly IV physics refactor must retain Assembly III's cue."""
+    e = _ep(53, 0, per=8)
+    k = next(k for k, s in enumerate(e.cs.steps) if s.kind == "key")
+    s = e.cs.steps[k]
+    e.seated_now[s.peg] = True
+    e._peg_touched[s.peg] = True
+    e._peg_probe_frames[s.peg] = KEY_PROBE_FRAMES
+    e._active_key = k
+    monkeypatch.setattr(e, "_key_is_active", lambda _k: True)
+    monkeypatch.setattr(e, "_pressing_on_peg", lambda _i: True)
+    monkeypatch.setattr(e, "_key_aligned", lambda _s: True)
+    monkeypatch.setattr(e, "_gripper_touching", lambda _b: False)
+    original_rng = e.rng
+
+    class ZeroDetentNoise:
+        def normal(self, mean, sigma, size=None):
+            if size is not None:
+                return original_rng.normal(mean, sigma, size)
+            assert (mean, sigma) == (0.0, KEY_DETENT_NOISE)
+            return 0.0
+
+        def __getattr__(self, name):
+            return getattr(original_rng, name)
+
+    monkeypatch.setattr(e, "rng", ZeroDetentNoise())
+    e._wrist_torque[2] = 0.0
+    monkeypatch.setattr(e, "_update_wrist_wrench", lambda: None)
+    monkeypatch.setattr(CompoundEpisode, "step", lambda self, action: None)
+    e.step(np.zeros(5))
+    assert e._wrist_torque[2] == pytest.approx(KEY_DETENT_TAU)
 
 
 def test_retarget_sets_observable_pulse():

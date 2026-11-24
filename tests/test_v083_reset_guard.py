@@ -1,4 +1,4 @@
-"""v0.8.3 reset and worker-failure guards, using the real fork/pipe path."""
+"""v0.8.3/v0.8.4 reset, worker-transport, and summary-containment guards."""
 
 from __future__ import annotations
 
@@ -68,6 +68,9 @@ def _play(tmp_path, monkeypatch, label, player=None, workers=2, max_steps=None, 
     started = time.monotonic()
     result = ref.NistLiteReferee().play_game(ctx, [player or ZeroPlayer()])
     elapsed = time.monotonic() - started
+    reap_test_helper = getattr(ref._worker, "reap_test_helper", None)
+    if reap_test_helper is not None:
+        reap_test_helper()
     assert elapsed < 60.0
     rows = [json.loads(line) for line in (tmp_path / label / "episodes.jsonl").read_text().splitlines()][1:]
     assert result.metadata["details"]["player_fault"] is None
@@ -166,6 +169,65 @@ def test_all_reset_worker_preserves_reset_and_surviving_rows(
     assert "worker_failure" not in result.metadata["details"]["terminal_reasons"]
     assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
     assert result.metadata["details"]["player_calls"] == 3
+
+
+def test_observation_and_action_requests_reach_all_workers_before_receives(tmp_path, monkeypatch):
+    original = ref._worker
+    ctx = mp.get_context("fork")
+    peer_received = {phase: ctx.Event() for phase in ("obs", "act")}
+
+    def gated_worker(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+        try:
+            for phase in ("obs", "act"):
+                assert conn.recv()[0] == phase
+                # A sequential parent is now waiting for this reply and cannot
+                # send the peer's matching request. Parallel sends release us.
+                if not peer_received[phase].wait(10):
+                    os._exit(24)
+                conn.send(
+                    (indices, np.zeros((len(indices), ref.OBS_W), np.float32))
+                    if phase == "obs" else True
+                )
+            assert conn.recv()[0] == "fail_all"
+            conn.send(True)
+            assert conn.recv()[0] == "summary"
+            _, conds = ref._sample(seed, per_stratum, split)
+            rows = [ref._failed_episode_row(conds[i], i, "time_limit") for i in indices]
+            conn.send((rows, {}))
+        finally:
+            conn.close()
+
+    def peer_worker(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 1:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+        for expected in ("obs", "act"):
+            assert conn.recv()[0] == expected
+            peer_received[expected].set()
+            conn.send(
+                (indices, np.zeros((len(indices), ref.OBS_W), np.float32))
+                if expected == "obs" else True
+            )
+        assert conn.recv()[0] == "fail_all"
+        conn.send(True)
+        assert conn.recv()[0] == "summary"
+        _, conds = ref._sample(seed, per_stratum, split)
+        rows = [ref._failed_episode_row(conds[i], i, "time_limit") for i in indices]
+        conn.send((rows, {}))
+        conn.close()
+
+    def phased_worker(conn, seed, per_stratum, indices, stride, split):
+        return (gated_worker if indices[0] == 0 else peer_worker)(
+            conn, seed, per_stratum, indices, stride, split
+        )
+
+    monkeypatch.setattr(ref, "_worker", phased_worker)
+    result, rows = _play(tmp_path, monkeypatch, "parallel-request-phases", max_steps=1)
+    assert all(event.is_set() for event in peer_received.values())
+    assert result.metadata["details"]["player_fault"] is None
 
 
 def test_normal_two_worker_round_preserves_full_lockstep(tmp_path, monkeypatch):
@@ -327,6 +389,77 @@ def _terminate_referee_workers(parent_pid):
         os.kill(parent_pid, signal.SIGTERM)
     except (FileNotFoundError, ProcessLookupError):
         pass
+
+
+def test_exited_worker_final_frame_is_drained_before_eof(tmp_path, monkeypatch):
+    original = ref._worker
+
+    def send_final_frame_then_exit(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+        conn.close()
+        os._exit(0)
+
+    monkeypatch.setattr(ref, "_worker", send_final_frame_then_exit)
+    result, rows = _play(tmp_path, monkeypatch, "final-frame-at-exit", max_steps=3)
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    # A valid final frame, not process liveness, completes startup. The next
+    # request finds the empty slice idle; healthy siblings retain their score path.
+    assert result.metadata["details"]["player_fault"] is None
+    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+
+
+def test_exited_worker_truncated_final_frame_still_fails(tmp_path, monkeypatch):
+    original = ref._worker
+
+    def truncated_final_frame(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn._send(struct.pack("!i", 100) + b"abc")
+        conn.close()
+        os._exit(0)
+
+    monkeypatch.setattr(ref, "_worker", truncated_final_frame)
+    result, rows = _play(tmp_path, monkeypatch, "truncated-final-frame", max_steps=3)
+    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+
+
+def test_exited_worker_final_summary_is_preserved(tmp_path, monkeypatch):
+    """A complete summary sent immediately before exit is not worker death."""
+    original = ref._worker
+
+    def final_summary_then_exit(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        _, conds = ref._sample(seed, per_stratum, split)
+        conn.send(("reset_failures", []))
+        try:
+            for _ in range(3):
+                assert conn.recv()[0] == "obs"
+                conn.send((indices, np.zeros((len(indices), ref.OBS_W), np.float32)))
+                assert conn.recv()[0] == "act"
+                conn.send(True)
+            assert conn.recv()[0] == "fail_all"
+            conn.send(True)
+            # Queue the final response and close without ever waiting for its
+            # request. EOF draining must preserve this complete final frame.
+            rows = []
+            for i in indices:
+                row = ref._failed_episode_row(conds[i], i, "time_limit")
+                del row["failure_reason"]
+                rows.append(row)
+            conn.send((rows, {}))
+        finally:
+            conn.close()
+        os._exit(0)
+
+    monkeypatch.setattr(ref, "_worker", final_summary_then_exit)
+    result, rows = _play(tmp_path, monkeypatch, "final-summary-at-exit", max_steps=3)
+    assert not any(row["terminal_reason"] == "worker_failure" for row in rows)
+    assert [row["terminal_reason"] for row in rows] == ["time_limit"] * 8
+    assert all(row["score"] == 0.0 for row in rows)
 
 
 def test_malformed_worker_frame_is_recovered_without_hang(tmp_path, monkeypatch):
@@ -665,96 +798,305 @@ def test_non_finite_observation_becomes_worker_failure(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("field,bad_value", [
     ("success_step", -1),
-    ("peg_first_seat_step", 1),
-    ("done_at", -1),
+    ("peg_first_seat_step", 4),
+    ("done_at", -2),
+    ("done_at", -1.0),
+    ("done_at", np.array([-1])),
 ])
-def test_out_of_range_summary_timestamp_becomes_worker_failure(
+def test_out_of_range_summary_timestamp_replaces_only_that_episode(
     tmp_path, monkeypatch, field, bad_value
 ):
     original = ref._worker
 
-    def invalid_timestamp(conn, seed, per_stratum, indices, stride, split):
+    def mutate_timestamp(rows, traj):
+        row = rows[0]
+        assert row["episode"] == 0
+        if field == "done_at":
+            row["step_results"][0][field] = bad_value
+        elif field == "peg_first_seat_step":
+            row[field] = [bad_value] * row["n_pegs"]
+        else:
+            row[field] = bad_value
+
+    # Install this fixture's horizon before building the shared real-worker
+    # helper. Its fork inherits the same three-step limit as the parent.
+    original_sample = ref._sample
+
+    def short_sample(seed, per_stratum, split):
+        ranges, conds = original_sample(seed, per_stratum, split)
+        for cond in conds:
+            cond.max_steps = 3
+        return ranges, conds
+
+    monkeypatch.setattr(ref, "_sample", short_sample)
+    monkeypatch.setattr(ref, "_worker", _summary_mutation_worker(mutate_timestamp))
+    result, rows = _play(tmp_path, monkeypatch, f"invalid-{field}")
+    _assert_failure_rows(rows, "worker_failure", [0])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] != 0)
+
+    assert result.metadata["details"]["terminal_reasons"]["worker_failure"] == 1
+
+
+@pytest.mark.parametrize("mutation", ["done", "missing_event", "other_peg"])
+def test_done_at_sentinel_requires_real_misseat_row(tmp_path, monkeypatch, mutation):
+    """The timestamp alone must not turn a forged row into a valid summary."""
+
+    def invalidate_sentinel(rows, traj):
+        row = rows[0]
+        target = next(k for k, step in enumerate(row["task"]["steps"]) if step["kind"] in ("insert", "rework"))
+        row["step_results"][target]["done_at"] = -1
+        row["step_results"][target]["done"] = mutation == "done"
+        if mutation == "done":
+            row["events"] = [{"kind": "misseat", "step": 1, "peg": row["task"]["steps"][target]["peg"]}]
+            row["events_fired"] = 1
+        elif mutation == "other_peg":
+            other = next(
+                step for step in row["task"]["steps"]
+                if step["kind"] in ("insert", "rework") and step["peg"] != row["task"]["steps"][target]["peg"]
+            )
+            row["events"] = [{"kind": "misseat", "step": 1, "peg": other["peg"]}]
+            row["events_fired"] = 1
+
+    monkeypatch.setattr(ref, "_worker", _summary_mutation_worker(invalidate_sentinel))
+    result, rows = _play(tmp_path, monkeypatch, f"invalid-misseat-{mutation}", max_steps=3)
+    _assert_failure_rows(rows, "worker_failure", [0])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+    assert result.metadata["details"]["terminal_reasons"]["worker_failure"] == 1
+
+
+def test_misseat_done_at_sentinel_preserves_normal_score(monkeypatch):
+    """The real event leaves a legitimate sentinel and keeps independent credit."""
+    from nist_sim.compound_v08 import (
+        AssemblyIVEpisode,
+        compound_score_v08,
+        step_results_v08,
+    )
+    from nist_sim.env import MAX_OPEN, PEG_LEN, _yaw_quat
+
+    _, conds = ref._sample(7, 1, "live")
+    conds[0].max_steps = 3
+    ep = AssemblyIVEpisode(conds[0], np.random.default_rng(9))
+    ep.step(np.zeros(5))
+    target_k = next(k for k, s in enumerate(ep.cs.steps) if s.kind in ("insert", "rework"))
+    survivor = next(
+        other for other, step in enumerate(ep.cs.steps)
+        if other != target_k and step.kind in ("insert", "rework")
+        and not ep.peg_parked[step.peg]
+        and all(ep.cs.steps[p].kind == "insert" for p in step.prereq)
+    )
+
+    def seat(k):
+        i = ep.cs.steps[k].peg
+        hx, hy = ep.slot_xy[i]
+        ep._set_free(
+            ep.peg_qadr[i], ep.peg_vadr[i],
+            [hx, hy, PEG_LEN / 2], _yaw_quat(float(ep.slot_yaw[i])),
+        )
+        ep.seated_now[i] = True
+        ep.step_done[k] = True
+        ep.step_in_order[k] = all(ep.step_done[p] for p in ep.cs.steps[k].prereq)
+        ep.step_done_at[k] = ep.steps
+        ep.data.qpos[2] = 0.16
+        ep.grip = MAX_OPEN
+        ep._apply_ctrl()
+
+    for prereq in ep.cs.steps[survivor].prereq:
+        seat(prereq)
+    seat(survivor)
+    assert ep._physical_step_ok(survivor)[0]
+    for other, step in enumerate(ep.cs.steps):
+        if step.kind in ("insert", "rework"):
+            ep.seated_now[step.peg] = other == survivor
+    seat(target_k)
+    original_rng = ep.rng
+    original_integers = original_rng.integers
+
+    class ChooseTarget:
+        def integers(self, low, high=None):
+            # _fire_event chooses from the physically seated candidate list.
+            # Keep its real selection logic and its one draw, but choose the
+            # intended candidate rather than the independent survivor.
+            assert low == 0
+            assert original_integers(0, 1) == 0
+            seated = [i for i in range(ep.n_pegs) if ep.seated_now[i] and not ep.peg_parked[i]]
+            return seated.index(ep.cs.steps[target_k].peg)
+
+        def __getattr__(self, name):
+            return getattr(original_rng, name)
+
+    monkeypatch.setattr(ep, "rng", ChooseTarget())
+    ep._fire_event({"kind": "misseat", "lift": 0.007})
+    assert ep.step_done_at[target_k] == -1
+    assert ep.events_fired[-1]["kind"] == "misseat"
+    assert ep.events_fired[-1]["peg"] == ep.cs.steps[target_k].peg
+    ep.fail("time_limit")
+
+    results = step_results_v08(ep)
+    assert results[target_k]["done_at"] == -1
+    assert results[target_k]["done"] is False
+    assert results[survivor]["done"] is True
+    score = compound_score_v08(ep)
+    assert score["n_done"] > 0
+    assert score["score"] > 0.0
+
+    ctx = mp.get_context("fork")
+    parent, child = ctx.Pipe()
+    proc = ctx.Process(target=ref._worker, args=(child, 7, 1, [0], 0, "live"))
+    monkeypatch.setattr(ref, "_make_episode", lambda cond, rng: ep)
+    original_sample = ref._sample
+
+    def short_sample(seed, per_stratum, split):
+        ranges, sampled = original_sample(seed, per_stratum, split)
+        for cond in sampled:
+            cond.max_steps = 3
+        return ranges, sampled
+
+    monkeypatch.setattr(ref, "_sample", short_sample)
+    proc.start()
+    child.close()
+    try:
+        assert parent.recv() == ("reset_failures", [])
+        parent.send(("fail_all", "time_limit"))
+        assert parent.recv() is True
+        parent.send(("summary",))
+        response = parent.recv()
+        assert ref._valid_worker_summary(response, conds, [0])
+        rows, _ = response
+        assert rows[0]["terminal_reason"] == "time_limit"
+        assert rows[0]["steps_done"] > 0
+        assert rows[0]["score"] > 0.0
+        assert any(event["kind"] == "misseat" for event in rows[0]["events"])
+        assert rows[0]["step_results"][target_k]["done_at"] == -1
+        assert rows[0]["step_results"][target_k]["done"] is False
+        assert rows[0]["step_results"][survivor]["done"] is True
+    finally:
+        parent.close()
+        if proc.is_alive():
+            proc.terminate()
+        proc.join(timeout=2)
+
+
+def test_invalid_summary_row_preserves_positive_sibling_scores(tmp_path, monkeypatch):
+    original = ref._worker
+
+    def invalid_one_positive_sibling(conn, seed, per_stratum, indices, stride, split):
         if indices[0] != 0:
             return original(conn, seed, per_stratum, indices, stride, split)
-        ctx = mp.get_context("fork")
-        parent, child = ctx.Pipe()
-        proc = ctx.Process(target=original, args=(child, seed, per_stratum, indices, stride, split))
-        # The fixture's non-daemon helper is owned and reaped by the test process.
-        proc.daemon = False
-        proc.start()
-        child.close()
+        conn.send(("reset_failures", []))
         try:
-            conn.send(parent.recv())
             while True:
                 msg = conn.recv()
                 if msg[0] == "obs":
-                    parent.send(msg)
-                    conn.send(parent.recv())
+                    conn.send((indices, np.zeros((len(indices), ref.OBS_W), np.float32)))
                 elif msg[0] == "summary":
-                    parent.send(msg)
-                    rows, traj = parent.recv()
-                    for row in rows:
-                        if field == "done_at":
-                            row["step_results"][0][field] = bad_value
-                        elif field == "peg_first_seat_step":
-                            row[field] = [bad_value] * row["n_pegs"]
+                    _, conds = ref._sample(seed, per_stratum, split)
+                    rows = []
+                    for i in indices:
+                        row = ref._failed_episode_row(conds[i], i, "time_limit")
+                        row["steps"] = 3
+                        row["mean_sq_action"] = 0.0
+                        row["terminal_reason"] = "time_limit"
+                        del row["failure_reason"]
+                        if i != 0:
+                            row["score"] = 0.125
+                            row["steps_done"] = 1
+                            row["steps_in_order"] = 1
+                            row["step_results"][0]["done"] = True
+                            row["step_results"][0]["in_order"] = True
+                            row["step_results"][0]["done_at"] = 1
+                            row["step_results"][0]["credit"] = 0.9
+                            row["credit_by_kind"][row["task"]["steps"][0]["kind"]] = 0.9
                         else:
-                            row[field] = bad_value
-                    conn.send((rows, traj))
+                            row["score"] = float("nan")
+                        rows.append(row)
+                    conn.send((rows, {}))
                     return
                 else:
-                    parent.send(msg)
-                    conn.send(parent.recv())
+                    conn.send(True)
         finally:
             conn.close()
-            parent.close()
-            proc.join(timeout=10)
-            if proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=2)
 
-    monkeypatch.setattr(ref, "_worker", invalid_timestamp)
-    result, rows = _play(tmp_path, monkeypatch, f"invalid-{field}", max_steps=3)
-    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
-    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+    monkeypatch.setattr(ref, "_worker", invalid_one_positive_sibling)
+    result, rows = _play(tmp_path, monkeypatch, "positive-summary-siblings", max_steps=3)
+    _assert_failure_rows(rows, "worker_failure", [0])
+    assert [r["score"] for r in rows if r["episode"] in (2, 4, 6)] == [0.125] * 3
+    assert all(r["steps_done"] == 1 for r in rows if r["episode"] in (2, 4, 6))
+    assert result.raw_scores == [pytest.approx(3 * 0.125 / 8)]
+    assert result.metadata["details"]["terminal_reasons"]["worker_failure"] == 1
 
 
 def _summary_mutation_worker(mutation, announced_reset_failures=()):
-    """Run the real worker in a helper and mutate only its public summary."""
+    """Run the real worker in a non-daemon test-process helper and mutate its summary."""
     original = ref._worker
+    original_sample = ref._sample
 
-    def mutate_summary(conn, seed, per_stratum, indices, stride, split):
-        if indices[0] != 0:
-            return original(conn, seed, per_stratum, indices, stride, split)
-        ctx = mp.get_context("fork")
-        parent, child = ctx.Pipe()
-        proc = ctx.Process(target=original, args=(child, seed, per_stratum, indices, stride, split))
-        proc.daemon = False
+    def short_sample(seed, per_stratum, split):
+        ranges, conds = original_sample(seed, per_stratum, split)
+        for cond in conds:
+            cond.max_steps = 3
+        return ranges, conds
+
+    # Fork in the test process, but only after installing the same short horizon
+    # that _play installs in the referee. Otherwise this helper's valid siblings
+    # and the parent's conditions describe different episodes.
+    ref._sample = short_sample
+    ctx = mp.get_context("fork")
+    parent, child = ctx.Pipe()
+    indices = list(range(0, 8, 2))
+    proc = ctx.Process(target=original, args=(child, 7, 1, indices, 0, "live"))
+    try:
         proc.start()
+    finally:
+        ref._sample = original_sample
         child.close()
-        try:
-            startup = parent.recv()
-            assert startup[0] == "reset_failures"
-            conn.send(("reset_failures", sorted(set(startup[1]) | set(announced_reset_failures))))
-            while True:
-                msg = conn.recv()
-                if msg[0] == "summary":
-                    parent.send(msg)
-                    rows, traj = parent.recv()
-                    mutation(rows, traj)
-                    conn.send((rows, traj))
-                    return
-                parent.send(msg)
-                conn.send(parent.recv())
-        finally:
-            conn.close()
-            parent.close()
-            proc.join(timeout=10)
-            if proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=2)
 
-    return mutate_summary
+    def reap_helper():
+        if proc.is_alive():
+            proc.terminate()
+        proc.join(timeout=2)
+
+    atexit.register(reap_helper)
+    try:
+        startup = parent.recv()
+        assert startup[0] == "reset_failures"
+        startup_message = ("reset_failures", sorted(set(startup[1]) | set(announced_reset_failures)))
+        parent.send(startup_message)
+
+        def mutate_summary(conn, seed, per_stratum, actual_indices, stride, split):
+            if actual_indices[0] != 0:
+                return original(conn, seed, per_stratum, actual_indices, stride, split)
+            conn.send(startup_message)
+            try:
+                while True:
+                    msg = conn.recv()
+                    if msg[0] == "summary":
+                        parent.send(msg)
+                        rows, traj = parent.recv()
+                        mutation(rows, traj)
+                        conn.send((rows, traj))
+                        return
+                    if msg[0] == "obs":
+                        conn.send((actual_indices, np.zeros((len(actual_indices), ref.OBS_W), np.float32)))
+                    else:
+                        # Preserve real action stepping and fail_all bookkeeping so
+                        # valid siblings have exactly the referee's expected horizon.
+                        parent.send(msg)
+                        conn.send(parent.recv())
+            finally:
+                conn.close()
+
+        def finish():
+            reap_helper()
+            parent.close()
+            atexit.unregister(reap_helper)
+
+        mutate_summary.reap_test_helper = finish
+        return mutate_summary
+    except BaseException:
+        parent.close()
+        reap_helper()
+        atexit.unregister(reap_helper)
+        raise
 
 
 def test_oversized_summary_number_becomes_worker_failure(tmp_path, monkeypatch):
@@ -765,8 +1107,8 @@ def test_oversized_summary_number_becomes_worker_failure(tmp_path, monkeypatch):
     result, rows = _play(
         tmp_path, monkeypatch, "oversized-summary-number", max_steps=3, stride=0
     )
-    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
-    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+    _assert_failure_rows(rows, "worker_failure", [0])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] != 0)
     assert result.raw_scores == [0.0]
 
 
@@ -778,8 +1120,8 @@ def test_non_json_summary_payload_becomes_worker_failure(tmp_path, monkeypatch):
     result, rows = _play(
         tmp_path, monkeypatch, "non-json-summary-payload", max_steps=3, stride=0
     )
-    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
-    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+    _assert_failure_rows(rows, "worker_failure", [0])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] != 0)
     assert result.raw_scores == [0.0]
 
 
@@ -794,8 +1136,8 @@ def test_array_valued_reset_summary_is_contained_as_worker_failure(tmp_path, mon
     result, rows = _play(
         tmp_path, monkeypatch, "array-reset-summary", max_steps=3, stride=0
     )
-    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
-    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+    _assert_failure_rows(rows, "worker_failure", [0])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] != 0)
     assert result.raw_scores == [0.0]
 
 
@@ -811,8 +1153,8 @@ def test_announced_reset_failure_cannot_return_nonzero_summary(tmp_path, monkeyp
     result, rows = _play(
         tmp_path, monkeypatch, "nonzero-reset-summary", max_steps=3, stride=0
     )
-    _assert_failure_rows(rows, "worker_failure", [0, 2, 4, 6])
-    assert all(row["steps"] == 3 for row in rows if row["episode"] % 2)
+    _assert_failure_rows(rows, "worker_failure", [0])
+    assert all(row["steps"] == 3 for row in rows if row["episode"] != 0)
     assert result.raw_scores == [0.0]
 
 

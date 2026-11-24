@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.4 — 2026-11-24
+
+- Accept the legitimate `done_at: -1` sentinel after a physical misseat, tied to
+  the event's public peg identity. Preserve valid summary rows byte-for-byte and
+  contain an invalid episode row to its own
+  deterministic `worker_failure` zero instead of discarding its worker siblings.
+  Missing, duplicate, or misordered row identities and invalid summary envelopes
+  still fail the whole worker slice.
+- Drain a worker's complete final frame through EOF after child exit, retaining
+  malformed/truncated-frame failure handling. Restore send-to-all-then-receive
+  observation/action scheduling while preserving deterministic batch ordering,
+  pending-action delivery, and worker-death lockstep.
+- Remove v0.8's synthetic key-detent path without reverting genuine wrist-yaw
+  torque. Preserve collar and stack flags in key pegs' shared observation channel.
+- Document the generator's 20-step structural maximum, the 0.312 reachable
+  partial-credit maximum under the unchanged nominal 0.36 clamp, the first-12-step
+  detailed blueprint encoding, and the 920-action horizon. Observation/action
+  contracts, milestone weights, task rules, scoring, resources, and released
+  image digest pins remain unchanged.
+
 ## 0.8.3 — 2026-11-23
 
 - Contain episode-construction failures in referee workers. A failed reset
