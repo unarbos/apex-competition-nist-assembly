@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import http.client
 import json
+import contextlib
 import multiprocessing as mp
 import multiprocessing.connection as mp_connection
+import io
+import pickle
 import os
 import select
 import socket
@@ -33,7 +36,71 @@ from typing import Any
 
 import numpy as np
 
-# Live task is Assembly IV (v0.8). Set before nist_sim is imported (env.py reads physics_dt).
+
+def _limited_pickle_loads(payload: bytes):
+    """Decode BYTEARRAY8 only after its declared body is actually present."""
+    stream = io.BytesIO(payload)
+
+    class BoundedUnpickler(pickle._Unpickler):
+        def load_bytearray8(self):
+            size = struct.unpack("<Q", self.read(8))[0]
+            current_frame = self._unframer.current_frame
+            if current_frame is not None:
+                # _Unframer has already moved the outer stream past this frame.
+                remaining = current_frame.getbuffer().nbytes - current_frame.tell()
+            else:
+                remaining = len(payload) - stream.tell()
+            if size > remaining:
+                raise pickle.UnpicklingError("worker bytearray body exceeds available payload")
+            value = bytearray(size)
+            self.readinto(value)
+            self.append(value)
+
+        dispatch = pickle._Unpickler.dispatch.copy()
+        dispatch[pickle.BYTEARRAY8[0]] = load_bytearray8
+
+    return BoundedUnpickler(stream).load()
+
+
+def _frame_limits(conds, slices, stride: int, records_enabled: bool):
+    """Conservative per-worker response allowances from public task dimensions."""
+    limits = []
+    for indices in slices:
+        row_limit = 0
+        for i in indices:
+            c = conds[i]
+            row = _failed_episode_row(c, i, "worker_failure")
+            if COMPOUND:
+                # Real rows add bounded public events and successful-step metadata.
+                row["events"] = [{}] * (1 + 2 * len(c.compound.steps))
+                row["events_fired"] = len(row["events"])
+            row_limit += len(json.dumps(row, allow_nan=False).encode()) + 16384
+        trajectory_limit = 0
+        if records_enabled and stride:
+            for i in indices:
+                if i % stride:
+                    continue
+                c = conds[i]
+                frame = {
+                    "t": c.max_steps,
+                    "pegs": [{"pos": [0.0] * 3, "quat": [0.0] * 4} for _ in c.pegs],
+                    "hand": [0.0] * 4,
+                    "action": [0.0] * ACT_DIM,
+                    "seated": [False] * len(c.pegs),
+                }
+                if COMPOUND:
+                    frame["collars"] = [
+                        {"pos": [0.0] * 3, "quat": [0.0] * 4}
+                        for _ in c.compound.collars
+                    ]
+                    frame["parked"] = [False] * len(c.pegs)
+                    frame["collar_parked"] = [False] * len(c.compound.collars)
+                trajectory_limit += c.max_steps * (len(json.dumps(frame, allow_nan=False).encode()) + 128)
+        # Pickle framing is no larger than the JSON-style conservative bound plus
+        # container/numpy overhead. Small control frames use the same lower bound.
+        limits.append(max(1048576, 2 * (row_limit + trajectory_limit) + 65536))
+    return limits
+
 # NIST_PROFILE=v07 / v06 still select prior compound tasks for A/B and regression.
 os.environ.setdefault("NIST_PROFILE", "v08")
 
@@ -308,7 +375,7 @@ def _valid_summary_row(row, cond, episode: int) -> bool:
         )
     ):
         return False
-    for sr in row["step_results"]:
+    for k, sr in enumerate(row["step_results"]):
         if not isinstance(sr, dict):
             return False
         keys = {"done": bool, "in_order": bool, "credit": (int, float)}
@@ -320,12 +387,28 @@ def _valid_summary_row(row, cond, episode: int) -> bool:
             })
         if any(k not in sr or not isinstance(sr[k], typ) for k, typ in keys.items()):
             return False
+        if "done_at" not in sr:
+            return False
+        done_at = sr["done_at"]
+        if done_at is not None and not _is_record_int(done_at):
+            return False
+        if done_at == -1:
+            # Only the real Assembly IV misseat path produces this sentinel:
+            # completion was undone, and its public event names the same peg.
+            if not ASSEMBLY_IV or sr["done"] or steps[k].kind not in ("insert", "rework") or not any(
+                isinstance(event, dict)
+                and event.get("kind") == "misseat"
+                and type(event.get("step")) is int
+                and 0 <= event["step"] <= row["steps"]
+                and type(event.get("peg")) is int
+                and event["peg"] == steps[k].peg
+                for event in row["events"]
+            ):
+                return False
+        elif done_at is not None and not 0 <= done_at <= row["steps"]:
+            return False
         if (
-            "done_at" not in sr
-            or sr["done_at"] is not None and (
-                not _is_record_int(sr["done_at"]) or not 0 <= sr["done_at"] <= row["steps"]
-            )
-            or any(type(sr[k]) is not bool for k in ("done", "in_order"))
+            any(type(sr[k]) is not bool for k in ("done", "in_order"))
             or any(not _is_record_number(sr[k]) for k, typ in keys.items() if typ == (int, float))
         ):
             return False
@@ -367,6 +450,59 @@ def _valid_worker_summary(response, conds, indices: list[int], reset_failures=fr
         # This also contains array-valued fields whose equality would otherwise
         # raise before an invalid worker summary can become deterministic zeroes.
         return False
+
+
+def _contain_invalid_summary_rows(response, conds, indices: list[int], reset_failures=frozenset()):
+    """Replace only invalid rows when a summary still has a trustworthy envelope.
+
+    Entirely missing or duplicate episode identities make a row-wise mapping unsafe;
+    those summaries retain the worker-level failure path. Valid siblings are never
+    rewritten, and a malformed reset-failure row becomes a worker_failure zero.
+    """
+    if not isinstance(response, tuple) or len(response) != 2:
+        return None
+    rows, traj = response
+    if not (
+        isinstance(rows, list)
+        and len(rows) == len(indices)
+        and isinstance(traj, dict)
+        and all(type(i) is int and i in indices and isinstance(frames, list) for i, frames in traj.items())
+    ):
+        return None
+    try:
+        if not all(isinstance(row, dict) and type(row.get("episode")) is int for row in rows):
+            return None
+        if [row["episode"] for row in rows] != indices:
+            return None
+        contained = []
+        for row, i in zip(rows, indices):
+            expected = (
+                _failed_episode_row(conds[i], i, "reset_failure")
+                if i in reset_failures else None
+            )
+            try:
+                valid = _valid_summary_row(row, conds[i], i)
+                if valid and expected is not None:
+                    # The reset-failure handshake identifies this row. Compare it
+                    # through JSON, not raw equality, so array values fail closed.
+                    valid = json.dumps(row, sort_keys=True, allow_nan=False) == json.dumps(
+                        expected, sort_keys=True, allow_nan=False
+                    )
+                if valid:
+                    # An extra non-JSON field is still an invalid episode row;
+                    # it must not poison otherwise valid siblings.
+                    json.dumps(row, allow_nan=False)
+            except (TypeError, ValueError, OverflowError):
+                valid = False
+            contained.append(
+                row if valid else _failed_episode_row(conds[i], i, "worker_failure")
+            )
+        # The episode identities above remain the only accepted trajectory keys;
+        # their frame payloads must be writable with the preserved records.
+        json.dumps(traj, allow_nan=False)
+        return contained, traj
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _worker_entry(
@@ -467,7 +603,8 @@ def _worker(conn, seed: int, per_stratum: int, indices: list[int], stride: int, 
                 for i in indices:
                     if eps[i] is not None and not eps[i].done:
                         eps[i].fail(msg[1])
-                conn.send(True)
+                # The request stream is ordered: the following summary is the
+                # completion acknowledgement. A separate round trip adds nothing.
             elif msg[0] == "summary":
                 rows = []
                 for i in indices:
@@ -552,6 +689,9 @@ class NistLiteReferee(Referee):
         max_steps = max(c.max_steps for c in conds)
         workers = max(1, int(cfg["workers"]))
         slices = [list(range(w, n, workers)) for w in range(workers)]
+        # Schema-valid large recording rounds may exceed the process memory budget;
+        # these transport bounds are not a promise that every such round fits 2 GiB.
+        frame_limits = _frame_limits(conds, slices, stride, cfg["records_enabled"])
 
         ctx_mp = mp.get_context("fork")
         worker_info = []
@@ -620,18 +760,20 @@ class NistLiteReferee(Referee):
         player_fault = None
         rows, traj = [], {}
         dead = set()
-        idle = set()
         contained_reset_failures = set()
         try:
             # A pipe becoming readable/writable says nothing about completion of
             # its next framed message. Keep incremental buffers and never call
             # the stdlib's blocking recv()/send() on a live worker socket.
-            for info in worker_info:
+            for w, info in enumerate(worker_info):
                 info["sock"] = socket.socket(fileno=info["conn"].fileno())
                 info["sock"].setblocking(False)
                 info["recv_buffer"] = bytearray()
                 info["recv_expected"] = None
+                info["max_frame"] = frame_limits[w]
                 info["recv_stalled_since"] = None
+                info["request_failed"] = False
+                info["request_failed_at"] = None
                 info["send_buffer"] = bytearray()
                 info["send_stalled_since"] = None
 
@@ -652,74 +794,203 @@ class NistLiteReferee(Referee):
                 info["proc"].join(timeout=1.0)
 
             def _take_frame(info):
-                """Return a complete pickled frame, False if incomplete, or None if invalid."""
+                """Return a complete frame, an incomplete sentinel, or None if invalid."""
                 buf, expected = info["recv_buffer"], info["recv_expected"]
+                limit = info["max_frame"]
                 if expected is None:
                     if len(buf) < 4:
-                        return False
+                        return _FRAME_INCOMPLETE
                     expected = struct.unpack("!i", buf[:4])[0]
-                    del buf[:4]
-                    if expected < -1:
+                    if expected < -1 or expected > limit:
                         return None
+                    del buf[:4]
                     info["recv_expected"] = expected
                 if expected == -1:
                     if len(buf) < 8:
-                        return False
+                        return _FRAME_INCOMPLETE
                     expected = struct.unpack("!Q", buf[:8])[0]
+                    if expected > limit:
+                        return None
                     del buf[:8]
                     info["recv_expected"] = expected
                 if len(buf) < expected:
-                    return False
+                    return _FRAME_INCOMPLETE
                 payload = bytes(buf[:expected])
                 del buf[:expected]
                 info["recv_expected"] = None
                 try:
-                    return mp_connection._ForkingPickler.loads(payload)
-                except Exception:
+                    # Reject scalar allocation declarations that exceed the bytes
+                    # actually present in this already size-bounded frame.
+                    return _limited_pickle_loads(payload)
+                except BaseException:
+                    # Deserialization is worker input processing: even SystemExit
+                    # or KeyboardInterrupt from a reducer is contained to its rows.
                     return None
 
-            def recv_worker(w: int, wait: bool = True):
-                """Receive complete frames without blocking on a partial live-writer frame."""
+            _FRAME_INCOMPLETE = object()
+
+            def recv_worker(w: int):
+                """Read available bytes without waiting behind another worker."""
                 info = worker_info[w]
-                conn, proc = info["conn"], info["proc"]
-                while w not in dead:
-                    try:
-                        frame = _take_frame(info)
-                        if frame is None:
-                            break
-                        if frame is not False:
-                            return frame
-                        if info["recv_buffer"] or info["recv_expected"] is not None:
-                            if info["recv_stalled_since"] is None:
-                                info["recv_stalled_since"] = time.monotonic()
-                            if time.monotonic() - info["recv_stalled_since"] >= self.TRANSPORT_STALL_TIMEOUT_S:
-                                break
-                        chunk = os.read(conn.fileno(), 65536)
+                if w in dead:
+                    return None
+                try:
+                    # Always retry a partial frame before polling or reading: the
+                    # previous read may have completed it in the buffer.
+                    frame = _take_frame(info)
+                    if frame is None:
+                        fail_worker(w)
+                        return None
+                    if frame is not _FRAME_INCOMPLETE:
+                        return frame
+                    if (
+                        info["recv_buffer"] or info["recv_expected"] is not None
+                    ) and info["recv_stalled_since"] is not None:
+                        if time.monotonic() - info["recv_stalled_since"] >= self.TRANSPORT_STALL_TIMEOUT_S:
+                            fail_worker(w)
+                            return None
+                    # A continuously readable peer must not monopolize the shared
+                    # receive loop. Larger valid summaries continue on the next
+                    # readiness pass.
+                    for _ in range(16):
+                        chunk = os.read(info["conn"].fileno(), 65536)
                         if not chunk:
-                            break
+                            fail_worker(w)
+                            return None
                         info["recv_buffer"].extend(chunk)
                         info["recv_stalled_since"] = None
+                        frame = _take_frame(info)
+                        if frame is None:
+                            # A complete malformed frame is a worker failure even
+                            # when its peer keeps the descriptor open indefinitely.
+                            fail_worker(w)
+                            return None
+                        if frame is not _FRAME_INCOMPLETE:
+                            return frame
+                    # The descriptor may remain readable at a read-budget boundary
+                    # without another readiness event. Start a finite stall timer
+                    # even if the next nonblocking read does not report EAGAIN.
+                    if info["recv_stalled_since"] is None:
+                        info["recv_stalled_since"] = time.monotonic()
+                    return _FRAME_INCOMPLETE
+                except BlockingIOError:
+                    now = time.monotonic()
+                    if (
+                        info["recv_buffer"] or info["recv_expected"] is not None
+                    ) and info["recv_stalled_since"] is None:
+                        info["recv_stalled_since"] = now
+                    return _FRAME_INCOMPLETE
+                except (EOFError, OSError):
+                    fail_worker(w)
+                    return None
+
+            def wait_workers(pending, *, write: bool, waits):
+                """Wait for all worker descriptors without select()'s FD_SETSIZE."""
+                poller = select.poll()
+                events = select.POLLOUT if write else select.POLLIN
+                for w in sorted(pending):
+                    poller.register(worker_info[w]["conn"].fileno(), events)
+                poller.poll(max(0.0, min(waits)) * 1000 if waits else None)
+
+            def recv_workers(workers, timeout: float | None = None) -> dict[int, object]:
+                """Wait once for every worker, then decode all available replies.
+
+                Completion order never changes the returned worker-to-frame mapping.
+                Exited workers are drained until actual EOF, and incomplete frames
+                retain their bounded stall timeout across readiness events.
+                """
+                pending = {w for w in workers if w not in dead}
+                replies = {}
+                ordered = sorted(pending)
+                position = 0
+                deadline = None if timeout is None else time.monotonic() + timeout
+                while pending:
+                    # Rotate the first worker after each readiness wait so a busy
+                    # peer cannot repeatedly delay every sibling's valid reply.
+                    for offset in range(len(ordered)):
+                        w = ordered[(position + offset) % len(ordered)]
+                        if w not in pending:
+                            continue
+                        part = recv_worker(w)
+                        if part is _FRAME_INCOMPLETE:
+                            continue
+                        if part is not None:
+                            replies[w] = part
+                        pending.remove(w)
+                    if not pending:
+                        break
+                    now = time.monotonic()
+                    for w in sorted(pending):
+                        info = worker_info[w]
+                        failed_at = info["request_failed_at"]
+                        if failed_at is not None and now - failed_at >= self.TRANSPORT_STALL_TIMEOUT_S:
+                            # A queued response may survive an observed EPIPE, but
+                            # no later request can reach this peer. Bound only this
+                            # post-failure drain, not healthy worker computation.
+                            fail_worker(w)
+                    pending.difference_update(dead)
+                    if not pending:
+                        break
+                    position = (position + 1) % len(ordered)
+                    stalled = [
+                        w for w in pending
+                        if worker_info[w]["recv_stalled_since"] is not None
+                        or worker_info[w]["request_failed_at"] is not None
+                    ]
+                    waits = [
+                        min(
+                            value
+                            for value in (
+                                worker_info[w]["recv_stalled_since"],
+                                worker_info[w]["request_failed_at"],
+                            )
+                            if value is not None
+                        ) + self.TRANSPORT_STALL_TIMEOUT_S - now
+                        for w in stalled
+                    ]
+                    if deadline is not None:
+                        waits.append(deadline - now)
+                    if waits and min(waits) <= 0:
+                        if deadline is not None and deadline <= now:
+                            break
+                        for w in stalled:
+                            info = worker_info[w]
+                            stalled_since = min(
+                                value for value in (
+                                    info["recv_stalled_since"],
+                                    info["request_failed_at"],
+                                ) if value is not None
+                            )
+                            if now - stalled_since >= self.TRANSPORT_STALL_TIMEOUT_S:
+                                fail_worker(w)
+                                pending.discard(w)
                         continue
-                    except BlockingIOError:
-                        pass
-                    except (EOFError, OSError):
-                        break
-                    if not proc.is_alive():
-                        break
-                    if not wait:
-                        return False
                     try:
-                        select.select([conn.fileno()], [], [], 0.1)
+                        # A single readiness wait serves all workers; there is no
+                        # per-worker 0.1 s wait or worker-order receive barrier.
+                        # poll() supports inherited descriptors beyond FD_SETSIZE.
+                        wait_workers(pending, write=False, waits=waits)
                     except (OSError, ValueError):
-                        break
-                fail_worker(w)
-                return None
+                        for w in sorted(pending):
+                            fail_worker(w)
+                        pending.clear()
+                return replies
+
+            def send_workers(workers, msg) -> set[int]:
+                """Queue one request for every worker before waiting for any pipe."""
+                for w in workers:
+                    send_worker(w, msg)
+                return flush_workers(workers)
 
             def send_worker(w: int, msg) -> bool:
-                if w in dead or (w in idle and msg[0] != "summary"):
+                """Queue and attempt one send; never wait on another worker."""
+                if w in dead:
                     return False
                 info = worker_info[w]
-                proc, fd = info["proc"], info["conn"].fileno()
+                if info["request_failed"]:
+                    # No later command can reach a peer whose request direction
+                    # failed. Its already queued response still belongs to recv.
+                    return False
                 if not info["send_buffer"]:
                     payload = mp_connection._ForkingPickler.dumps(msg)
                     header = (
@@ -728,51 +999,82 @@ class NistLiteReferee(Referee):
                         else struct.pack("!i", len(payload))
                     )
                     info["send_buffer"].extend(header + payload)
-                while w not in dead:
+                return flush_worker(w)
+
+            def flush_worker(w: int) -> bool:
+                info = worker_info[w]
+                if w in dead:
+                    return False
+                fd = info["conn"].fileno()
+                while info["send_buffer"]:
                     try:
-                        if info["send_buffer"]:
-                            written = os.write(fd, info["send_buffer"])
-                            del info["send_buffer"][:written]
-                            info["send_stalled_since"] = None
-                            if info["send_buffer"]:
-                                info["send_stalled_since"] = time.monotonic()
-                                raise BlockingIOError
-                        return True
+                        written = os.write(fd, info["send_buffer"])
+                        del info["send_buffer"][:written]
+                        info["send_stalled_since"] = None
                     except BlockingIOError:
-                        pass
+                        if info["send_stalled_since"] is None:
+                            info["send_stalled_since"] = time.monotonic()
+                        return False
                     except (BrokenPipeError, EOFError, OSError):
+                        info["request_failed"] = True
+                        info["request_failed_at"] = time.monotonic()
+                        # These request bytes cannot be delivered. Never append a
+                        # later request to them or retry their unwritten suffix;
+                        # receive-side validation still decides whether an already
+                        # queued complete response survives the half-close.
+                        info["send_buffer"].clear()
+                        info["send_stalled_since"] = None
+                        return False
+                return True
+
+            def flush_workers(workers) -> set[int]:
+                """Drain all blocked sends together without losing queued bytes."""
+                pending = {
+                    w for w in workers
+                    if w not in dead and not worker_info[w]["request_failed"]
+                    and not flush_worker(w)
+                }
+                while pending:
+                    now = time.monotonic()
+                    for w in sorted(pending):
+                        info = worker_info[w]
+                        if (
+                            info["send_stalled_since"] is not None
+                            and now - info["send_stalled_since"] >= self.TRANSPORT_STALL_TIMEOUT_S
+                        ):
+                            fail_worker(w)
+                    pending.difference_update(dead)
+                    pending = {w for w in pending if not worker_info[w]["request_failed"]}
+                    if not pending:
                         break
-                    if not proc.is_alive():
-                        break
-                    if info["send_stalled_since"] is None:
-                        info["send_stalled_since"] = time.monotonic()
-                    if time.monotonic() - info["send_stalled_since"] >= self.TRANSPORT_STALL_TIMEOUT_S:
-                        break
+                    waits = [
+                        worker_info[w]["send_stalled_since"] + self.TRANSPORT_STALL_TIMEOUT_S - now
+                        for w in pending
+                        if worker_info[w]["send_stalled_since"] is not None
+                    ]
                     try:
-                        select.select([], [fd], [], 0.1)
+                        wait_workers(pending, write=True, waits=waits)
                     except (OSError, ValueError):
+                        for w in sorted(pending):
+                            fail_worker(w)
+                        pending.clear()
                         break
-                fail_worker(w)
-                return False
+                    pending = {w for w in pending if not flush_worker(w)}
+                # A failed request direction does not invalidate an already-queued
+                # response. Keep every live worker in the receive set; a missing
+                # response still fails closed through frame validation or EOF.
+                return {w for w in workers if w not in dead}
 
             awaiting_startup = set(range(len(worker_info)))
             while awaiting_startup:
-                # Wait for readable startup pipes without letting one slow
-                # construction hide another worker's death or busy-spinning.
-                pending = [worker_info[w]["conn"] for w in sorted(awaiting_startup)]
-                try:
-                    readable = set(mp_connection.wait(pending, timeout=0.1))
-                except (EOFError, OSError):
-                    readable = set()
-                progress = False
+                initial_replies = recv_workers(awaiting_startup, timeout=0.1)
                 for w in sorted(awaiting_startup):
-                    if worker_info[w]["conn"] not in readable and worker_info[w]["proc"].is_alive():
+                    if w not in initial_replies:
+                        if w in dead:
+                            awaiting_startup.remove(w)
                         continue
-                    initial = recv_worker(w, wait=False)
-                    if initial is False:
-                        continue
+                    initial = initial_replies[w]
                     awaiting_startup.remove(w)
-                    progress = True
                     if (
                         not isinstance(initial, tuple)
                         or len(initial) != 2
@@ -785,11 +1087,6 @@ class NistLiteReferee(Referee):
                             fail_worker(w)
                         continue
                     contained_reset_failures.update(initial[1])
-                if not readable and not progress:
-                    # Recheck all liveness even if wait() failed on a closed pipe.
-                    for w in sorted(awaiting_startup):
-                        if not worker_info[w]["proc"].is_alive():
-                            recv_worker(w)
 
             try:
                 player.reset(
@@ -809,19 +1106,23 @@ class NistLiteReferee(Referee):
                 if player_fault:
                     break
                 if pending_actions is None:
+                    # Every live worker starts observing before the parent waits for
+                    # any one of them. Preserve worker order in the concatenated batch.
+                    observation_workers = send_workers(
+                        [w for w in range(len(worker_info)) if w not in dead], ("obs",)
+                    )
                     parts = []
-                    for w in range(len(worker_info)):
-                        if not send_worker(w, ("obs",)) or (part := recv_worker(w)) is None:
+                    replies = recv_workers(observation_workers)
+                    for w in sorted(observation_workers):
+                        if w not in replies:
                             continue
+                        part = replies[w]
                         if not _valid_observation_reply(part, worker_info[w]["indices"]):
                             fail_worker(w)
                             continue
                         parts.append((w, part))
                     ids = [i for _, (p_ids, _) in parts for i in p_ids]
                     if not ids:
-                        # An all-reset or already-complete slice has no fail_all
-                        # acknowledgment to consume; its next reply is its summary.
-                        idle.update(w for w, (p_ids, _) in parts if not p_ids)
                         break
                     obs = np.concatenate([o for _, (_, o) in parts], axis=0)
                     try:
@@ -841,14 +1142,22 @@ class NistLiteReferee(Referee):
                     pending_actions = {
                         w: {i: by_id[i] for i in p_ids} for w, (p_ids, _) in parts if p_ids
                     }
-                    idle.update(w for w, (p_ids, _) in parts if not p_ids)
                     steps_used += 1
+                # Send every outstanding action before waiting for acknowledgements.
+                # Workers simulate in parallel while the player sees one unchanged,
+                # deterministically ordered batch at the next control boundary.
                 for w, action_map in pending_actions.items():
-                    if w in delivered_workers:
+                    if w not in delivered_workers:
+                        send_worker(w, ("act", action_map))
+                pending_acks = flush_workers([
+                    w for w in pending_actions
+                    if w not in delivered_workers and w not in dead
+                ])
+                replies = recv_workers(pending_acks)
+                for w in sorted(pending_acks):
+                    if w not in replies:
                         continue
-                    if not send_worker(w, ("act", action_map)):
-                        continue
-                    ack = recv_worker(w)
+                    ack = replies[w]
                     if ack is None:
                         continue
                     if ack is not True:
@@ -863,15 +1172,27 @@ class NistLiteReferee(Referee):
                 # this keeps every survivor on one logical control-step boundary.
 
             reason = "player_fault" if player_fault else "time_limit"
-            for w in range(len(worker_info)):
-                if send_worker(w, ("fail_all", reason)):
-                    recv_worker(w)
-            for w in range(len(worker_info)):
-                if not send_worker(w, ("summary",)):
-                    continue
-                response = recv_worker(w)
+            # Finalization needs only the ordered fail_all -> summary request pair.
+            # Queue both for every live worker before collecting any summary. There
+            # is no fail_all acknowledgement round trip, including for idle workers.
+            summary_workers = [w for w in range(len(worker_info)) if w not in dead]
+            send_workers(summary_workers, ("fail_all", reason))
+            send_workers(summary_workers, ("summary",))
+            replies = recv_workers(summary_workers)
+            for w in summary_workers:
+                response = replies.get(w)
                 if response is not None:
-                    if not _valid_worker_summary(response, conds, worker_info[w]["indices"], contained_reset_failures):
+                    summary_valid = _valid_worker_summary(
+                        response, conds, worker_info[w]["indices"], contained_reset_failures
+                    )
+                    if not summary_valid:
+                        # A malformed episode record is contained to that episode.
+                        # An invalid envelope still fails the worker: there is no safe
+                        # one-to-one mapping for missing, duplicate, or unreadable rows.
+                        response = _contain_invalid_summary_rows(
+                            response, conds, worker_info[w]["indices"], contained_reset_failures
+                        )
+                    if response is None:
                         fail_worker(w)
                         continue
                     r, t = response

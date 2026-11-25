@@ -15,7 +15,7 @@ hill-climbable per-step cues, (2) no key windows on natural seat / slot symmetri
 - **No free-start credit.** v0.8 removes grasped and near-hole spawns, including
   extra pegs added by graph generation. Reset-only states and passive end poses
   do not complete a step or earn partial credit.
-- **Longer blueprints:** typically ~8–28 steps (mean ~12 on public seeds) with denser
+- **Longer blueprints:** up to 20 steps with denser
   precedence, more keys (up to 3), stacks, screws, reworks, and waves (up to 4 on c4).
 - **Equal per-step weight.** Farming inserts/collars cannot dominate. Score is the mean
   over blueprint steps of verified credit.
@@ -46,10 +46,12 @@ For each blueprint step:
    `credit = (0.80 + 0.20 · time_term) · (0.70 + 0.30 · precision)`.
 3. If verified but out of order: `credit = 0.03`.
 4. If an insert, rework, collar, or stack step is unfinished, unblocked and its
-   prerequisites are done, at most `0.36` from five bounded,
+   prerequisites are done, the nominal numeric clamp is `0.36` for five bounded,
    action-earned physical evidence buckets: `0.12` for sustained grasp/lift, and `0.06`
    each for held transport toward the real hole, held insertion, near-target
    alignment, and stable release through the final perturbation-settle window.
+   The producer's `0.60` gains on transport and insertion limit the actual
+   reachable maximum to `0.312 = 0.12 + 2 × (0.06 × 0.60) + 2 × 0.06`.
    An earned, physically valid mated interference-fit stack ring and its upright
    (`seated_now`) carrier peg are exempt from the direct finalization impulses.
    A merely in-hole carrier is not exempt. The kick angle is still
@@ -99,7 +101,10 @@ the images bake:
 
 - Observation `[B, 320]` → action `[B, 5]` at 25 Hz.
 - Blueprint encoding occupies the last 32 floats (tier, step kinds, peg ids, blocked/done,
-  graph size). See `compound_v08.py` module docstring.
+  graph size). Detailed per-step kind/peg/blocked/done encoding covers only the
+  first 12 steps. Later steps have no additional per-step entries; remaining
+  channels carry graph-wide aggregates, active-key index, horizon fraction, and
+  lost-part count. See `compound_v08.py` module docstring.
 - Records remain `nist_lite_record/4` with `nist_profile: v08` and per-step precision/stability.
   Assembly IV history omits `key_yaw` and `key_tol` from task steps: history is
   player-visible after a round, not a private replay cache. The older profiles'

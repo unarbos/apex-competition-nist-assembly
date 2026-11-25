@@ -2,20 +2,24 @@
 
 Hard reset vs v0.7.x. Design goals (Macrocosmos / crux + owner brief):
 
-- Procedural blueprints of many steps (target ~8–28), dense precedence, waves.
+- Procedural blueprints of up to 20 steps, dense precedence, waves.
 - Randomized geometry, tolerances, and dynamics (mass / friction / gain / latency).
 - Partial observability: blueprint structure is published; answer-leaking cues are not.
   No key closeness, wrist detent, or retarget pulse. Absolute key yaw stays hidden.
 - Exploit-resistant scoring: equal per-step weight; completed credit requires a
   physically verified end state that survives an end-of-episode perturbation.
-  Unfinished steps have three small, action-earned physical milestones (lift,
-  target alignment, stable release), with no credit for reset-only states.
+  Unfinished steps have bounded, action-earned physical evidence for lift,
+  transport, insertion, target alignment, and stable release. Their nominal
+  numeric clamp is 0.36; producer gains limit the reachable maximum to 0.312.
   Ceiling of 1.0 is essentially unreachable.
 - Closes the v0.7.5 hole class: slot-aligned key freebies, D-flat auto-arm, and cue
   hill-climbs that completed keys without a real index search.
 
 Observation is **320-d** (288-d Assembly III layout + 32-d blueprint encoding). Action
-stays 5-d. Old 288-input ONNX policies are rejected by the player image.
+stays 5-d. The last 32 observation floats provide detailed per-step encoding
+only for the first 12 blueprint steps. Remaining channels carry graph-wide
+aggregates, active-key index, horizon fraction, and lost-part count, not further
+per-step entries. Old 288-input ONNX policies are rejected by the player image.
 
 Eval cost stays sim-horizon bounded (``MAX_HORIZON_V08``) for the ~600 s / 64-ep / 2-CPU bar.
 """
@@ -153,7 +157,8 @@ PERTURB_SETTLE_ZERO = True
 # Tier mix: more hard episodes than v0.7 so the ceiling stays far away.
 TIER_FRACTIONS_V08 = (0.20, 0.30, 0.30, 0.20)
 TIER_CFG_V08 = {
-    # Target step counts: c1 ~8–12, c2 ~10–16, c3 ~14–20, c4 ~18–28.
+    # These fractions control composition, not a 28-step generator: at most
+    # two peg operations per peg (8 pegs) plus four ring operations = 20 steps.
     "c1": dict(
         extra_pegs=1, collar_frac=0.20, twist_frac=0.15, screw_frac=0.25, rework_frac=0.22,
         stack_frac=0.45, key_frac=0.55, waves=(1, 2), edge_p=0.22, event_p=0.28, slack=1.55,
@@ -893,25 +898,11 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             return
         self._snapshot_parts_v08()
         self._action_earned_v08 = True
-        # Run parent Assembly III step, then strip answer-leaking detent torque.
-        wrist_before = float(self._wrist_torque[2]) if hasattr(self, "_wrist_torque") else 0.0
-        super().step(action)
-        # Remove detent torque the parent may have injected (v0.7.5 cue).
-        if hasattr(self, "_wrist_torque"):
-            # Recompute: keep physical torque only — drop synthetic detent by restoring
-            # any jump larger than a soft-contact scale while pressing a keyed peg.
-            # Safer: zero the detent by subtracting KEY_DETENT if we detect key press path.
-            # Parent adds ~0.22 N·m; clamp wrist torque z to the pre-step value when the
-            # only change was the synthetic detent (no real contact impulse that large).
-            # Simplest seal: never publish detent — observe uses forces after this, so
-            # overwrite torque z with a contact-only estimate from mj_data if available.
-            try:
-                # Prefer raw sensor-less contact torque proxy already in parent; strip bump.
-                if abs(float(self._wrist_torque[2]) - wrist_before) > 0.10:
-                    # Likely detent; revert toward pre-step.
-                    self._wrist_torque[2] = wrist_before
-            except Exception:
-                pass
+        # Assembly IV does not use the v0.7.5 synthetic key-detent cue. In
+        # particular, never infer a detent from a large torque change: genuine
+        # wrist contact must remain observable. Other legacy completion
+        # bookkeeping remains identical to the Assembly III implementation.
+        self._step_without_key_detent(action)
         self._update_milestones_v08()
         for k, s in enumerate(self.cs.steps):
             if s.kind == "key" and self.step_done[k] and not math.isfinite(self._key_precision_v08[k]):
@@ -1131,9 +1122,10 @@ class AssemblyIVEpisode(AssemblyIIIEpisode):
             # Strip closeness / retarget pulse / key_tol leak. Keep blocked flag only.
             o7[b + 2] = 0.0
             o7[b + 3] = 0.0
-            # feat 4 already blocked; clear tol packing in feat 5 if it held key_tol.
-            if o7[b + 5] != 0.0 and o7[b + 5] < 2.5:
-                # key_tol*10 is typically 0.35–0.55; collar flags are 1 or 2.
+            # feat 4 already blocked; the legacy writer can only put key_tol*10
+            # in feat 5 when that channel is zero. Clear that cue while retaining
+            # the inherited collar=1 / stack=2 flags on a shared key peg.
+            if 0.0 < o7[b + 5] < 1.0:
                 o7[b + 5] = 0.0
             # Publish a coarse "key present / needs index" mark without answer geometry.
             revealed = self._params_revealed(s)
