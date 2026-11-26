@@ -1091,6 +1091,45 @@ def test_rework_spawn_validation_also_checks_clutter(conds, monkeypatch):
     assert not ep._spawn_ok()
 
 
+@pytest.mark.parametrize("board", [0, 4, 42])
+def test_rework_spawn_never_penetrates_wrong_hole_or_earns_extraction(conds, board):
+    """An incompatible wrong-hole fit must be extractable, not pre-intersected."""
+    import mujoco
+    from nist_sim.conditions import slot_world_xy
+    from nist_sim.env import BLOCK_H, PEG_LEN
+
+    ep = AssemblyIVEpisode(conds[board], np.random.default_rng(23))
+    assert ep._rework_wrong
+    assert ep.steps == 0
+    for i, wrong_slot in ep._rework_wrong.items():
+        p, _ = ep.peg_pose(i)
+        bottom = float(p[2] - PEG_LEN / 2)
+        assert BLOCK_H < bottom < BLOCK_H + 0.012
+        assert not ep._rework_extracted(i)
+        assert not ep._extracted[i]
+        for k, step in enumerate(ep.cs.steps):
+            if step.kind == "rework" and step.peg == i:
+                assert not ep.step_done[k]
+        for con in ep.data.contact[:ep.data.ncon]:
+            bodies = {ep.model.geom_bodyid[con.geom1], ep.model.geom_bodyid[con.geom2]}
+            names = [ep.model.geom(g).name for g in (con.geom1, con.geom2)]
+            if ep.peg_body[i] in bodies and any(name.startswith(f"h{wrong_slot}_") for name in names):
+                assert con.dist >= -1e-7
+        # The fallback must preserve the same non-penetrating, unearned start.
+        ep._teleport_safe_grid()
+        p, _ = ep.peg_pose(i)
+        wx, wy = slot_world_xy(ep.c.board_xy, ep.c.board_yaw, ep.c.slots[wrong_slot])
+        np.testing.assert_allclose(p[:2], [wx, wy], atol=1e-6)
+        assert BLOCK_H < p[2] - PEG_LEN / 2 < BLOCK_H + 0.012
+        assert not ep._rework_extracted(i)
+        mujoco.mj_forward(ep.model, ep.data)
+        for con in ep.data.contact[:ep.data.ncon]:
+            bodies = {ep.model.geom_bodyid[con.geom1], ep.model.geom_bodyid[con.geom2]}
+            names = [ep.model.geom(g).name for g in (con.geom1, con.geom2)]
+            if ep.peg_body[i] in bodies and any(name.startswith(f"h{wrong_slot}_") for name in names):
+                assert con.dist >= -1e-7
+
+
 def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
     from nist_sim.env import PEG_LEN
 
