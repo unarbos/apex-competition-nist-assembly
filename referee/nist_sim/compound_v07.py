@@ -219,8 +219,9 @@ STACK_SEAT_XY = 0.0026
 STACK_SEAT_Z_CLEAR = 0.0024
 # Screw press: palm must be on the peg (touch). Free-twist open-grip scripts still get 0.
 PRESS_PALM_MARGIN = 0.001
-# Rework pegs sit deep enough that casual yanks miss; privileged extract_routine still clears.
-REWORK_SEAT_DEPTH = 0.0050
+# A wrong hole can be smaller than, or a different shape from, the peg. Seat the
+# peg just above the block instead of intersecting a wall it cannot pass through.
+REWORK_SEAT_DEPTH = -0.0001
 # Stack rings use a slight interference fit so a deliberate peg-top place can rest in the
 # mate zone (clearance-fit rings free-fall ~4 mm in <1 control frame and can never hold).
 # Mate zone + hold tightened after image-eval showed revealed kings completing ~half of stacks.
@@ -667,12 +668,13 @@ class AssemblyIIIEpisode(CompoundEpisode):
         self._pick_active_key()
 
     def _seat_in_wrong_slot(self, i: int) -> None:
-        """Place peg shallowly over the wrong hole (extractable; full-depth jams)."""
+        """Rest the peg over the wrong hole without penetrating incompatible walls."""
         ws = self._rework_wrong[i]
         spec = self.c.slots[ws]
         hx, hy = slot_world_xy(self.c.board_xy, self.c.board_yaw, spec)
         yaw = spec.yaw + self.c.board_yaw
-        # Bottom just under the block top — looks "wrong-slotted" but a yank clears it.
+        # A wrong slot is not guaranteed to fit this peg. Starting inside its lip
+        # can make extraction impossible; above the block every shape can be lifted.
         z = (BLOCK_H - REWORK_SEAT_DEPTH) + PEG_LEN / 2
         self._set_free(
             self.peg_qadr[i], self.peg_vadr[i],

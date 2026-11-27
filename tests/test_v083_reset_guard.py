@@ -764,6 +764,98 @@ def test_continuous_partial_frame_does_not_starve_siblings(tmp_path, monkeypatch
     assert all(row["terminal_reason"] == "time_limit" for row in rows if row["episode"] % 2)
 
 
+def test_readable_partial_frame_survives_sibling_decode_delay(tmp_path, monkeypatch):
+    """Bytes queued during a sibling's decode are read before the stall check."""
+    original = ref._worker
+    original_loads = ref._limited_pickle_loads
+    original_read = ref.os.read
+    original_socket = ref.socket.socket
+    ctx = mp.get_context("fork")
+    prefix_sent = ctx.Event()
+    prefix_read = ctx.Event()
+    send_remainder = ctx.Event()
+    _, conds = ref._sample(7, 1, "live")
+    for cond in conds:
+        cond.max_steps = 3
+    partial_rows = []
+    for i in (0, 2, 4, 6):
+        row = ref._failed_episode_row(conds[i], i, "time_limit")
+        row["steps"] = 3
+        del row["failure_reason"]
+        partial_rows.append(row)
+    partial_body = pickle.dumps((partial_rows, {}), protocol=4)
+    partial_prefix = struct.pack("!i", len(partial_body)) + partial_body[:32]
+    assert len(partial_body) > 64
+    worker_fds = []
+    partial_payload = None
+    partial_reads = 0
+    sibling_decodes = 0
+
+    def capture_worker_fd(*args, **kwargs):
+        sock = original_socket(*args, **kwargs)
+        if "fileno" in kwargs:
+            worker_fds.append(sock.fileno())
+        return sock
+
+    def partial_summary(conn, seed, per_stratum, indices, stride, split):
+        if indices[0] != 0:
+            return original(conn, seed, per_stratum, indices, stride, split)
+        conn.send(("reset_failures", []))
+        for _ in range(3):
+            assert conn.recv()[0] == "obs"
+            conn.send((indices, np.zeros((len(indices), ref.OBS_W), np.float32)))
+            assert conn.recv()[0] == "act"
+            conn.send(True)
+        assert conn.recv()[0] == "fail_all"
+        assert conn.recv()[0] == "summary"
+        # Send a legal frame prefix, then leave its remainder queued while the
+        # parent is busy decoding the sibling's complete summary.
+        conn._send(partial_prefix)
+        prefix_sent.set()
+        assert send_remainder.wait(10)
+        conn._send(partial_body[32:])
+        time.sleep(60)
+
+    def record_partial_read(fd, count):
+        nonlocal partial_reads, partial_payload
+        data = original_read(fd, count)
+        if data == partial_prefix and partial_payload is None:
+            partial_payload = data
+            assert len(worker_fds) == 2 and fd == worker_fds[0]
+            partial_reads += 1
+            prefix_read.set()
+        return data
+
+    def slow_sibling_decode(payload):
+        nonlocal sibling_decodes
+        value = original_loads(payload)
+        assert partial_payload != payload
+        if (
+            isinstance(value, tuple) and len(value) == 2
+            and isinstance(value[0], list) and value[0]
+            and isinstance(value[0][0], dict) and value[0][0].get("episode", 0) % 2 == 1
+        ):
+            sibling_decodes += 1
+            if sibling_decodes == 1:
+                assert prefix_sent.wait(10)
+                assert prefix_read.wait(10)
+                send_remainder.set()
+                time.sleep(0.3)
+        return value
+
+    monkeypatch.setattr(ref, "_worker", partial_summary)
+    monkeypatch.setattr(ref.socket, "socket", capture_worker_fd)
+    monkeypatch.setattr(ref.os, "read", record_partial_read)
+    monkeypatch.setattr(ref, "_limited_pickle_loads", slow_sibling_decode)
+    monkeypatch.setattr(ref.NistLiteReferee, "TRANSPORT_STALL_TIMEOUT_S", 0.2)
+    result, rows = _play(tmp_path, monkeypatch, "readable-before-stall", max_steps=3)
+    assert sibling_decodes == 1
+    assert partial_reads == 1
+    assert result.metadata["details"]["terminal_reasons"] == {"time_limit": 8}
+    assert all(row["steps"] == 3 for row in rows)
+    assert all(row["score"] == 0.0 for row in rows)
+
+
 def test_read_budget_boundary_starts_finite_stall_timer(tmp_path, monkeypatch):
     """A stopped partial frame cannot return from its read budget to poll(None)."""
     original = ref._worker

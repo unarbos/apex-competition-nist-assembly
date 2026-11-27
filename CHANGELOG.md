@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.5 — 2026-11-27
+
+- Read complete pending worker frames before applying the transport stall timeout,
+  preventing parent decode time from being counted against a mid-send worker.
+- Start intentionally mis-seated rework pegs above incompatible wrong-hole walls
+  instead of penetrating them; extraction, seating, and fallback validation remain
+  unchanged.
+- Add a 384-board reset-penetration regression and exact-zero/deterministic-record
+  checks for zero and random policies. Scoring, observation/action contracts,
+  milestone weights, task rules, the 920-action horizon, resources, and released
+  image digest pins remain unchanged.
+
 ## 0.8.4 — 2026-11-24
 
 - Accept the legitimate `done_at: -1` sentinel after a physical misseat, tied to

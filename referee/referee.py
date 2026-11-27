@@ -843,12 +843,9 @@ class NistLiteReferee(Referee):
                         return None
                     if frame is not _FRAME_INCOMPLETE:
                         return frame
-                    if (
-                        info["recv_buffer"] or info["recv_expected"] is not None
-                    ) and info["recv_stalled_since"] is not None:
-                        if time.monotonic() - info["recv_stalled_since"] >= self.TRANSPORT_STALL_TIMEOUT_S:
-                            fail_worker(w)
-                            return None
+                    # Drain bytes already waiting before charging elapsed parent
+                    # decode time to this peer. The shared stall deadline still
+                    # bounds a later readiness wait if this worker stops sending.
                     # A continuously readable peer must not monopolize the shared
                     # receive loop. Larger valid summaries continue on the next
                     # readiness pass.
@@ -962,6 +959,16 @@ class NistLiteReferee(Referee):
                                 ) if value is not None
                             )
                             if now - stalled_since >= self.TRANSPORT_STALL_TIMEOUT_S:
+                                # Decode time for a sibling can expire this
+                                # deadline after the worker's turn in this pass.
+                                # Retry its nonblocking receive before failing;
+                                # a complete queued reply clears the deadline.
+                                part = recv_worker(w)
+                                if part is not _FRAME_INCOMPLETE:
+                                    if part is not None:
+                                        replies[w] = part
+                                    pending.discard(w)
+                                    continue
                                 fail_worker(w)
                                 pending.discard(w)
                         continue
