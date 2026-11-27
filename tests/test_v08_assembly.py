@@ -1130,6 +1130,95 @@ def test_rework_spawn_never_penetrates_wrong_hole_or_earns_extraction(conds, boa
                 assert con.dist >= -1e-7
 
 
+def test_rework_spawn_matrix_has_no_initial_wrong_hole_penetration():
+    """384 public-development boards; check normal and safe-grid reset starts."""
+    import copy
+    import mujoco
+
+    boards = rework_targets = fallback_boards = 0
+    for seed in (7, 19, 31, 43, 59, 101):
+        _, conditions = sample_compound_v08(seed, 8, "live")
+        r1, _ = (np.random.default_rng(s) for s in episode_seed_sequence(seed, 0).spawn(2))
+        for episode, condition in enumerate(conditions):
+            boards += 1
+            ep = AssemblyIVEpisode(copy.deepcopy(condition), r1)
+            for fallback in (False, True):
+                if fallback:
+                    try:
+                        ep._teleport_safe_grid()
+                    except RuntimeError:
+                        # A separately validated negative-radius guard and crowded
+                        # boards can reject fallback before any part is placed.
+                        continue
+                    fallback_boards += 1
+                    mujoco.mj_forward(ep.model, ep.data)
+                assert ep.steps == 0
+                for i, wrong_slot in ep._rework_wrong.items():
+                    if not fallback:
+                        rework_targets += 1
+                    assert not ep._rework_extracted(i)
+                    assert not ep._extracted[i]
+                    for con in ep.data.contact[:ep.data.ncon]:
+                        bodies = {ep.model.geom_bodyid[con.geom1], ep.model.geom_bodyid[con.geom2]}
+                        names = [ep.model.geom(g).name for g in (con.geom1, con.geom2)]
+                        if ep.peg_body[i] in bodies and any(
+                            name.startswith(f"h{wrong_slot}_") for name in names
+                        ):
+                            assert con.dist >= -1e-7, (seed, episode, fallback, con.dist)
+    assert boards == 384
+    assert rework_targets > 250
+    # This public matrix deterministically constructs 355 fallbacks; 29
+    # crowded/invalid-radius boards take the separately tested rejection path.
+    assert fallback_boards == 355
+
+
+def _zero_random_episode_record(seed: int, episode: int, policy: str) -> dict:
+    """Public result fields only; no private dynamics or reserved material."""
+    import hashlib
+    from nist_sim.compound_v08 import step_results_v08
+    from obs_boundary_v08 import ObservationBoundary
+
+    _, conditions = sample_compound_v08(seed, 8, "live")
+    ss = episode_seed_sequence(seed, episode)
+    r1, r2 = (np.random.default_rng(s) for s in ss.spawn(2))
+    ep = AssemblyIVEpisode(conditions[episode], r1)
+    boundary = ObservationBoundary(ep)
+    while not boundary.done:
+        observation = boundary.observe(r2)
+        if policy == "zero":
+            action = np.zeros(5)
+        else:
+            rng = np.random.default_rng(int(ss.generate_state(1)[0]) ^ (episode * 0x9E3779B9) ^ ep.steps)
+            action = rng.uniform(-1.0, 1.0, 5)
+        boundary.step(action)
+    result = compound_score_v08(ep)
+    public_row = {
+        "episode": episode,
+        "score": result["score"],
+        "terminal_reason": ep.terminal_reason,
+        "steps": ep.steps,
+        "n_done": result["n_done"],
+        "n_in_order": result["n_in_order"],
+        "step_results": step_results_v08(ep),
+    }
+    public_row["record_sha256"] = hashlib.sha256(
+        json.dumps(public_row, sort_keys=True).encode()
+    ).hexdigest()
+    return public_row
+
+
+@pytest.mark.parametrize("seed", [7, 19, 31, 43])
+def test_zero_random_exact_zero_and_repeat_episode_hashes(seed):
+    for policy in ("zero", "random"):
+        for episode in range(2):
+            first = _zero_random_episode_record(seed, episode, policy)
+            repeat = _zero_random_episode_record(seed, episode, policy)
+            assert first == repeat
+            assert first["score"] == 0.0
+            assert first["n_done"] == first["n_in_order"] == 0
+            assert all(row["credit"] == 0.0 for row in first["step_results"])
+
+
 def test_mated_stack_still_requires_measured_ring_pose(conds, monkeypatch):
     from nist_sim.env import PEG_LEN
 
